@@ -19,8 +19,8 @@ import { decryptAccountPassword } from './accountCredentialService.js';
 import {
   isManagedSub2ApiTokenDue,
   isSub2ApiPlatform,
-  refreshSub2ApiManagedSession,
 } from './sub2apiManagedAuth.js';
+import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
@@ -192,7 +192,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     const managedAuth = getSub2ApiAuthFromExtraConfig(activeExtraConfig);
     if (managedAuth?.refreshToken && isManagedSub2ApiTokenDue(managedAuth.tokenExpiresAt)) {
       try {
-        const refreshed = await refreshSub2ApiManagedSession({
+        const refreshed = await refreshSub2ApiManagedSessionSingleflight({
           account,
           site,
           currentAccessToken: activeAccessToken,
@@ -214,7 +214,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
     if (canTryManagedSub2ApiRefresh) {
       try {
-        const refreshed = await refreshSub2ApiManagedSession({
+        const refreshed = await refreshSub2ApiManagedSessionSingleflight({
           account,
           site,
           currentAccessToken: activeAccessToken,

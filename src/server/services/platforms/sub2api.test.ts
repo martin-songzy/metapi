@@ -779,11 +779,17 @@ describe('Sub2ApiAdapter', () => {
   });
 
   it('checks in through POST /api/v1/check-in and reports the reward', async () => {
-    const seen: { method?: string; auth?: string } = {};
+    const seen: { method?: string; auth?: string; contentType?: string; body?: string } = {};
     await startServer((req, res) => {
       if (req.url === '/api/v1/check-in') {
         seen.method = req.method;
         seen.auth = req.headers.authorization;
+        seen.contentType = req.headers['content-type'];
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk) => chunks.push(chunk as Buffer));
+        req.on('end', () => {
+          seen.body = Buffer.concat(chunks).toString('utf8');
+        });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
           code: 0,
@@ -807,6 +813,9 @@ describe('Sub2ApiAdapter', () => {
 
     expect(seen.method).toBe('POST');
     expect(seen.auth).toBe('Bearer jwt-token');
+    // Sub2API stalls a POST that declares no body, so both must always be sent.
+    expect(seen.contentType).toBe('application/json');
+    expect(seen.body).toBe('{}');
     expect(result.success).toBe(true);
     expect(result.reward).toBe('388');
     expect(result.message).toContain('reward 388');

@@ -707,9 +707,15 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
   // --- Check-in: POST /api/v1/check-in (session JWT only) ---
   async checkin(baseUrl: string, accessToken: string): Promise<CheckinResult> {
     const endpoint = '/api/v1/check-in';
+    // Sub2API stalls a POST that declares no body, so always send an explicit
+    // Content-Type plus an empty JSON payload.
     const res = await this.fetchJson<any>(`${normalizeBaseUrl(baseUrl)}${endpoint}`, {
       method: 'POST',
-      headers: this.buildAuthHeader(accessToken),
+      headers: {
+        ...this.buildAuthHeader(accessToken),
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
     });
     const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
 
