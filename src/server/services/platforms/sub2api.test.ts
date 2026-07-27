@@ -76,8 +76,21 @@ describe('Sub2ApiAdapter', () => {
     expect(await adapter.detect(baseUrl)).toBe(false);
   });
 
-  it('returns unsupported for checkin', async () => {
-    const result = await adapter.checkin('http://localhost', 'token');
+  it('reports checkin as unsupported when the site disables it', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { enabled: false },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'token');
     expect(result.success).toBe(false);
     expect(result.message).toContain('not supported');
   });
@@ -763,5 +776,99 @@ describe('Sub2ApiAdapter', () => {
         },
       },
     ]);
+  });
+
+  it('checks in through POST /api/v1/check-in and reports the reward', async () => {
+    const seen: { method?: string; auth?: string } = {};
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in') {
+        seen.method = req.method;
+        seen.auth = req.headers.authorization;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            enabled: true,
+            checked_in_today: true,
+            current_streak: 11,
+            today_reward: 388,
+            already_checked_in: false,
+            reward_amount: 388,
+            balance_after: 7839.457977,
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(seen.method).toBe('POST');
+    expect(seen.auth).toBe('Bearer jwt-token');
+    expect(result.success).toBe(true);
+    expect(result.reward).toBe('388');
+    expect(result.message).toContain('reward 388');
+    expect(result.message).toContain('streak 11');
+  });
+
+  it('treats already_checked_in as an idempotent success without a reward', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: {
+            enabled: true,
+            checked_in_today: true,
+            already_checked_in: true,
+            reward_amount: 388,
+          },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(result.success).toBe(true);
+    expect(result.message).toContain('already checked in');
+    expect(result.reward).toBeUndefined();
+  });
+
+  it('reports check-in as unsupported when the site disables it', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 0,
+          message: 'success',
+          data: { enabled: false },
+        }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+    expect(result.success).toBe(false);
+    expect(result.message).toContain('not supported');
+  });
+
+  it('surfaces an expired session so the caller can refresh the managed token', async () => {
+    await startServer((req, res) => {
+      if (req.url === '/api/v1/check-in') {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ code: 'INVALID_TOKEN', message: 'Invalid token' }));
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    await expect(adapter.checkin(baseUrl, 'expired-jwt')).rejects.toThrow();
   });
 });

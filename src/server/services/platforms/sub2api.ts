@@ -19,7 +19,9 @@ function normalizeBaseUrl(baseUrl: string): string {
  * Sub2API adapter.
  *
  * Sub2API uses JWT-based auth with endpoints under /api/v1/*.
- * It does NOT support: login or check-in.
+ * It does NOT support password login: the sign-in page is gated by Cloudflare
+ * Turnstile, so expired sessions are renewed through the managed refresh token
+ * flow in `sub2apiManagedAuth.ts` instead.
  * Balance is derived from a USD amount returned by /api/v1/auth/me.
  */
 export class Sub2ApiAdapter extends BasePlatformAdapter {
@@ -702,12 +704,36 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     }
   }
 
-  // --- Check-in: Not supported ---
-  async checkin(
-    _baseUrl: string,
-    _accessToken: string,
-  ): Promise<CheckinResult> {
-    return { success: false, message: 'Check-in is not supported by Sub2API' };
+  // --- Check-in: POST /api/v1/check-in (session JWT only) ---
+  async checkin(baseUrl: string, accessToken: string): Promise<CheckinResult> {
+    const endpoint = '/api/v1/check-in';
+    const res = await this.fetchJson<any>(`${normalizeBaseUrl(baseUrl)}${endpoint}`, {
+      method: 'POST',
+      headers: this.buildAuthHeader(accessToken),
+    });
+    const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+
+    if (data?.enabled === false) {
+      return { success: false, message: 'Check-in is not supported by Sub2API' };
+    }
+
+    const reward = this.parseNonNegativeNumber(data?.reward_amount);
+    const rewardText = reward !== undefined && reward > 0 ? String(reward) : undefined;
+
+    // The upstream reports a duplicate attempt via already_checked_in while still
+    // echoing today's reward; treat it as success so the scheduler stays idempotent.
+    if (data?.already_checked_in === true) {
+      return { success: true, message: 'already checked in today' };
+    }
+
+    const streak = this.parsePositiveInteger(data?.current_streak);
+    const messageParts = ['check-in success'];
+    if (rewardText) messageParts.push(`reward ${rewardText}`);
+    if (streak) messageParts.push(`streak ${streak}`);
+
+    const result: CheckinResult = { success: true, message: messageParts.join(', ') };
+    if (rewardText) result.reward = rewardText;
+    return result;
   }
 
   // --- Balance ---

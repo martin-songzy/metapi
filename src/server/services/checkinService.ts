@@ -9,12 +9,18 @@ import { parseCheckinRewardAmount } from './checkinRewardParser.js';
 import {
   getAutoReloginConfig,
   getPlatformUserIdFromExtraConfig,
+  getSub2ApiAuthFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
   resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
+import {
+  isManagedSub2ApiTokenDue,
+  isSub2ApiPlatform,
+  refreshSub2ApiManagedSession,
+} from './sub2apiManagedAuth.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
 import { withAccountProxyOverride } from './siteProxy.js';
@@ -179,15 +185,53 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
 
   const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
   let activeAccessToken = account.accessToken;
+  let activeExtraConfig = account.extraConfig;
+
+  // Sub2API sessions are short-lived JWTs; refresh proactively before check-in.
+  if (isSub2ApiPlatform(site.platform)) {
+    const managedAuth = getSub2ApiAuthFromExtraConfig(activeExtraConfig);
+    if (managedAuth?.refreshToken && isManagedSub2ApiTokenDue(managedAuth.tokenExpiresAt)) {
+      try {
+        const refreshed = await refreshSub2ApiManagedSession({
+          account,
+          site,
+          currentAccessToken: activeAccessToken,
+          currentExtraConfig: activeExtraConfig,
+        });
+        activeAccessToken = refreshed.accessToken;
+        activeExtraConfig = refreshed.extraConfig;
+      } catch {}
+    }
+  }
+
   let result = await withAccountProxyOverride(accountProxyUrl,
     () => adapter.checkin(site.url, activeAccessToken, platformUserId));
 
   if (!result.success && shouldAttemptAutoRelogin(result.message)) {
-    const refreshedAccessToken = await tryAutoRelogin(account, site);
-    if (refreshedAccessToken) {
-      activeAccessToken = refreshedAccessToken;
-      result = await withAccountProxyOverride(accountProxyUrl,
-        () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+    const canTryManagedSub2ApiRefresh =
+      isSub2ApiPlatform(site.platform)
+      && !!getSub2ApiAuthFromExtraConfig(activeExtraConfig)?.refreshToken;
+
+    if (canTryManagedSub2ApiRefresh) {
+      try {
+        const refreshed = await refreshSub2ApiManagedSession({
+          account,
+          site,
+          currentAccessToken: activeAccessToken,
+          currentExtraConfig: activeExtraConfig,
+        });
+        activeAccessToken = refreshed.accessToken;
+        activeExtraConfig = refreshed.extraConfig;
+        result = await withAccountProxyOverride(accountProxyUrl,
+          () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+      } catch {}
+    } else {
+      const refreshedAccessToken = await tryAutoRelogin(account, site);
+      if (refreshedAccessToken) {
+        activeAccessToken = refreshedAccessToken;
+        result = await withAccountProxyOverride(accountProxyUrl,
+          () => adapter.checkin(site.url, activeAccessToken, platformUserId));
+      }
     }
   }
 
@@ -225,7 +269,10 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
       updates.lastCheckinAt = new Date().toISOString();
     }
     if (!storedPlatformUserId && guessedPlatformUserId) {
-      updates.extraConfig = mergeAccountExtraConfig(account.extraConfig, {
+      // Merge into the live extra config: a managed sub2api refresh may have
+      // already rotated and persisted a new one-time refresh token, and
+      // merging into the stale snapshot would clobber it.
+      updates.extraConfig = mergeAccountExtraConfig(activeExtraConfig, {
         platformUserId: guessedPlatformUserId,
       });
     }
