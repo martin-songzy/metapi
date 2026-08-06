@@ -25,6 +25,12 @@ services:
         sync: false
       - key: DB_SSL
         value: "true"
+      # Render's free plan caps outbound bandwidth, and both background passes
+      # below talk to the external database even while the service is idle.
+      - key: ADMIN_SNAPSHOT_WARM_INTERVAL_MS
+        value: "0"
+      - key: USAGE_PROJECTION_INTERVAL_MS
+        value: "120000"
       - key: CHECKIN_CRON
         value: "0 8 * * *"
       - key: BALANCE_REFRESH_CRON

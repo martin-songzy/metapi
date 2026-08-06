@@ -1,6 +1,7 @@
 import { and, asc, eq, gt, gte, isNull, lte, or, sql } from 'drizzle-orm';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
+import { config } from '../config.js';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { fallbackTokenCost } from './modelPricingService.js';
 import {
@@ -16,7 +17,6 @@ import { clearSnapshotCache } from './snapshotCacheService.js';
 const USAGE_PROJECTOR_KEY = 'usage-aggregates-v1';
 const PROJECTION_BATCH_SIZE = 1_000;
 const PROJECTION_MAX_BATCHES_PER_PASS = 120;
-const PROJECTION_INTERVAL_MS = 5_000;
 const PROJECTION_LEASE_MS = 10 * 60_000;
 
 type ProjectionCheckpointRow = typeof schema.analyticsProjectionCheckpoints.$inferSelect;
@@ -872,12 +872,14 @@ export async function requestUsageAggregatesRecompute(fromLogId = 1): Promise<vo
   });
 }
 
-export function startUsageAggregationProjectorScheduler() {
+export function startUsageAggregationProjectorScheduler(
+  intervalMs = config.usageProjectionIntervalMs,
+) {
   if (projectionTimer) return;
   void runUsageAggregationProjectionPass();
   projectionTimer = setInterval(() => {
     void runUsageAggregationProjectionPass();
-  }, PROJECTION_INTERVAL_MS);
+  }, Math.max(1_000, Math.trunc(intervalMs || 0)));
 }
 
 export async function stopUsageAggregationProjectorScheduler() {

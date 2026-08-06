@@ -22,6 +22,14 @@ function parseNumber(value: string | undefined, fallback: number): number {
   return parsed;
 }
 
+// 0 disables warming; any other value is clamped to a sane floor so a typo
+// cannot turn the warm pass into a tight loop.
+function normalizeAdminSnapshotWarmIntervalMs(value: number): number {
+  const truncated = Math.trunc(value);
+  if (truncated <= 0) return 0;
+  return Math.max(5_000, truncated);
+}
+
 function parseCsvList(value: string | undefined): string[] {
   if (!value) return [];
   return value
@@ -147,6 +155,12 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),
     modelAvailabilityProbeTimeoutMs: Math.max(3_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS, 15_000))),
     modelAvailabilityProbeConcurrency: Math.max(1, Math.min(16, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_CONCURRENCY, 1)))),
+    // Set to 0 to disable the background warm pass entirely (useful on
+    // bandwidth-capped hosts, where warming costs traffic even while idle).
+    adminSnapshotWarmIntervalMs: normalizeAdminSnapshotWarmIntervalMs(
+      parseNumber(env.ADMIN_SNAPSHOT_WARM_INTERVAL_MS, 20_000),
+    ),
+    usageProjectionIntervalMs: Math.max(1_000, Math.trunc(parseNumber(env.USAGE_PROJECTION_INTERVAL_MS, 5_000))),
     proxyLogRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_DAYS, 30))),
     proxyLogRetentionPruneIntervalMinutes: Math.max(1, Math.trunc(parseNumber(env.PROXY_LOG_RETENTION_PRUNE_INTERVAL_MINUTES, 30))),
     proxyFileRetentionDays: Math.max(0, Math.trunc(parseNumber(env.PROXY_FILE_RETENTION_DAYS, 30))),

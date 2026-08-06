@@ -1,3 +1,4 @@
+import { config } from "../config.js";
 import { getAccountsSnapshot } from "./accountsOverviewService.js";
 import { deleteExpiredAdminSnapshots } from "./adminSnapshotStore.js";
 import {
@@ -7,7 +8,6 @@ import {
 import { getSiteStatsSnapshot } from "./siteStatsSnapshotService.js";
 import { runUsageAggregationProjectionPass } from "./usageAggregationService.js";
 
-const ADMIN_SNAPSHOT_WARM_INTERVAL_MS = 20_000;
 const ADMIN_SNAPSHOT_PRUNE_EVERY_PASSES = 6;
 
 type SnapshotWarmTarget = {
@@ -18,6 +18,7 @@ type SnapshotWarmTarget = {
 let adminSnapshotWarmTimer: ReturnType<typeof setInterval> | null = null;
 let adminSnapshotWarmInFlight: Promise<void> | null = null;
 let completedWarmPassCount = 0;
+let activeWarmIntervalMs = 0;
 
 const snapshotWarmTargets: SnapshotWarmTarget[] = [
   {
@@ -76,12 +77,24 @@ export async function warmAdminSnapshotsOnce(): Promise<void> {
   return adminSnapshotWarmInFlight;
 }
 
-export function startAdminSnapshotWarmScheduler() {
-  if (adminSnapshotWarmTimer) return;
+export function startAdminSnapshotWarmScheduler(
+  intervalMs = config.adminSnapshotWarmIntervalMs,
+) {
+  if (adminSnapshotWarmTimer) {
+    return { enabled: true, intervalMs: activeWarmIntervalMs };
+  }
+  // Snapshots are still computed on demand when a dashboard request arrives,
+  // so disabling the warm pass only costs first-paint latency.
+  if (intervalMs <= 0) {
+    return { enabled: false, intervalMs: 0 };
+  }
+
   void warmAdminSnapshotsOnce();
   adminSnapshotWarmTimer = setInterval(() => {
     void warmAdminSnapshotsOnce();
-  }, ADMIN_SNAPSHOT_WARM_INTERVAL_MS);
+  }, intervalMs);
+  activeWarmIntervalMs = intervalMs;
+  return { enabled: true, intervalMs };
 }
 
 export async function stopAdminSnapshotWarmScheduler() {
@@ -89,6 +102,7 @@ export async function stopAdminSnapshotWarmScheduler() {
     clearInterval(adminSnapshotWarmTimer);
     adminSnapshotWarmTimer = null;
   }
+  activeWarmIntervalMs = 0;
   if (adminSnapshotWarmInFlight) {
     await adminSnapshotWarmInFlight;
   }
