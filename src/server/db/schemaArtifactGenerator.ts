@@ -56,7 +56,22 @@ function resolveMysqlIndexPrefix(
   return column ? escapeMysqlTextPrefix(column.logicalType) : '';
 }
 
-function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaContractColumn): string {
+// MySQL TEXT caps at 64 KiB while SQLite/Postgres TEXT is unbounded, so columns
+// that hold whole serialized documents need LONGTEXT to stay portable.
+const MYSQL_LARGE_TEXT_COLUMNS: Record<string, ReadonlySet<string>> = {
+  admin_snapshots: new Set(['payload']),
+};
+
+function isMysqlLargeTextColumn(tableName: string, columnName: string): boolean {
+  return MYSQL_LARGE_TEXT_COLUMNS[tableName]?.has(columnName) ?? false;
+}
+
+function mapColumnType(
+  dialect: SqlDialect,
+  columnName: string,
+  column: SchemaContractColumn,
+  tableName?: string,
+): string {
   if (dialect === 'sqlite') {
     switch (column.logicalType) {
       case 'boolean':
@@ -85,7 +100,8 @@ function mapColumnType(dialect: SqlDialect, columnName: string, column: SchemaCo
       case 'json':
         return 'JSON';
       case 'text':
-        return column.primaryKey || column.defaultValue != null ? 'VARCHAR(191)' : 'TEXT';
+        if (column.primaryKey || column.defaultValue != null) return 'VARCHAR(191)';
+        return tableName && isMysqlLargeTextColumn(tableName, columnName) ? 'LONGTEXT' : 'TEXT';
       default:
         return 'TEXT';
     }
@@ -134,8 +150,9 @@ function buildColumnDefinition(
   dialect: SqlDialect,
   columnName: string,
   column: SchemaContractColumn,
+  tableName?: string,
 ): string {
-  const sqlType = mapColumnType(dialect, columnName, column);
+  const sqlType = mapColumnType(dialect, columnName, column, tableName);
   const notNull = column.notNull ? ' NOT NULL' : '';
   const defaultValue = formatDefaultValue(dialect, column);
   const primaryKey = column.primaryKey ? ' PRIMARY KEY' : '';
@@ -194,7 +211,7 @@ function buildCreateTableStatement(
   const columnEntries = Object.entries(table.columns);
   const foreignKeys = contract.foreignKeys.filter((foreignKey) => foreignKey.table === tableName);
   const parts = [
-    ...columnEntries.map(([columnName, column]) => buildColumnDefinition(dialect, columnName, column)),
+    ...columnEntries.map(([columnName, column]) => buildColumnDefinition(dialect, columnName, column, tableName)),
     ...foreignKeys.map((foreignKey) => buildForeignKeyClause(dialect, foreignKey)),
   ];
   return `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(dialect, tableName)} (${parts.join(', ')})`;
@@ -345,7 +362,7 @@ function buildAddColumnStatement(
   columnName: string,
   column: SchemaContractColumn,
 ): string {
-  return `ALTER TABLE ${quoteIdentifier(dialect, tableName)} ADD COLUMN ${buildColumnDefinition(dialect, columnName, column)}`;
+  return `ALTER TABLE ${quoteIdentifier(dialect, tableName)} ADD COLUMN ${buildColumnDefinition(dialect, columnName, column, tableName)}`;
 }
 
 export function generateUpgradeSql(

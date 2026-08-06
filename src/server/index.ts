@@ -73,6 +73,7 @@ import {
   ensureProxyFileCompatibilityColumns,
   ensureProxyLogClientColumns,
   ensureProxyLogDownstreamApiKeyIdColumn,
+  ensureAdminSnapshotPayloadLongText,
   ensureProxyLogBillingDetailsColumn,
   ensureProxyLogStreamTimingColumns,
   ensureRouteGroupingCompatibilityColumns,
@@ -186,6 +187,7 @@ try {
     config.logCleanupRetentionDays = normalizeLogCleanupRetentionDays(config.proxyLogRetentionDays);
   }
   await ensureProxyLogBillingDetailsColumn();
+  await ensureAdminSnapshotPayloadLongText();
   await repairStoredCreatedAtValues();
   await migrateSiteApiKeysToAccounts();
   await ensureDefaultSitesSeeded();

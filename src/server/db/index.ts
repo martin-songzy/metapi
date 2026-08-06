@@ -701,6 +701,33 @@ function isDuplicateIndexError(error: unknown): boolean {
     || lowered.includes('duplicate index');
 }
 
+// MySQL TEXT tops out at 64 KiB, which truncates larger dashboard snapshots and
+// fails the write outright. Databases created before the contract emitted
+// LONGTEXT still carry the narrow column, so widen it in place.
+export async function ensureAdminSnapshotPayloadLongText(): Promise<boolean> {
+  if (runtimeDbDialect !== 'mysql') return true;
+  if (!mysqlPool) return false;
+
+  try {
+    const [rows] = await mysqlPool.query('SHOW COLUMNS FROM `admin_snapshots` LIKE ?', ['payload']);
+    const currentType = Array.isArray(rows) && rows.length > 0
+      ? String((rows[0] as { Type?: unknown }).Type || '').toLowerCase()
+      : '';
+    if (!currentType || currentType.includes('longtext')) return true;
+
+    await executeLegacyCompat(
+      (statement) => mysqlPool!.query(statement).then(() => undefined),
+      'ALTER TABLE `admin_snapshots` MODIFY COLUMN `payload` LONGTEXT NOT NULL',
+    );
+    return true;
+  } catch (error) {
+    console.warn(
+      `[db] Failed to widen admin_snapshots.payload to LONGTEXT: ${(error as Error)?.message || 'unknown error'}`,
+    );
+    return false;
+  }
+}
+
 export async function hasProxyLogBillingDetailsColumn(): Promise<boolean> {
   if (proxyLogBillingDetailsColumnAvailable !== null) {
     return proxyLogBillingDetailsColumnAvailable;
