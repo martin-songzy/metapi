@@ -34,4 +34,4 @@ services:
       - key: CHECKIN_CRON
         value: "0 8 * * *"
       - key: BALANCE_REFRESH_CRON
-        value: "0 * * * *"
+        value: "0 */6 * * *"
