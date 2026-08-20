@@ -26,6 +26,49 @@ function toStoredPayload(rawPayload: unknown): string | null {
   }
 }
 
+type StoredAnnouncementPatch = {
+  platform: string;
+  title: string;
+  content: string;
+  level: string;
+  sourceUrl: string | null;
+  startsAt: string | null;
+  endsAt: string | null;
+  upstreamCreatedAt: string | null;
+  upstreamUpdatedAt: string | null;
+  rawPayload: string | null;
+};
+
+function normalizeComparableAnnouncementValue(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  return String(value);
+}
+
+// Compares everything the sync would persist except the seen marker, which
+// changes on every poll by design.
+function isSameStoredAnnouncement(
+  existing: typeof schema.siteAnnouncements.$inferSelect,
+  patch: StoredAnnouncementPatch,
+): boolean {
+  const comparedKeys = [
+    'platform',
+    'title',
+    'content',
+    'level',
+    'sourceUrl',
+    'startsAt',
+    'endsAt',
+    'upstreamCreatedAt',
+    'upstreamUpdatedAt',
+    'rawPayload',
+  ] as const;
+
+  return comparedKeys.every((key) => (
+    normalizeComparableAnnouncementValue((existing as Record<string, unknown>)[key])
+      === normalizeComparableAnnouncementValue(patch[key])
+  ));
+}
+
 function buildAnnouncementMessage(row: SiteAnnouncement): string {
   const title = String(row.title || '').trim();
   const content = String(row.content || '').trim();
@@ -118,6 +161,19 @@ export async function syncSiteAnnouncements(options?: { siteId?: number | null }
         };
 
         if (existing) {
+          // Announcements almost never change once published, so rewriting all
+          // eleven columns (including the whole rawPayload blob) on every poll
+          // is pure write amplification. Refresh only the seen marker unless
+          // the upstream content actually differs.
+          if (isSameStoredAnnouncement(existing, patch)) {
+            await db.update(schema.siteAnnouncements)
+              .set({ lastSeenAt: seenAt })
+              .where(eq(schema.siteAnnouncements.id, existing.id))
+              .run();
+            result.updated += 1;
+            continue;
+          }
+
           await db.update(schema.siteAnnouncements)
             .set(patch)
             .where(eq(schema.siteAnnouncements.id, existing.id))

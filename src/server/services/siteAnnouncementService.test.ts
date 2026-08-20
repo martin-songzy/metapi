@@ -189,4 +189,46 @@ describe('siteAnnouncementService', () => {
     expect(eventRows).toHaveLength(1);
     expect(sendNotificationMock).toHaveBeenCalledTimes(1);
   });
+
+  it('rewrites the stored row when upstream announcement content changes', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'Sub Site',
+      url: 'https://sub.example.com',
+      platform: 'sub2api',
+      status: 'active',
+    }).returning().get();
+    await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'demo-user',
+      accessToken: 'jwt-token',
+      status: 'active',
+    }).run();
+
+    let upstreamContent = 'Window starts at 10:00';
+    let upstreamPayload: Record<string, unknown> = { id: 11, revision: 1 };
+    getAdapterMock.mockReturnValue({
+      getSiteAnnouncements: vi.fn(async () => [{
+        sourceKey: 'announcement:11',
+        title: 'Maintenance',
+        content: upstreamContent,
+        level: 'info',
+        rawPayload: upstreamPayload,
+      }]),
+    });
+
+    vi.setSystemTime(new Date('2026-03-20T10:00:00Z'));
+    await syncSiteAnnouncements({ siteId: site.id });
+
+    upstreamContent = 'Window moved to 14:00';
+    upstreamPayload = { id: 11, revision: 2 };
+    vi.setSystemTime(new Date('2026-03-20T11:00:00Z'));
+    const result = await syncSiteAnnouncements({ siteId: site.id });
+
+    expect(result).toMatchObject({ inserted: 0, updated: 1, failed: 0 });
+
+    const rows = await db.select().from(schema.siteAnnouncements).all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.content).toBe('Window moved to 14:00');
+    expect(String(rows[0]?.rawPayload || '')).toContain('"revision":2');
+  });
 });
