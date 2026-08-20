@@ -1,4 +1,5 @@
 import { and, eq, gt, inArray, isNotNull } from 'drizzle-orm';
+import { config } from '../config.js';
 import { db, schema } from '../db/index.js';
 import { isUsableAccountToken } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
@@ -18,7 +19,6 @@ type RecoveryProbeCandidate = {
   site: typeof schema.sites.$inferSelect;
 };
 
-const CHANNEL_RECOVERY_SWEEP_INTERVAL_MS = 30_000;
 const CHANNEL_RECOVERY_PROBE_TIMEOUT_MS = 12_000;
 // Keep recovery probes conservative so they do not look like bulk health checks to upstream providers.
 const CHANNEL_RECOVERY_PROBE_CONCURRENCY = 1;
@@ -266,7 +266,7 @@ export async function runChannelRecoveryProbeSweep(nowMs = Date.now()): Promise<
   await recoveryProbeSweepInFlight;
 }
 
-export function startChannelRecoveryProbeScheduler(intervalMs = CHANNEL_RECOVERY_SWEEP_INTERVAL_MS) {
+export function startChannelRecoveryProbeScheduler(intervalMs = config.channelRecoveryProbeIntervalMs) {
   stopChannelRecoveryProbeScheduler();
   const safeIntervalMs = Math.max(10_000, Math.trunc(intervalMs || 0));
   recoveryProbeSchedulerTimer = setInterval(() => {

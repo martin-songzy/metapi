@@ -163,7 +163,10 @@ function createBalanceTask(cronExpr: string) {
     console.log(`[Scheduler] Refreshing balances at ${new Date().toISOString()}`);
     try {
       await refreshAllBalances();
-      await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
+      // Model discovery and route rebuilding only matter when routing is in use.
+      if (config.proxyRoutingEnabled) {
+        await routeRefreshWorkflow.refreshModelsAndRebuildRoutes();
+      }
       console.log('[Scheduler] Balance refresh complete');
     } catch (err) {
       console.error('[Scheduler] Balance refresh error:', err);

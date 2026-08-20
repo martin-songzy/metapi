@@ -155,6 +155,14 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     modelAvailabilityProbeIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_INTERVAL_MS, 30 * 60 * 1000))),
     modelAvailabilityProbeTimeoutMs: Math.max(3_000, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_TIMEOUT_MS, 15_000))),
     modelAvailabilityProbeConcurrency: Math.max(1, Math.min(16, Math.trunc(parseNumber(env.MODEL_AVAILABILITY_PROBE_CONCURRENCY, 1)))),
+    // Routing (proxy channel selection) can be switched off wholesale for
+    // deployments that only use site management and check-in. This skips the
+    // routing background maintenance, which is the bulk of the idle database
+    // load: route rebuilds, availability probes, recovery sweeps and usage
+    // projection. Existing routes are left untouched.
+    proxyRoutingEnabled: parseBoolean(env.PROXY_ROUTING_ENABLED, true),
+    channelRecoveryProbeIntervalMs: Math.max(10_000, Math.trunc(parseNumber(env.CHANNEL_RECOVERY_PROBE_INTERVAL_MS, 30_000))),
+    siteAnnouncementPollIntervalMs: Math.max(60_000, Math.trunc(parseNumber(env.SITE_ANNOUNCEMENT_POLL_INTERVAL_MS, 15 * 60 * 1000))),
     // Set to 0 to disable the background warm pass entirely (useful on
     // bandwidth-capped hosts, where warming costs traffic even while idle).
     adminSnapshotWarmIntervalMs: normalizeAdminSnapshotWarmIntervalMs(

@@ -192,7 +192,9 @@ try {
   await migrateSiteApiKeysToAccounts();
   await ensureDefaultSitesSeeded();
   await ensureOauthIdentityBackfill();
-  await routeRefreshWorkflow.rebuildRoutesOnly();
+  if (config.proxyRoutingEnabled) {
+    await routeRefreshWorkflow.rebuildRoutesOnly();
+  }
 
   console.log('Loaded runtime settings overrides');
 } catch (error) {
@@ -265,13 +267,22 @@ if (existsSync(webDir)) {
 // Start scheduler
 await startScheduler();
 await reloadBackupWebdavScheduler();
-startSiteAnnouncementPolling();
-startModelAvailabilityProbeScheduler();
-startChannelRecoveryProbeScheduler();
+startSiteAnnouncementPolling(config.siteAnnouncementPollIntervalMs);
+if (config.proxyRoutingEnabled) {
+  startModelAvailabilityProbeScheduler();
+  startChannelRecoveryProbeScheduler();
+  startUsageAggregationProjectorScheduler();
+} else {
+  console.log('[Routing] disabled via PROXY_ROUTING_ENABLED=false: skipping route rebuild, availability probes, recovery sweeps and usage projection');
+}
 startSub2ApiManagedRefreshScheduler();
 startUpdateCenterPolling();
-startUsageAggregationProjectorScheduler();
-startAdminSnapshotWarmScheduler();
+const adminSnapshotWarmStatus = startAdminSnapshotWarmScheduler();
+console.log(
+  adminSnapshotWarmStatus.enabled
+    ? `[AdminSnapshotWarm] enabled, interval=${adminSnapshotWarmStatus.intervalMs}ms`
+    : '[AdminSnapshotWarm] disabled via ADMIN_SNAPSHOT_WARM_INTERVAL_MS=0 (dashboard snapshots are built on demand)',
+);
 try {
   await startOAuthLoopbackCallbackServers();
 } catch (error) {

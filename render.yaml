@@ -31,6 +31,12 @@ services:
         value: "0"
       - key: USAGE_PROJECTION_INTERVAL_MS
         value: "120000"
+      # This deployment only uses site management and check-in, so all routing
+      # background maintenance is off. Turn this back on before proxying /v1/*.
+      - key: PROXY_ROUTING_ENABLED
+        value: "false"
+      - key: SITE_ANNOUNCEMENT_POLL_INTERVAL_MS
+        value: "3600000"
       - key: CHECKIN_CRON
         value: "0 8 * * *"
       - key: BALANCE_REFRESH_CRON

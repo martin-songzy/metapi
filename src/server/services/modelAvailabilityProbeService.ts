@@ -415,6 +415,16 @@ export function queueModelAvailabilityProbeTask(input: {
 
 export function startModelAvailabilityProbeScheduler(intervalMs = config.modelAvailabilityProbeIntervalMs) {
   stopModelAvailabilityProbeScheduler();
+  // Availability probing exists to feed route building, so it stays off while
+  // routing is disabled -- otherwise toggling it in the UI would quietly
+  // bypass PROXY_ROUTING_ENABLED.
+  if (!config.proxyRoutingEnabled) {
+    console.log('[ModelAvailabilityProbe] not started: routing is disabled via PROXY_ROUTING_ENABLED=false');
+    return {
+      enabled: false,
+      intervalMs: 0,
+    };
+  }
   if (!config.modelAvailabilityProbeEnabled) {
     return {
       enabled: false,
