@@ -238,6 +238,134 @@ describe('probeRuntimeModel', () => {
     });
   });
 
+  it('lets the dedicated probe user-agent override site custom headers', async () => {
+    const siteWithCustomUserAgent = {
+      ...site,
+      customHeaders: JSON.stringify({ 'user-agent': 'site-agent' }),
+    };
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockImplementation(async (input: {
+      buildInit: (requestUrl: string, request: Record<string, unknown>) => Promise<RequestInit>;
+      request: Record<string, unknown>;
+      targetUrl?: string;
+    }) => {
+      const init = await input.buildInit(
+        input.targetUrl || 'https://probe.example.com/v1/chat/completions',
+        input.request,
+      );
+      expect(new Headers(init.headers).get('user-agent')).toBe('probe-agent');
+      return new Response(JSON.stringify({
+        choices: [{ message: { content: 'OK' } }],
+      }), { status: 200 });
+    });
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    await probeRuntimeModel({
+      site: siteWithCustomUserAgent,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+      userAgent: 'probe-agent',
+    });
+  });
+
+  it('does not report an endpoint when request building throws', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    buildUpstreamEndpointRequestMock.mockImplementation(() => {
+      throw new Error('request builder failed');
+    });
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+    });
+
+    expect(result).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'network',
+      httpStatus: null,
+      endpointUsed: null,
+    });
+  });
+
+  it('keeps a 403 response inconclusive as an authentication failure', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response('forbidden', { status: 403 }));
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+    });
+
+    expect(result).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'auth',
+      httpStatus: 403,
+      endpointUsed: 'chat',
+    });
+  });
+
+  it('keeps a 5xx response inconclusive as an upstream failure', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response('gateway error', { status: 502 }));
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+    });
+
+    expect(result).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'upstream',
+      httpStatus: 502,
+      endpointUsed: 'chat',
+    });
+  });
+
+  it('reports an aborted request as a timeout and passes the probe abort signal', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockImplementation(async (input: {
+      buildInit: (requestUrl: string, request: Record<string, unknown>) => Promise<RequestInit>;
+      request: Record<string, unknown>;
+      targetUrl?: string;
+    }) => {
+      const init = await input.buildInit(
+        input.targetUrl || 'https://probe.example.com/v1/chat/completions',
+        input.request,
+      );
+      const signal = init.signal as AbortSignal;
+      expect(signal).toBeInstanceOf(AbortSignal);
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+      throw new Error('unreachable');
+    });
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 1,
+    });
+
+    expect(result).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'timeout',
+      httpStatus: null,
+      endpointUsed: 'chat',
+    });
+  });
+
   it('uses prompt and user-agent options with a single forced endpoint candidate', async () => {
     dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
       content: [{ type: 'text', text: 'OK' }],

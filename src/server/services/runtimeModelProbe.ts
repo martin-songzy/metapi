@@ -209,7 +209,6 @@ export async function probeRuntimeModel(input: {
     abortTimer.unref?.();
 
     const buildRequest = (endpoint: UpstreamEndpoint): BuiltEndpointRequest => {
-      endpointUsed = endpoint;
       const request = buildUpstreamEndpointRequest({
         endpoint,
         modelName: input.modelName,
@@ -224,6 +223,7 @@ export async function probeRuntimeModel(input: {
         downstreamHeaders,
         providerHeaders,
       });
+      endpointUsed = endpoint;
       return {
         endpoint,
         path: request.path,
@@ -244,7 +244,10 @@ export async function probeRuntimeModel(input: {
           input.site,
           {
             method: 'POST',
-            headers: requestForFetch.headers,
+            headers: {
+              ...requestForFetch.headers,
+              ...(input.userAgent?.trim() ? { 'user-agent': input.userAgent.trim() } : {}),
+            },
             body: JSON.stringify(requestForFetch.body),
             signal: abortController.signal,
           },
