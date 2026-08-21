@@ -20,12 +20,27 @@ const userAgentPresetSchema = z.object({
   value: z.string().max(MAX_PROBE_USER_AGENT_LENGTH),
 });
 
+/**
+ * Caps mirror the ones the config service applies to a hand-edited settings row,
+ * so the API path and the direct-write path are bounded the same way.
+ * `interestPatterns` uses the shared filter's 50/200 limits.
+ */
+const MAX_INTEREST_PATTERN_COUNT = 50;
+const MAX_INTEREST_PATTERN_LENGTH = 200;
+const MAX_PROMPT_COUNT = 50;
+const MAX_PROMPT_LENGTH = 2_000;
+const MAX_ERROR_KEYWORD_COUNT = 50;
+const MAX_ERROR_KEYWORD_LENGTH = 200;
+const MAX_USER_AGENT_PRESET_COUNT = 20;
+
 const modelProbeConfigPayloadSchema = z.object({
-  interestPatterns: z.array(z.string()).optional(),
-  prompts: z.array(z.string()).optional(),
-  userAgents: z.array(userAgentPresetSchema).optional(),
+  interestPatterns: z.array(z.string().max(MAX_INTEREST_PATTERN_LENGTH))
+    .max(MAX_INTEREST_PATTERN_COUNT).optional(),
+  prompts: z.array(z.string().max(MAX_PROMPT_LENGTH)).max(MAX_PROMPT_COUNT).optional(),
+  userAgents: z.array(userAgentPresetSchema).max(MAX_USER_AGENT_PRESET_COUNT).optional(),
   defaultUserAgentId: z.string().trim().optional(),
-  errorKeywords: z.array(z.string()).optional(),
+  errorKeywords: z.array(z.string().max(MAX_ERROR_KEYWORD_LENGTH))
+    .max(MAX_ERROR_KEYWORD_COUNT).optional(),
   concurrency: probeConcurrencySchema.optional(),
   timeoutMs: probeTimeoutSchema.optional(),
   syncToRouting: z.boolean().optional(),
@@ -56,7 +71,7 @@ const explicitModelsSchema = z.array(z.string())
     for (const entry of models) {
       const model = entry.trim();
       if (!model) continue;
-      const dedupeKey = model.toLocaleLowerCase();
+      const dedupeKey = model.toLowerCase();
       if (seen.has(dedupeKey)) continue;
       seen.add(dedupeKey);
       normalized.push(model);
@@ -74,11 +89,21 @@ const modelProbeRunPayloadSchema = z.object({
 
 export const MODEL_PROBE_RESULT_STATUSES = ['supported', 'unsupported', 'inconclusive', 'skipped'] as const;
 
+/**
+ * A cleared UI filter serializes as an empty param (`?siteId=&status=`), and
+ * `.optional()` alone does not accept `''` — it would 400 the whole listing. So a
+ * blank string collapses to `undefined`, meaning "no filter", rather than erroring.
+ */
+const blankToUndefined = <S extends z.ZodTypeAny>(schema: S) => z.preprocess(
+  (value) => (typeof value === 'string' && value.trim() === '' ? undefined : value),
+  schema.optional(),
+);
+
 const optionalQueryNumber = z.union([z.number(), z.string()])
   .transform((value, ctx) => {
     const numeric = typeof value === 'number' ? value : Number(value.trim());
     if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric <= 0) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Expected a positive integer.' });
+      ctx.addIssue({ code: 'custom', message: 'Expected a positive integer.' });
       return z.NEVER;
     }
     return numeric;
@@ -90,9 +115,9 @@ const optionalQueryNumber = z.union([z.number(), z.string()])
  * results listing over one of those would be a pointless failure.
  */
 const modelProbeResultsQuerySchema = z.object({
-  siteId: optionalQueryNumber.optional(),
-  status: z.enum(MODEL_PROBE_RESULT_STATUSES).optional(),
-  limit: optionalQueryNumber.pipe(z.number().max(500)).optional(),
+  siteId: blankToUndefined(optionalQueryNumber),
+  status: blankToUndefined(z.enum(MODEL_PROBE_RESULT_STATUSES)),
+  limit: blankToUndefined(optionalQueryNumber.pipe(z.number().max(500))),
 });
 
 export type ModelProbeConfigPayload = z.output<typeof modelProbeConfigPayloadSchema>;

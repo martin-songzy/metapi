@@ -29,8 +29,61 @@ describe('parseModelProbeConfigPayload', () => {
     expect(result.data.syncToRouting).toBe(true);
   });
 
-  it('accepts an empty object so partial updates stay possible', () => {
+  it('accepts an empty object, which the service then treats as a full reset to defaults', () => {
+    // Every field is optional here, but saveModelProbeConfig replaces the whole
+    // config rather than merging, so an API route must spread a patch over the
+    // loaded config instead of passing a partial body straight through.
     const result = parseModelProbeConfigPayload({});
+    expect(result.success).toBe(true);
+  });
+
+  it('caps list sizes and per-entry lengths', () => {
+    const tooManyPrompts = parseModelProbeConfigPayload({
+      prompts: Array.from({ length: 51 }, (_unused, index) => `prompt ${index}`),
+    });
+    expect(tooManyPrompts.success).toBe(false);
+    if (!tooManyPrompts.success) expect(tooManyPrompts.error).toContain('prompts');
+
+    const longPrompt = parseModelProbeConfigPayload({ prompts: ['a'.repeat(2001)] });
+    expect(longPrompt.success).toBe(false);
+
+    const tooManyPatterns = parseModelProbeConfigPayload({
+      interestPatterns: Array.from({ length: 51 }, (_unused, index) => `model-${index}`),
+    });
+    expect(tooManyPatterns.success).toBe(false);
+    if (!tooManyPatterns.success) expect(tooManyPatterns.error).toContain('interestPatterns');
+
+    const longPattern = parseModelProbeConfigPayload({ interestPatterns: ['a'.repeat(201)] });
+    expect(longPattern.success).toBe(false);
+
+    const tooManyKeywords = parseModelProbeConfigPayload({
+      errorKeywords: Array.from({ length: 51 }, (_unused, index) => `keyword-${index}`),
+    });
+    expect(tooManyKeywords.success).toBe(false);
+    if (!tooManyKeywords.success) expect(tooManyKeywords.error).toContain('errorKeywords');
+
+    const tooManyPresets = parseModelProbeConfigPayload({
+      userAgents: Array.from({ length: 21 }, (_unused, index) => ({
+        id: `preset-${index}`,
+        label: `Preset ${index}`,
+        value: 'agent/1.0',
+      })),
+    });
+    expect(tooManyPresets.success).toBe(false);
+    if (!tooManyPresets.success) expect(tooManyPresets.error).toContain('userAgents');
+  });
+
+  it('accepts lists exactly at the caps', () => {
+    const result = parseModelProbeConfigPayload({
+      interestPatterns: Array.from({ length: 50 }, (_unused, index) => `model-${index}`),
+      prompts: Array.from({ length: 50 }, (_unused, index) => `prompt ${index}`),
+      errorKeywords: Array.from({ length: 50 }, (_unused, index) => `keyword-${index}`),
+      userAgents: Array.from({ length: 20 }, (_unused, index) => ({
+        id: `preset-${index}`,
+        label: `Preset ${index}`,
+        value: 'agent/1.0',
+      })),
+    });
     expect(result.success).toBe(true);
   });
 
@@ -85,7 +138,7 @@ describe('parseModelProbeConfigPayload', () => {
       new URL('./modelProbePayloads.ts', import.meta.url),
       'utf8',
     );
-    expect(source).not.toMatch(/from '\.\.\/db\//);
+    expect(source).not.toMatch(/from '(\.\.\/db\/|@db\/)/);
     expect(source).not.toMatch(/upsertSetting|drizzle-orm/);
   });
 });
@@ -189,6 +242,23 @@ describe('parseModelProbeResultsQuery', () => {
     expect(result.data.siteId).toBeUndefined();
     expect(result.data.status).toBeUndefined();
     expect(result.data.limit).toBeUndefined();
+  });
+
+  it('treats a cleared filter serialized as an empty param as no filter', () => {
+    for (const query of [{ siteId: '' }, { status: '' }, { limit: '' }, { siteId: '   ' }]) {
+      const result = parseModelProbeResultsQuery(query);
+      expect(result.success).toBe(true);
+      if (!result.success) continue;
+      expect(result.data.siteId).toBeUndefined();
+      expect(result.data.status).toBeUndefined();
+      expect(result.data.limit).toBeUndefined();
+    }
+  });
+
+  it('parses a fully blank filter set the way a reset UI form would send it', () => {
+    const result = parseModelProbeResultsQuery({ siteId: '', status: '', limit: '' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toEqual({});
   });
 
   it('ignores unrelated query params instead of failing the listing', () => {

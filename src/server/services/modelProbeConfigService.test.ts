@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -81,17 +82,65 @@ describe('modelProbeConfigService', () => {
       expect(service.getDefaultModelProbeConfig().syncToRouting).toBe(false);
     });
 
-    it('defaults to the conservative shared error keyword list', () => {
+    it('defaults to model-absence error keywords only', () => {
       expect(service.getDefaultModelProbeConfig().errorKeywords).toEqual([
+        'no available channel',
+        '无可用渠道',
+        'no such model',
+        'model not found',
+        'model_not_found',
+        '模型不存在',
+        '模型不可用',
+        '不支持的模型',
+      ]);
+    });
+
+    it('excludes billing, capacity and permission wording from the defaults', () => {
+      // The classifier maps ANY keyword hit to `unsupported`, so an account-level
+      // or transient phrase would mark every model at a rate-limited or
+      // out-of-balance site unavailable — and with syncToRouting on, write those
+      // verdicts into site_disabled_models. Such responses must stay inconclusive.
+      const keywords = service.getDefaultModelProbeConfig().errorKeywords;
+      for (const transientPhrase of [
         'insufficient',
         'quota',
-        '余额不足',
-        '无可用渠道',
-        'no available channel',
         'rate limit',
+        '余额不足',
         '当前分组上游负载已饱和',
         '无权限',
-      ]);
+      ]) {
+        expect(keywords).not.toContain(transientPhrase);
+      }
+    });
+
+    it('keeps every default keyword a model-absence phrase the classifier can safely act on', async () => {
+      const { classifySuccessfulProbeResponse } = await import('./modelProbeResponseClassifier.js');
+      const { errorKeywords } = service.getDefaultModelProbeConfig();
+
+      for (const keyword of errorKeywords) {
+        const classification = classifySuccessfulProbeResponse({
+          endpoint: 'chat',
+          rawBody: JSON.stringify({ choices: [{ message: { content: '' } }], detail: keyword }),
+          errorKeywords,
+        });
+        expect(classification.status).toBe('unsupported');
+      }
+    });
+
+    it('leaves an out-of-balance response inconclusive under the default keywords', async () => {
+      const { classifySuccessfulProbeResponse } = await import('./modelProbeResponseClassifier.js');
+      const { errorKeywords } = service.getDefaultModelProbeConfig();
+
+      const classification = classifySuccessfulProbeResponse({
+        endpoint: 'chat',
+        rawBody: JSON.stringify({
+          choices: [{ message: { content: '' } }],
+          detail: '当前分组上游负载已饱和，或余额不足 (insufficient quota), please retry',
+        }),
+        errorKeywords,
+      });
+
+      expect(classification.status).toBe('inconclusive');
     });
 
     it('returns a fresh object each call so callers cannot mutate the defaults', () => {
@@ -147,16 +196,62 @@ describe('modelProbeConfigService', () => {
       expect(config.errorKeywords).toEqual(['Quota']);
     });
 
-    it('dedupes prompts case-sensitively but patterns and keywords case-insensitively', () => {
+    it('dedupes patterns and prompts case-sensitively but keywords case-insensitively', () => {
       const config = service.normalizeModelProbeConfig({
         interestPatterns: ['GPT-5', 'gpt-5'],
         prompts: ['Name one color.', 'name one color.'],
-        errorKeywords: ['Rate Limit', 'rate limit'],
+        errorKeywords: ['Model Not Found', 'model not found'],
       });
 
-      expect(config.interestPatterns).toEqual(['GPT-5']);
+      expect(config.interestPatterns).toEqual(['GPT-5', 'gpt-5']);
       expect(config.prompts).toEqual(['Name one color.', 'name one color.']);
-      expect(config.errorKeywords).toEqual(['Rate Limit']);
+      expect(config.errorKeywords).toEqual(['Model Not Found']);
+    });
+
+    it('keeps regexes that differ only by escape case, which are semantically opposite', () => {
+      // A lowercased dedupe key would collapse these pairs and silently drop one.
+      const config = service.normalizeModelProbeConfig({
+        interestPatterns: ['^\\d+$', '^\\D+$', 'a\\bb', 'a\\Bb', '\\w+', '\\W+', '\\s', '\\S'],
+      });
+
+      expect(config.interestPatterns).toEqual([
+        '^\\d+$', '^\\D+$', 'a\\bb', 'a\\Bb', '\\w+', '\\W+', '\\s', '\\S',
+      ]);
+    });
+
+    it('bounds a hand-edited settings row: prompts, keywords and presets are capped', () => {
+      const config = service.normalizeModelProbeConfig({
+        prompts: Array.from({ length: 80 }, (_unused, index) => `prompt ${index}`),
+        errorKeywords: Array.from({ length: 80 }, (_unused, index) => `keyword-${index}`),
+        userAgents: Array.from({ length: 40 }, (_unused, index) => ({
+          id: `preset-${index}`,
+          label: `Preset ${index}`,
+          value: 'agent/1.0',
+        })),
+      });
+
+      expect(config.prompts).toHaveLength(50);
+      expect(config.errorKeywords).toHaveLength(50);
+      expect(config.userAgents).toHaveLength(20);
+    });
+
+    it('drops over-long prompt and keyword entries', () => {
+      const config = service.normalizeModelProbeConfig({
+        prompts: ['ok prompt', 'a'.repeat(2001)],
+        errorKeywords: ['ok keyword', 'b'.repeat(201)],
+      });
+
+      expect(config.prompts).toEqual(['ok prompt']);
+      expect(config.errorKeywords).toEqual(['ok keyword']);
+    });
+
+    it('leaves interest patterns untruncated so save-time validation can still reject them', () => {
+      // compileInterestPatterns owns the 50/200 caps and reports violations;
+      // truncating here would hide the 51st pattern from that check.
+      const config = service.normalizeModelProbeConfig({
+        interestPatterns: Array.from({ length: 60 }, (_unused, index) => `model-${index}`),
+      });
+      expect(config.interestPatterns).toHaveLength(60);
     });
 
     it('honours an explicitly emptied list instead of restoring defaults', () => {
@@ -175,20 +270,6 @@ describe('modelProbeConfigService', () => {
       const config = service.normalizeModelProbeConfig({ concurrency: 5 });
       expect(config.defaultUserAgentId).toBe('claude-code');
       expect(config.userAgents).toEqual(service.getDefaultModelProbeConfig().userAgents);
-    });
-
-    it('keeps normalization independent from the routing tables', async () => {
-      const previous = process.env.PROXY_ROUTING_ENABLED;
-      process.env.PROXY_ROUTING_ENABLED = 'false';
-      try {
-        const saved = await service.saveModelProbeConfig({ interestPatterns: ['gpt-5'] });
-        expect(saved.interestPatterns).toEqual(['gpt-5']);
-        expect(saved.syncToRouting).toBe(false);
-        expect((await service.loadModelProbeConfig()).interestPatterns).toEqual(['gpt-5']);
-      } finally {
-        if (previous === undefined) delete process.env.PROXY_ROUTING_ENABLED;
-        else process.env.PROXY_ROUTING_ENABLED = previous;
-      }
     });
 
     it('dedupes duplicate preset ids, keeping the first occurrence', () => {
@@ -280,6 +361,20 @@ describe('modelProbeConfigService', () => {
       expect(rows).toHaveLength(0);
     });
 
+    it('throws a discriminable validation error so a route can answer 400 rather than 500', async () => {
+      const error = await service.saveModelProbeConfig({ interestPatterns: ['([unclosed'] })
+        .then(() => null, (thrown: unknown) => thrown);
+
+      expect(error).toBeInstanceOf(service.ModelProbeConfigValidationError);
+      expect(service.isModelProbeConfigValidationError(error)).toBe(true);
+      expect(service.isModelProbeConfigValidationError(new Error('unrelated'))).toBe(false);
+
+      const validationError = error as InstanceType<typeof service.ModelProbeConfigValidationError>;
+      expect(validationError.name).toBe('ModelProbeConfigValidationError');
+      expect(validationError.invalidPatterns.map((entry) => entry.source)).toEqual(['([unclosed']);
+      expect(validationError.invalidPatterns[0]?.reason).toBeTruthy();
+    });
+
     it('rejects a pattern list that exceeds the shared caps', async () => {
       await expect(service.saveModelProbeConfig({ interestPatterns: ['a'.repeat(201)] }))
         .rejects.toThrow(/200 characters/);
@@ -292,6 +387,52 @@ describe('modelProbeConfigService', () => {
     it('accepts valid regex patterns unchanged', async () => {
       const saved = await service.saveModelProbeConfig({ interestPatterns: ['^gpt-5.*$', 'claude-(opus|sonnet)'] });
       expect(saved.interestPatterns).toEqual(['^gpt-5.*$', 'claude-(opus|sonnet)']);
+    });
+  });
+
+  describe('routing independence', () => {
+    // A test that flips process.env.PROXY_ROUTING_ENABLED would be a no-op:
+    // config.ts evaluates buildConfig(process.env) once at import, before any test
+    // body runs. So assert the property structurally over the source instead, the
+    // same way modelProbePayloads.test.ts and db/returning.architecture.test.ts do.
+    it('imports nothing from the routing stack, so config works with PROXY_ROUTING_ENABLED=false', async () => {
+      const source = await readFile(
+        new URL('./modelProbeConfigService.ts', import.meta.url),
+        'utf8',
+      );
+      // Strip comments: the assertion is about code, and the doc comments
+      // legitimately name these modules to explain why they are absent.
+      const code = source
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+
+      const forbidden = [
+        'tokenRouter',
+        'routeRefresh',
+        'routeDecision',
+        'routeCooldown',
+        'route_channels',
+        'token_routes',
+      ];
+
+      const importSpecifiers = [...code.matchAll(/from\s+'([^']+)'/g)].map((match) => match[1]);
+      expect(importSpecifiers.length).toBeGreaterThan(0);
+      for (const specifier of importSpecifiers) {
+        for (const name of forbidden) {
+          expect(specifier).not.toContain(name);
+        }
+      }
+
+      for (const name of forbidden) {
+        expect(code).not.toContain(name);
+      }
+    });
+
+    it('saves and loads without consulting any routing state', async () => {
+      const saved = await service.saveModelProbeConfig({ interestPatterns: ['gpt-5'] });
+      expect(saved.interestPatterns).toEqual(['gpt-5']);
+      expect(saved.syncToRouting).toBe(false);
+      await expect(service.loadModelProbeConfig()).resolves.toEqual(saved);
     });
   });
 
