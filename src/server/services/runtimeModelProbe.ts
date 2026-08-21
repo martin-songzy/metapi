@@ -3,6 +3,11 @@ import { buildOauthProviderHeaders } from './oauth/service.js';
 import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from './siteProxy.js';
 import { dispatchRuntimeRequest } from './runtimeDispatch.js';
 import {
+  classifySuccessfulProbeResponse,
+  type ModelProbeFailureKind,
+} from './modelProbeResponseClassifier.js';
+import { readRuntimeResponseText } from '../proxy-core/executors/types.js';
+import {
   buildUpstreamEndpointRequest,
   resolveUpstreamEndpointCandidates,
   type UpstreamEndpoint,
@@ -16,6 +21,16 @@ export type RuntimeModelProbeResult = {
   status: RuntimeModelProbeStatus;
   latencyMs: number | null;
   reason: string;
+  httpStatus: number | null;
+  failureKind: ModelProbeFailureKind | null;
+  endpointUsed: UpstreamEndpoint | null;
+};
+
+export type RuntimeModelProbeOptions = {
+  prompt?: string;
+  userAgent?: string;
+  forcedEndpoint?: UpstreamEndpoint;
+  errorKeywords?: string[];
 };
 
 const NON_CONVERSATION_MODEL_PATTERNS = [
@@ -52,19 +67,30 @@ function isLikelyConversationModel(modelName: string): boolean {
 }
 
 function classifyUnsupportedFailure(status: number, rawErrorText: string): boolean {
-  if (![400, 403, 404, 422].includes(status)) return false;
+  if (![400, 404, 422].includes(status)) return false;
   const normalized = String(rawErrorText || '').trim();
   if (!normalized) return false;
   return DEFINITE_UNSUPPORTED_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
-function buildProbeBody(modelName: string): Record<string, unknown> {
+function classifyFailureKind(status: number, rawErrorText: string, error?: unknown): ModelProbeFailureKind {
+  const message = error instanceof Error ? error.message : '';
+  if (/timeout|aborted|abort/i.test(message) || status === 408) return 'timeout';
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 429) return 'rate_limit';
+  if (classifyUnsupportedFailure(status, rawErrorText)) return 'model_missing';
+  if (status >= 500) return 'upstream';
+  if (status > 0) return 'upstream';
+  return 'network';
+}
+
+function buildProbeBody(modelName: string, prompt?: string): Record<string, unknown> {
   return {
     model: modelName,
     messages: [
       {
         role: 'user',
-        content: 'Reply with OK.',
+        content: prompt?.trim() || 'Reply with OK.',
       },
     ],
     max_tokens: 8,
@@ -101,12 +127,19 @@ export async function probeRuntimeModel(input: {
   modelName: string;
   timeoutMs: number;
   tokenValue?: string | null;
-}): Promise<RuntimeModelProbeResult> {
+} & RuntimeModelProbeOptions): Promise<RuntimeModelProbeResult> {
+  const emptyMetadata = {
+    httpStatus: null,
+    failureKind: null,
+    endpointUsed: null,
+  } as const;
+
   if (!isLikelyConversationModel(input.modelName)) {
     return {
       status: 'skipped',
       latencyMs: null,
       reason: 'skipped non-conversation model probe',
+      ...emptyMetadata,
     };
   }
 
@@ -121,41 +154,49 @@ export async function probeRuntimeModel(input: {
       status: 'inconclusive',
       latencyMs: null,
       reason: 'missing credential for probe',
+      ...emptyMetadata,
     };
   }
 
   const startedAt = Date.now();
   const deadlineAtMs = startedAt + Math.max(1, input.timeoutMs);
+  let endpointUsed: UpstreamEndpoint | null = null;
   try {
-    const endpointCandidates = await withTimeout(
-      () => resolveUpstreamEndpointCandidates(
-        {
-          site: input.site,
-          account: input.account,
-        },
-        input.modelName,
-        'openai',
-        input.modelName,
-      ),
-      resolveRemainingTimeoutMs(
-        deadlineAtMs,
+    const endpointCandidates = input.forcedEndpoint
+      ? [input.forcedEndpoint]
+      : await withTimeout(
+        () => resolveUpstreamEndpointCandidates(
+          {
+            site: input.site,
+            account: input.account,
+          },
+          input.modelName,
+          'openai',
+          input.modelName,
+        ),
+        resolveRemainingTimeoutMs(
+          deadlineAtMs,
+          `runtime model probe candidate resolution timeout (${Math.round(input.timeoutMs / 1000)}s)`,
+        ),
         `runtime model probe candidate resolution timeout (${Math.round(input.timeoutMs / 1000)}s)`,
-      ),
-      `runtime model probe candidate resolution timeout (${Math.round(input.timeoutMs / 1000)}s)`,
-    );
+      );
     if (endpointCandidates.length <= 0) {
       return {
         status: 'inconclusive',
         latencyMs: Date.now() - startedAt,
         reason: 'no compatible probe endpoint candidates',
+        ...emptyMetadata,
       };
     }
 
+    const downstreamHeaders = input.userAgent?.trim()
+      ? { 'user-agent': input.userAgent.trim() }
+      : {};
     const providerHeaders = buildOauthProviderHeaders({
       account: input.account,
-      downstreamHeaders: {},
+      downstreamHeaders,
     });
-    const openaiBody = buildProbeBody(input.modelName);
+    const openaiBody = buildProbeBody(input.modelName, input.prompt);
     const channelProxyUrl = resolveChannelProxyUrl(input.site, input.account.extraConfig);
     const abortController = new AbortController();
     const remainingExecutionTimeoutMs = resolveRemainingTimeoutMs(
@@ -168,6 +209,7 @@ export async function probeRuntimeModel(input: {
     abortTimer.unref?.();
 
     const buildRequest = (endpoint: UpstreamEndpoint): BuiltEndpointRequest => {
+      endpointUsed = endpoint;
       const request = buildUpstreamEndpointRequest({
         endpoint,
         modelName: input.modelName,
@@ -179,7 +221,7 @@ export async function probeRuntimeModel(input: {
         siteUrl: input.site.url,
         openaiBody,
         downstreamFormat: 'openai',
-        downstreamHeaders: {},
+        downstreamHeaders,
         providerHeaders,
       });
       return {
@@ -219,6 +261,12 @@ export async function probeRuntimeModel(input: {
         endpointCandidates,
         buildRequest,
         dispatchRequest,
+        onAttemptSuccess: (context) => {
+          endpointUsed = context.request.endpoint;
+        },
+        onAttemptFailure: (context) => {
+          endpointUsed = context.request.endpoint;
+        },
       });
     } finally {
       clearTimeout(abortTimer);
@@ -226,25 +274,41 @@ export async function probeRuntimeModel(input: {
     const latencyMs = Date.now() - startedAt;
 
     if (result.ok) {
-      await result.upstream.text().catch(() => undefined);
+      const rawBody = await readRuntimeResponseText(result.upstream);
+      const classification = classifySuccessfulProbeResponse({
+        endpoint: endpointUsed || 'chat',
+        rawBody,
+        errorKeywords: input.errorKeywords,
+      });
       return {
-        status: 'supported',
+        status: classification.status,
         latencyMs,
-        reason: 'probe succeeded',
+        reason: classification.reason,
+        httpStatus: result.upstream.status,
+        failureKind: classification.failureKind,
+        endpointUsed,
       };
     }
 
     const rawErrorText = String(result.rawErrText || result.errText || '').trim();
+    const status = result.status || 0;
+    const unsupported = classifyUnsupportedFailure(status, rawErrorText);
     return {
-      status: classifyUnsupportedFailure(result.status || 0, rawErrorText) ? 'unsupported' : 'inconclusive',
+      status: unsupported ? 'unsupported' : 'inconclusive',
       latencyMs,
-      reason: rawErrorText || `probe failed with status ${result.status || 0}`,
+      reason: rawErrorText || `probe failed with status ${status}`,
+      httpStatus: status || null,
+      failureKind: unsupported ? 'model_missing' : classifyFailureKind(status, rawErrorText),
+      endpointUsed,
     };
   } catch (error) {
     return {
       status: 'inconclusive',
       latencyMs: Date.now() - startedAt,
       reason: error instanceof Error ? error.message : 'probe failed',
+      ...emptyMetadata,
+      failureKind: classifyFailureKind(0, '', error),
+      endpointUsed,
     };
   }
 }
