@@ -26,7 +26,7 @@
   <img alt="License" src="https://img.shields.io/badge/license-MIT-brightgreen?style=flat">
 </a><img alt="Node.js" src="https://img.shields.io/badge/Node.js-22.15%2B-339933?logo=node.js&style=flat"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat"><a href="https://zeabur.com/templates/DOX5PR">
   <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
-</a><a href="https://render.com/deploy?repo=https://github.com/cita-777/metapi">
+</a><a href="https://render.com/deploy?repo=https://github.com/martin-songzy/metapi">
   <img alt="Deploy to Render" src="https://render.com/images/deploy-to-render-button.svg" height="28">
 </a>
 </p>
@@ -283,7 +283,7 @@
 <a href="https://zeabur.com/templates/DOX5PR">
   <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
 </a>
-<a href="https://render.com/deploy?repo=https://github.com/cita-777/metapi">
+<a href="https://render.com/deploy?repo=https://github.com/martin-songzy/metapi">
   <img alt="Deploy to Render" src="https://render.com/images/deploy-to-render-button.svg" height="28">
 </a>
 
