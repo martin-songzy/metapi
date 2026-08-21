@@ -244,6 +244,10 @@ describe('probeRuntimeModel', () => {
       customHeaders: JSON.stringify({ 'user-agent': 'site-agent' }),
     };
     resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    withSiteRecordProxyRequestInitMock.mockImplementation(async (_site: unknown, init: RequestInit) => ({
+      ...init,
+      headers: { ...init.headers as Record<string, string>, 'user-agent': 'site-agent' },
+    }));
     dispatchRuntimeRequestMock.mockImplementation(async (input: {
       buildInit: (requestUrl: string, request: Record<string, unknown>) => Promise<RequestInit>;
       request: Record<string, unknown>;
@@ -333,6 +337,11 @@ describe('probeRuntimeModel', () => {
 
   it('reports an aborted request as a timeout and passes the probe abort signal', async () => {
     resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    let observedSignal: AbortSignal | undefined;
+    let dispatchEnteredResolve: (() => void) | undefined;
+    const dispatchEntered = new Promise<void>((resolve) => {
+      dispatchEnteredResolve = resolve;
+    });
     dispatchRuntimeRequestMock.mockImplementation(async (input: {
       buildInit: (requestUrl: string, request: Record<string, unknown>) => Promise<RequestInit>;
       request: Record<string, unknown>;
@@ -343,7 +352,9 @@ describe('probeRuntimeModel', () => {
         input.request,
       );
       const signal = init.signal as AbortSignal;
+      observedSignal = signal;
       expect(signal).toBeInstanceOf(AbortSignal);
+      dispatchEnteredResolve?.();
       await new Promise<void>((_resolve, reject) => {
         signal.addEventListener('abort', () => reject(signal.reason), { once: true });
       });
@@ -351,13 +362,16 @@ describe('probeRuntimeModel', () => {
     });
 
     const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
-    const result = await probeRuntimeModel({
+    const probe = probeRuntimeModel({
       site,
       account,
       modelName: 'gpt-5.4',
-      timeoutMs: 1,
+      timeoutMs: 40,
     });
+    await dispatchEntered;
+    const result = await probe;
 
+    expect(observedSignal?.aborted).toBe(true);
     expect(result).toMatchObject({
       status: 'inconclusive',
       failureKind: 'timeout',

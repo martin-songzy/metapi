@@ -240,19 +240,26 @@ export async function probeRuntimeModel(input: {
         siteUrl: input.site.url,
         targetUrl,
         request,
-        buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(
-          input.site,
-          {
-            method: 'POST',
-            headers: {
-              ...requestForFetch.headers,
-              ...(input.userAgent?.trim() ? { 'user-agent': input.userAgent.trim() } : {}),
+        buildInit: async (_requestUrl, requestForFetch) => {
+          const init = await withSiteRecordProxyRequestInit(
+            input.site,
+            {
+              method: 'POST',
+              headers: requestForFetch.headers,
+              body: JSON.stringify(requestForFetch.body),
+              signal: abortController.signal,
             },
-            body: JSON.stringify(requestForFetch.body),
-            signal: abortController.signal,
-          },
-          channelProxyUrl,
-        ),
+            channelProxyUrl,
+          );
+          const probeUserAgent = input.userAgent?.trim();
+          if (!probeUserAgent) return init;
+
+          const headers = new Headers(
+            init.headers ? Object.entries(init.headers as Record<string, string>) : undefined,
+          );
+          headers.set('user-agent', probeUserAgent);
+          return { ...init, headers };
+        },
       })
     );
 
