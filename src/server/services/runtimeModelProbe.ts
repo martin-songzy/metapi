@@ -254,9 +254,7 @@ export async function probeRuntimeModel(input: {
           const probeUserAgent = input.userAgent?.trim();
           if (!probeUserAgent) return init;
 
-          const headers = new Headers(
-            init.headers ? Object.entries(init.headers as Record<string, string>) : undefined,
-          );
+          const headers = new Headers(init.headers as HeadersInit | undefined);
           headers.set('user-agent', probeUserAgent);
           return { ...init, headers };
         },

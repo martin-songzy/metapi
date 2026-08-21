@@ -244,9 +244,20 @@ describe('probeRuntimeModel', () => {
       customHeaders: JSON.stringify({ 'user-agent': 'site-agent' }),
     };
     resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
-    withSiteRecordProxyRequestInitMock.mockImplementation(async (_site: unknown, init: RequestInit) => ({
-      ...init,
-      headers: { ...init.headers as Record<string, string>, 'user-agent': 'site-agent' },
+    const sentinelBody = JSON.stringify({ retained: true });
+    const sentinelSignal = new AbortController().signal;
+    const sentinelDispatcher = { name: 'probe-dispatcher' };
+    withSiteRecordProxyRequestInitMock.mockImplementation(async () => ({
+      method: 'POST',
+      headers: new Headers({
+        authorization: 'Bearer x',
+        'content-type': 'application/json',
+        'user-agent': 'site-agent',
+        'x-site': '1',
+      }),
+      body: sentinelBody,
+      signal: sentinelSignal,
+      dispatcher: sentinelDispatcher,
     }));
     dispatchRuntimeRequestMock.mockImplementation(async (input: {
       buildInit: (requestUrl: string, request: Record<string, unknown>) => Promise<RequestInit>;
@@ -257,7 +268,14 @@ describe('probeRuntimeModel', () => {
         input.targetUrl || 'https://probe.example.com/v1/chat/completions',
         input.request,
       );
-      expect(new Headers(init.headers).get('user-agent')).toBe('probe-agent');
+      const headers = new Headers(init.headers);
+      expect(headers.get('user-agent')).toBe('probe-agent');
+      expect(headers.get('authorization')).toBe('Bearer x');
+      expect(headers.get('content-type')).toBe('application/json');
+      expect(headers.get('x-site')).toBe('1');
+      expect(init.body).toBe(sentinelBody);
+      expect(init.signal).toBe(sentinelSignal);
+      expect((init as RequestInit & { dispatcher?: unknown }).dispatcher).toBe(sentinelDispatcher);
       return new Response(JSON.stringify({
         choices: [{ message: { content: 'OK' } }],
       }), { status: 200 });
