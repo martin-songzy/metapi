@@ -11,6 +11,17 @@ export type SiteApiEndpointField = {
   lastFailureReason?: string | null;
 };
 
+/**
+ * Mirrors MODEL_PROBE_ENDPOINT_TYPES in
+ * src/server/contracts/modelProbePayloads.ts. Inlined rather than imported
+ * because web pages must not import server modules (same reason
+ * `postRefreshProbeScope` inlines its union below); the server contract is the
+ * authority and rejects anything this list does not cover.
+ */
+export const SITE_PROBE_ENDPOINT_TYPES = ['auto', 'chat', 'messages', 'responses'] as const;
+
+export type SiteProbeEndpointType = (typeof SITE_PROBE_ENDPOINT_TYPES)[number];
+
 export type SiteForm = {
   name: string;
   url: string;
@@ -21,6 +32,8 @@ export type SiteForm = {
   apiEndpoints: SiteApiEndpointField[];
   customHeaders: SiteCustomHeaderField[];
   globalWeight: string;
+  probeEndpointType: SiteProbeEndpointType;
+  probeUserAgent: string;
 };
 
 export type SiteEditorState =
@@ -46,6 +59,10 @@ export type SiteSavePayload = {
   postRefreshProbeModel?: string;
   postRefreshProbeScope?: 'single' | 'all';
   postRefreshProbeLatencyThresholdMs?: number;
+  // Optional so callers that do not edit the probe profile omit them, which the
+  // server reads as "leave the stored profile alone".
+  probeEndpointType?: SiteProbeEndpointType;
+  probeUserAgent?: string;
 };
 
 type SiteSaveAction =
@@ -80,7 +97,13 @@ export function emptySiteForm(): SiteForm {
     apiEndpoints: [emptySiteApiEndpoint()],
     customHeaders: [emptySiteCustomHeader()],
     globalWeight: '1',
+    probeEndpointType: 'auto',
+    probeUserAgent: '',
   };
+}
+
+function normalizeProbeEndpointTypeForEditor(raw: unknown): SiteProbeEndpointType {
+  return SITE_PROBE_ENDPOINT_TYPES.find((candidate) => candidate === raw) ?? 'auto';
 }
 
 function ensureSiteApiEndpointRows(rows: SiteApiEndpointField[]): SiteApiEndpointField[] {
@@ -131,7 +154,7 @@ function parseApiEndpointsForEditor(raw: unknown): SiteApiEndpointField[] {
   return ensureSiteApiEndpointRows(rows);
 }
 
-export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy'>> & {
+export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy' | 'probeEndpointType' | 'probeUserAgent'>> & {
   externalCheckinUrl?: string | null;
   proxyUrl?: string | null;
   useSystemProxy?: boolean | null;
@@ -143,6 +166,10 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
   }> | null;
   customHeaders?: string | null;
   globalWeight?: number | string | null;
+  // Widened to string: a row written before these columns existed, or edited by
+  // hand, can hold anything, so the editor normalizes instead of trusting it.
+  probeEndpointType?: string | null;
+  probeUserAgent?: string | null;
 }): SiteForm {
   const globalWeightRaw = Number(site.globalWeight);
   const globalWeight = Number.isFinite(globalWeightRaw) && globalWeightRaw > 0 ? String(globalWeightRaw) : '1';
@@ -156,6 +183,8 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     apiEndpoints: parseApiEndpointsForEditor(site.apiEndpoints),
     customHeaders: parseCustomHeadersForEditor(site.customHeaders),
     globalWeight,
+    probeEndpointType: normalizeProbeEndpointTypeForEditor(site.probeEndpointType),
+    probeUserAgent: site.probeUserAgent ?? '',
   };
 }
 

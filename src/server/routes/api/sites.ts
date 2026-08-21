@@ -15,6 +15,7 @@ import {
   parseSiteDisabledModelsPayload,
   parseSiteUpdatePayload,
 } from '../../contracts/siteRoutePayloads.js';
+import type { ModelProbeEndpointType } from '../../contracts/modelProbePayloads.js';
 import { getSiteInitializationPreset } from '../../../shared/siteInitializationPresets.js';
 import { normalizeSiteApiEndpointBaseUrl } from '../../services/siteApiEndpointService.js';
 import { analyzePrimarySiteUrl } from '../../../shared/sitePrimaryUrl.js';
@@ -60,6 +61,33 @@ function normalizeGlobalWeight(input: unknown): number | null {
   const parsed = Number(input);
   if (!Number.isFinite(parsed) || parsed <= 0) return null;
   return Math.max(0.01, Math.min(100, Number(parsed.toFixed(3))));
+}
+
+/**
+ * Single normalizer for the per-site probe request profile, shared by create and
+ * update so neither path can persist a shape the other would reject.
+ *
+ * The Zod contract already rejected bad values and trimmed the User-Agent, so
+ * this only distinguishes "absent" from "present". `present: false` leaves the
+ * stored profile alone on update and lets the column defaults apply on create.
+ */
+function normalizeSiteProbeProfileInput(input: {
+  probeEndpointType?: ModelProbeEndpointType;
+  probeUserAgent?: string;
+}): {
+  endpointType: { present: boolean; value: ModelProbeEndpointType };
+  userAgent: { present: boolean; value: string };
+} {
+  return {
+    endpointType: {
+      present: input.probeEndpointType !== undefined,
+      value: input.probeEndpointType ?? 'auto',
+    },
+    userAgent: {
+      present: input.probeUserAgent !== undefined,
+      value: input.probeUserAgent ?? '',
+    },
+  };
 }
 
 function normalizeOptionalExternalCheckinUrl(input: unknown): {
@@ -479,6 +507,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       globalWeight,
       apiEndpoints,
     } = createBody;
+    const probeProfile = normalizeSiteProbeProfileInput(createBody);
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
@@ -565,6 +594,8 @@ export async function sitesRoutes(app: FastifyInstance) {
           isPinned: normalizedPinned ?? false,
           sortOrder: normalizedSortOrder ?? (maxSortOrder + 1),
           globalWeight: normalizedGlobalWeight ?? 1,
+          probeEndpointType: probeProfile.endpointType.value,
+          probeUserAgent: probeProfile.userAgent.value,
         }).run();
         const siteId = getInsertedRowId(siteInsert);
         if (siteId && normalizedApiEndpoints.present && normalizedApiEndpoints.apiEndpoints.length > 0) {
@@ -696,6 +727,9 @@ export async function sitesRoutes(app: FastifyInstance) {
       const ms = Number(anyBody.postRefreshProbeLatencyThresholdMs);
       updates.postRefreshProbeLatencyThresholdMs = Number.isFinite(ms) && ms >= 0 ? Math.trunc(ms) : 0;
     }
+    const probeProfile = normalizeSiteProbeProfileInput(body);
+    if (probeProfile.endpointType.present) updates.probeEndpointType = probeProfile.endpointType.value;
+    if (probeProfile.userAgent.present) updates.probeUserAgent = probeProfile.userAgent.value;
     updates.updatedAt = new Date().toISOString();
     try {
       await db.transaction(async (tx) => {

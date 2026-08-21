@@ -9,7 +9,7 @@ import { z } from 'zod';
  * written, and so this module stays importable without a database.
  */
 
-const MAX_PROBE_USER_AGENT_LENGTH = 512;
+export const MAX_PROBE_USER_AGENT_LENGTH = 512;
 
 const probeConcurrencySchema = z.number().int().min(1).max(8);
 const probeTimeoutSchema = z.number().int().min(3000).max(60000);
@@ -48,9 +48,21 @@ const modelProbeConfigPayloadSchema = z.object({
 
 export const MODEL_PROBE_ENDPOINT_TYPES = ['auto', 'chat', 'messages', 'responses'] as const;
 
+export type ModelProbeEndpointType = (typeof MODEL_PROBE_ENDPOINT_TYPES)[number];
+
+/**
+ * The two per-site probe profile fields, exported as schemas rather than as raw
+ * constants so every surface that accepts them (the dedicated site probe config
+ * endpoint and the general site create/update payloads) validates identically.
+ * Re-declaring `z.enum([...])` or the 512 cap per call site would let the two
+ * surfaces drift apart silently.
+ */
+export const probeEndpointTypeSchema = z.enum(MODEL_PROBE_ENDPOINT_TYPES);
+export const probeUserAgentSchema = z.string().trim().max(MAX_PROBE_USER_AGENT_LENGTH);
+
 const modelProbeSiteConfigPayloadSchema = z.object({
-  probeEndpointType: z.enum(MODEL_PROBE_ENDPOINT_TYPES).optional(),
-  probeUserAgent: z.string().trim().max(MAX_PROBE_USER_AGENT_LENGTH).optional(),
+  probeEndpointType: probeEndpointTypeSchema.optional(),
+  probeUserAgent: probeUserAgentSchema.optional(),
 }).strict();
 
 const siteIdSchema = z.number().int().positive();

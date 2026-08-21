@@ -19,6 +19,17 @@ export const sites = sqliteTable('sites', {
   postRefreshProbeModel: text('post_refresh_probe_model').default(''),
   postRefreshProbeScope: text('post_refresh_probe_scope').default('single'),
   postRefreshProbeLatencyThresholdMs: integer('post_refresh_probe_latency_threshold_ms').default(0),
+  // Active model probe request profile. 'auto' means "let the probe pick the
+  // endpoint from the site's platform capabilities", which is exactly what every
+  // pre-existing site did, so backfilling this default changes no behaviour.
+  // Kept as plain text (like post_refresh_probe_scope) rather than a narrowed
+  // union: the db layer must not import the contracts layer, and a legacy or
+  // hand-edited row can hold anything, so readers normalize instead of trusting
+  // the column type.
+  probeEndpointType: text('probe_endpoint_type').notNull().default('auto'),
+  // Empty string means "no per-site override"; resolveModelProbeUserAgent then
+  // falls back to the global preset.
+  probeUserAgent: text('probe_user_agent').notNull().default(''),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
 }, (table) => ({

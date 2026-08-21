@@ -85,8 +85,8 @@ function isProtocolShapedResponse(endpoint: 'chat' | 'messages' | 'responses', b
 }
 
 function findErrorKeyword(rawBody: string, errorKeywords: string[]): string | null {
-  const normalizedBody = rawBody.toLocaleLowerCase();
-  return errorKeywords.find((keyword) => keyword && normalizedBody.includes(keyword.toLocaleLowerCase())) ?? null;
+  const normalizedBody = rawBody.toLowerCase();
+  return errorKeywords.find((keyword) => keyword && normalizedBody.includes(keyword.toLowerCase())) ?? null;
 }
 
 export function classifySuccessfulProbeResponse(input: {

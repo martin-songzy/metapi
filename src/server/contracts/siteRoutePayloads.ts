@@ -1,7 +1,31 @@
 import { z } from 'zod';
 
+import {
+  MAX_PROBE_USER_AGENT_LENGTH,
+  MODEL_PROBE_ENDPOINT_TYPES,
+  probeEndpointTypeSchema,
+  probeUserAgentSchema,
+} from './modelProbePayloads.js';
+
 const requiredTrimmedString = z.string().trim().min(1);
 const unknownField = z.unknown().optional();
+
+/**
+ * The per-site probe request profile is declared as *typed* fields, unlike the
+ * `unknownField` entries around it. Those legacy fields are re-validated by
+ * hand-written normalizers in `routes/api/sites.ts`; these two are validated
+ * here so a bad value is a 400 instead of something that reaches the column.
+ * `.passthrough()` below would otherwise forward `probeEndpointType: 'response'`
+ * verbatim and permanently mis-target that site's probes.
+ *
+ * Both stay `.optional()`: existing clients (and every other part of the site
+ * editor) never send them, and an absent key must mean "leave the stored profile
+ * alone" rather than "reset it".
+ */
+const probeProfileFields = {
+  probeEndpointType: probeEndpointTypeSchema.optional(),
+  probeUserAgent: probeUserAgentSchema.optional(),
+};
 
 const siteCreatePayloadSchema = z.object({
   name: requiredTrimmedString,
@@ -16,6 +40,7 @@ const siteCreatePayloadSchema = z.object({
   isPinned: unknownField,
   sortOrder: unknownField,
   globalWeight: unknownField,
+  ...probeProfileFields,
 }).passthrough();
 
 const siteUpdatePayloadSchema = z.object({
@@ -30,6 +55,7 @@ const siteUpdatePayloadSchema = z.object({
   isPinned: unknownField,
   sortOrder: unknownField,
   globalWeight: unknownField,
+  ...probeProfileFields,
 }).passthrough();
 
 const siteBatchPayloadSchema = z.object({
@@ -77,6 +103,12 @@ function formatSitePayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'models') {
     return 'Invalid models. Expected string[].';
+  }
+  if (firstPath === 'probeEndpointType') {
+    return `Invalid probeEndpointType. Expected one of ${MODEL_PROBE_ENDPOINT_TYPES.join(', ')}.`;
+  }
+  if (firstPath === 'probeUserAgent') {
+    return `Invalid probeUserAgent. Expected a string of at most ${MAX_PROBE_USER_AGENT_LENGTH} characters.`;
   }
   return 'Invalid site payload.';
 }

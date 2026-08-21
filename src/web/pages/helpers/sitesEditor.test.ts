@@ -203,3 +203,60 @@ describe('buildSiteSaveAction', () => {
     });
   });
 });
+
+describe('site probe request profile fields', () => {
+  it('defaults a blank form to auto with no user agent override', () => {
+    expect(emptySiteForm().probeEndpointType).toBe('auto');
+    expect(emptySiteForm().probeUserAgent).toBe('');
+  });
+
+  it('round-trips a stored probe profile into the form', () => {
+    const form = siteFormFromSite({
+      name: 'probe-site',
+      url: 'https://probe-site.example.com',
+      probeEndpointType: 'responses',
+      probeUserAgent: 'codex_cli_rs/0.20.0',
+    });
+
+    expect(form.probeEndpointType).toBe('responses');
+    expect(form.probeUserAgent).toBe('codex_cli_rs/0.20.0');
+  });
+
+  // Legacy rows predate these columns, and a rejected value must not leak into
+  // the select as an unlisted option.
+  it('falls back to auto for missing, null, or unsupported stored values', () => {
+    for (const probeEndpointType of [undefined, null, '', 'response', 'completions']) {
+      expect(siteFormFromSite({ probeEndpointType } as Parameters<typeof siteFormFromSite>[0]).probeEndpointType)
+        .toBe('auto');
+    }
+    expect(siteFormFromSite({ probeUserAgent: null }).probeUserAgent).toBe('');
+  });
+
+  it('carries the probe profile through the save action payload', () => {
+    const action = buildSiteSaveAction(
+      { mode: 'edit', editingSiteId: 7 },
+      {
+        name: 'probe-site',
+        url: 'https://probe-site.example.com',
+        externalCheckinUrl: '',
+        platform: 'new-api',
+        proxyUrl: '',
+        useSystemProxy: false,
+        apiEndpoints: [],
+        customHeaders: '',
+        globalWeight: 1,
+        probeEndpointType: 'messages',
+        probeUserAgent: 'claude-cli/2.1.63 (external, cli)',
+      },
+    );
+
+    expect(action).toMatchObject({
+      kind: 'update',
+      id: 7,
+      payload: {
+        probeEndpointType: 'messages',
+        probeUserAgent: 'claude-cli/2.1.63 (external, cli)',
+      },
+    });
+  });
+});

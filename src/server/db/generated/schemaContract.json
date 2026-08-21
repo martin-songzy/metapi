@@ -2113,6 +2113,18 @@
           "notNull": false,
           "defaultValue": "0",
           "primaryKey": false
+        },
+        "probe_endpoint_type": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "'auto'",
+          "primaryKey": false
+        },
+        "probe_user_agent": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": "''",
+          "primaryKey": false
         }
       }
     },

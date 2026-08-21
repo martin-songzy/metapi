@@ -762,6 +762,8 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       postRefreshProbeModel: '',
       postRefreshProbeScope: 'single',
       postRefreshProbeLatencyThresholdMs: 0,
+      probeEndpointType: 'auto',
+      probeUserAgent: '',
       createdAt: input.createdAt,
       updatedAt: input.updatedAt,
     });
@@ -1009,6 +1011,8 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         postRefreshProbeModel: '',
         postRefreshProbeScope: 'single',
         postRefreshProbeLatencyThresholdMs: 0,
+        probeEndpointType: 'auto',
+        probeUserAgent: '',
         createdAt: toIsoString(item.created_at),
         updatedAt: toIsoString(item.updated_at),
       });
@@ -1586,6 +1590,10 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         postRefreshProbeModel: row.postRefreshProbeModel ?? '',
         postRefreshProbeScope: (row.postRefreshProbeScope === 'all' ? 'all' : 'single') as 'single' | 'all',
         postRefreshProbeLatencyThresholdMs: row.postRefreshProbeLatencyThresholdMs ?? 0,
+        // Snapshots taken before these columns existed carry no value, so fall
+        // back to the same defaults the columns declare.
+        probeEndpointType: row.probeEndpointType ?? 'auto',
+        probeUserAgent: row.probeUserAgent ?? '',
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
       }).run();
