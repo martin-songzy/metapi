@@ -47,6 +47,15 @@ describe('classifySuccessfulProbeResponse', () => {
 
     expect(classifySuccessfulProbeResponse({
       endpoint: 'chat',
+      rawBody: JSON.stringify({ message: 'gateway healthy' }),
+    })).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'empty_content',
+      reason: 'invalid or non-JSON probe response',
+    });
+
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'chat',
       rawBody: '<html><body>temporarily unavailable</body></html>',
     })).toMatchObject({
       status: 'inconclusive',
@@ -61,6 +70,45 @@ describe('classifySuccessfulProbeResponse', () => {
     })).toMatchObject({ status: 'unsupported', failureKind: 'error_body' });
   });
 
+  it('requires explicit text-like block types for messages and responses content', () => {
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'messages',
+      rawBody: JSON.stringify({ content: [{ type: 'thinking', text: 'not an answer' }] }),
+    })).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'empty_content',
+      reason: 'probe response contains no usable content',
+    });
+
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'responses',
+      rawBody: JSON.stringify({
+        output: [{ content: [{ type: 'custom_block', text: 'not an answer' }] }],
+      }),
+    })).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'empty_content',
+      reason: 'probe response contains no usable content',
+    });
+  });
+
+  it('accepts top-level responses output_text', () => {
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'responses',
+      rawBody: JSON.stringify({ output_text: 'OK' }),
+    })).toMatchObject({ status: 'supported', failureKind: null });
+  });
+
+  it('does not treat a valid native answer containing a configured keyword as unsupported', () => {
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: JSON.stringify({
+        choices: [{ message: { content: 'The model unavailable error is explained here.' } }],
+      }),
+      errorKeywords: ['model unavailable'],
+    })).toMatchObject({ status: 'supported', failureKind: null });
+  });
+
   it('does not treat answer text with an unconfigured generic error word as unsupported', () => {
     expect(classifySuccessfulProbeResponse({
       endpoint: 'chat',
@@ -71,12 +119,14 @@ describe('classifySuccessfulProbeResponse', () => {
     })).toMatchObject({ status: 'supported', failureKind: null });
   });
 
-  it('caps persisted reasons at 1000 UTF-16 code units', () => {
+  it('caps a dynamic reason at exactly 1000 UTF-16 code units', () => {
+    const keyword = 'x'.repeat(1_100);
     const result = classifySuccessfulProbeResponse({
       endpoint: 'chat',
-      rawBody: `not-json-${'x'.repeat(1_100)}`,
+      rawBody: keyword,
+      errorKeywords: [keyword],
     });
 
-    expect(result.reason.length).toBeLessThanOrEqual(1_000);
+    expect(result.reason.length).toBe(1_000);
   });
 });
