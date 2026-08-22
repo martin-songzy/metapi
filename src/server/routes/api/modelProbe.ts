@@ -24,6 +24,7 @@ import {
   buildModelProbeRunLimitMessage,
   listActiveModelProbeResults,
   previewActiveModelProbe,
+  requestActiveModelProbeCancellation,
 } from '../../services/modelProbeRunService.js';
 
 /**
@@ -147,6 +148,43 @@ export async function modelProbeRoutes(app: FastifyInstance) {
       reused: decision.reused,
       targetCount: decision.targetCount,
       preview: decision.preview,
+    });
+  });
+
+  /**
+   * Stops a running sweep. Lives here rather than under `/api/tasks` because
+   * cancellation is implemented by the probe's own run service, not by the shared
+   * background task service — `/api/tasks` stays read-only for every task type.
+   *
+   * The three outcomes get three status codes on purpose: 409 for a sweep that
+   * already finished must not read like 202, or an operator is told a completed
+   * sweep was stopped.
+   */
+  app.post<{ Params: { taskId: string } }>('/api/model-probe/run/:taskId/cancel', async (request, reply) => {
+    const taskId = String(request.params.taskId || '').trim();
+    if (!taskId) return sendBadRequest(reply, 'Invalid task id.');
+
+    const outcome = requestActiveModelProbeCancellation(taskId);
+    if (outcome === 'not_found') {
+      return reply.code(404).send({
+        success: false,
+        code: outcome,
+        message: '找不到这次探测任务，它可能已经过期或从未存在。',
+      });
+    }
+    if (outcome === 'already_finished') {
+      return reply.code(409).send({
+        success: false,
+        code: outcome,
+        message: '这次探测已经结束，没有可以取消的内容。',
+      });
+    }
+
+    return reply.code(202).send({
+      success: true,
+      cancelled: true,
+      taskId,
+      message: '已请求取消：正在进行的那个模型完成后不会再发出新的探测请求。',
     });
   });
 

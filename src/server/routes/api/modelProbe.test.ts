@@ -16,10 +16,12 @@ const {
   previewActiveModelProbeMock,
   queueActiveModelProbeMock,
   listActiveModelProbeResultsMock,
+  requestActiveModelProbeCancellationMock,
 } = vi.hoisted(() => ({
   previewActiveModelProbeMock: vi.fn(),
   queueActiveModelProbeMock: vi.fn(),
   listActiveModelProbeResultsMock: vi.fn(),
+  requestActiveModelProbeCancellationMock: vi.fn(),
 }));
 
 vi.mock('../../services/modelProbeRunService.js', async (importOriginal) => {
@@ -29,6 +31,7 @@ vi.mock('../../services/modelProbeRunService.js', async (importOriginal) => {
     previewActiveModelProbe: previewActiveModelProbeMock,
     queueActiveModelProbe: queueActiveModelProbeMock,
     listActiveModelProbeResults: listActiveModelProbeResultsMock,
+    requestActiveModelProbeCancellation: requestActiveModelProbeCancellationMock,
   };
 });
 
@@ -105,6 +108,7 @@ describe('model probe API routes', () => {
     previewActiveModelProbeMock.mockReset();
     queueActiveModelProbeMock.mockReset();
     listActiveModelProbeResultsMock.mockReset();
+    requestActiveModelProbeCancellationMock.mockReset();
     previewActiveModelProbeMock.mockResolvedValue(emptyPreview());
     listActiveModelProbeResultsMock.mockResolvedValue({ items: [], total: 0 });
     tasks.__resetBackgroundTasksForTests();
@@ -529,6 +533,50 @@ describe('model probe API routes', () => {
       expect(response.statusCode).toBe(400);
       expect(previewActiveModelProbeMock).not.toHaveBeenCalled();
       expect(queueActiveModelProbeMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('POST /api/model-probe/run/:taskId/cancel', () => {
+    /**
+     * The status code carries the meaning here, so each outcome is pinned
+     * separately: "stopped it" and "there was nothing left to stop" must not read
+     * the same to a caller, or a completed sweep looks cancelled.
+     */
+    it('accepts a cancellation for a running sweep', async () => {
+      requestActiveModelProbeCancellationMock.mockReturnValue('accepted');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/model-probe/run/task-running/cancel',
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.json()).toMatchObject({ success: true, cancelled: true, taskId: 'task-running' });
+      expect(requestActiveModelProbeCancellationMock).toHaveBeenCalledWith('task-running');
+    });
+
+    it('answers 404 for a task that is not a known probe sweep', async () => {
+      requestActiveModelProbeCancellationMock.mockReturnValue('not_found');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/model-probe/run/task-unknown/cancel',
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toMatchObject({ success: false, code: 'not_found' });
+    });
+
+    it('answers 409 for a sweep that already finished', async () => {
+      requestActiveModelProbeCancellationMock.mockReturnValue('already_finished');
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/model-probe/run/task-done/cancel',
+      });
+
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ success: false, code: 'already_finished' });
     });
   });
 

@@ -975,6 +975,14 @@ export type ModelProbeRunSummary = {
   routingSynced: boolean;
   skippedSites: ModelProbeSkippedSite[];
   invalidPatterns: ModelProbeInvalidPattern[];
+  /**
+   * True when the operator stopped the sweep before it worked through its
+   * targets. The counters above then describe only the part that ran, so the UI
+   * must never present them as a finished sweep.
+   */
+  cancelled: boolean;
+  /** Targets that were never probed because the sweep was cancelled. */
+  remaining: number;
 };
 
 export type ModelProbeTaskLogEntry = {
@@ -1550,6 +1558,25 @@ export const api = {
       throw new Error(await extractResponseErrorMessage(res));
     }
     return { status: "queued", data: (await res.json()) as ModelProbeRunResponse };
+  },
+  /**
+   * Asks the server to stop a running sweep. Like `runModelProbe`, this does not
+   * throw on 409: the button is only rendered while the sweep looks live, so a
+   * sweep that finished between the render and the click is an ordinary race, not
+   * an error worth showing as one. 404 and 5xx still throw.
+   */
+  cancelModelProbeRun: async (
+    taskId: string,
+  ): Promise<{ status: "accepted" | "already_finished" }> => {
+    const res = await fetchAuthenticatedResponse(
+      `/api/model-probe/run/${encodeURIComponent(taskId)}/cancel`,
+      { method: "POST" },
+    );
+    if (res.status === 409) return { status: "already_finished" };
+    if (!res.ok) {
+      throw new Error(await extractResponseErrorMessage(res));
+    }
+    return { status: "accepted" };
   },
   getModelProbeResults: (query: ModelProbeResultsQuery = {}) =>
     request<ModelProbeResultsResponse>(

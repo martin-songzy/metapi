@@ -666,6 +666,65 @@ describe('active model probe end to end', () => {
     expect(availability[0]?.available).toBe(false);
   }, 120_000);
 
+  /**
+   * A sweep must be stoppable, over real HTTP, while it is genuinely spending.
+   *
+   * Every model answers after a delay and concurrency is 1, so the sweep is slow
+   * enough to interrupt without racing: the cancel POST is only sent once the fake
+   * relay has actually received a probe, which is what makes "it was in flight"
+   * an observation rather than an assumption.
+   */
+  it('stops a running sweep on request and reports it as cancelled, not completed', async () => {
+    const siteId = await insertSite({ slug: 'cancel', name: 'Cancel Site', probeEndpointType: 'chat' });
+    await insertAccount(siteId);
+    await putConfig({ interestPatterns: ['^probe-slow-'], concurrency: 1 });
+
+    const modelCount = 8;
+    upstreamModels = Array.from({ length: modelCount }, (_, index) => `probe-slow-${index}`);
+    probeResponder = () => ({ ...chatOk(), delayMs: 200 });
+
+    const queued = await api('POST', '/api/model-probe/run', {});
+    expect(queued.status).toBe(202);
+    const taskId = queued.payload.taskId as string;
+
+    // Wait for real probe traffic before cancelling.
+    const inFlightDeadline = Date.now() + 30_000;
+    while (probePosts().length < 1 && Date.now() < inFlightDeadline) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, 20).unref?.(); });
+    }
+    expect(probePosts().length).toBeGreaterThanOrEqual(1);
+
+    const cancelled = await api('POST', `/api/model-probe/run/${taskId}/cancel`);
+    expect(cancelled.status).toBe(202);
+    expect(cancelled.payload).toMatchObject({ success: true, cancelled: true });
+
+    const deadline = Date.now() + 60_000;
+    let task: any = null;
+    while (Date.now() < deadline) {
+      const polled = await api('GET', `/api/tasks/${taskId}`);
+      task = polled.payload.task;
+      if (task.status !== 'pending' && task.status !== 'running') break;
+      await new Promise<void>((resolve) => { setTimeout(resolve, 25).unref?.(); });
+    }
+
+    // Honest terminal state: marked cancelled, with the unprobed remainder named.
+    expect(task.result).toMatchObject({ cancelled: true });
+    expect(task.result.remaining).toBeGreaterThan(0);
+    expect(task.result.probed).toBeLessThan(modelCount);
+    // The quota property, measured at the relay rather than inferred from the
+    // summary: the models after the cancel were never asked.
+    expect(probePosts().length).toBe(task.result.probed);
+    expect(probePosts().length).toBeLessThan(modelCount);
+
+    // Partial results are kept and readable.
+    expect(await listResults()).toHaveLength(task.result.probed);
+
+    // Cancelling again reports that there is nothing left to stop.
+    const again = await api('POST', `/api/model-probe/run/${taskId}/cancel`);
+    expect(again.status).toBe(409);
+    expect(again.payload).toMatchObject({ code: 'already_finished' });
+  }, 120_000);
+
   // Bonus: the prompt comes from the configurable table, not a fixed string.
   it('draws the probe prompt from the configured random table', async () => {
     const siteId = await insertSite({ slug: 'prompts', name: 'Prompt Site', probeEndpointType: 'chat' });

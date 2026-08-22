@@ -5,6 +5,7 @@ import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { normalizeModelProbeEndpointType } from '../../shared/modelProbeEndpointTypes.js';
 import {
   appendBackgroundTaskLog,
+  getBackgroundTask,
   getRunningTaskByDedupeKey,
   startBackgroundTask,
   type BackgroundTask,
@@ -39,6 +40,11 @@ import type { UpstreamEndpoint } from './upstreamEndpointRuntime.js';
  * 3. `inconclusive` is recorded in `model_probe_results` for diagnosis but never
  *    reaches `model_availability`. A timeout, 429 or dropped socket says nothing
  *    about whether a model exists.
+ * 4. A sweep can be stopped. `requestActiveModelProbeCancellation` sets a flag the
+ *    run loop reads between models, so an operator who realises the interest regex
+ *    was wrong stops paying for it within one probe. A cancelled sweep keeps its
+ *    partial results, reports `cancelled: true`, and is never presented as a
+ *    completed one.
  *
  * The routing stack is reached only through a dynamic import inside the sync
  * branch, so this module's static import graph stays free of `tokenRouter` and
@@ -214,7 +220,65 @@ export type ModelProbeRunSummary = {
   routingSynced: boolean;
   skippedSites: ModelProbeSkippedSite[];
   invalidPatterns: InvalidInterestPattern[];
+  /**
+   * True when an operator stopped the sweep. The counters then describe a PARTIAL
+   * sweep, so no consumer may read this summary as a completed one: `probed` says
+   * nothing about the `remaining` models, which were never asked.
+   */
+  cancelled: boolean;
+  /** Targets that existed but were never probed because the sweep was stopped. */
+  remaining: number;
 };
+
+/**
+ * Task ids an operator asked to stop, checked between models by the run loop.
+ *
+ * Scoped to this module ON PURPOSE rather than added to `backgroundTaskService`.
+ * That service is shared with the update center and friends; giving it a general
+ * cancellation concept late in this feature's life would put every other consumer
+ * at regression risk for no benefit here. A general task-cancellation feature
+ * remains possible later, and this is not in its way.
+ *
+ * Entries are removed when the run settles, so a flag cannot leak into a later
+ * sweep that happens to reuse the scope. The set is bounded by the number of
+ * concurrently running sweeps, and `requestActiveModelProbeCancellation` refuses
+ * ids that are not live probe tasks, so it cannot be grown by a caller.
+ */
+const cancelledProbeTaskIds = new Set<string>();
+
+export type ModelProbeCancellationOutcome = 'accepted' | 'not_found' | 'already_finished';
+
+/**
+ * Asks a running sweep to stop after the model it is currently probing.
+ *
+ * Deliberately NOT an `AbortSignal`: the in-flight request is left to finish, so
+ * the worst case after a cancel is one more probe bounded by the configured
+ * timeout. Threading a signal through `probeRuntimeModel` and `executeEndpointFlow`
+ * would kill that request too, at the cost of touching the shared runtime path —
+ * a bigger change than the safety property needs.
+ *
+ * `already_finished` is a distinct outcome from `accepted` because telling an
+ * operator a completed sweep was cancelled would misrepresent what their money
+ * bought.
+ */
+export function requestActiveModelProbeCancellation(taskId: string): ModelProbeCancellationOutcome {
+  const id = String(taskId || '').trim();
+  if (!id) return 'not_found';
+
+  const task = getBackgroundTask(id);
+  // Type-checked as well as existence-checked: this must never be a way to poke
+  // the cancellation flag of some other task type that shares the id space.
+  if (!task || task.type !== ACTIVE_MODEL_PROBE_TASK_TYPE) return 'not_found';
+  if (task.status !== 'pending' && task.status !== 'running') return 'already_finished';
+
+  cancelledProbeTaskIds.add(id);
+  appendBackgroundTaskLog(id, '收到取消请求，正在结束的这个模型之后不再发起新的探测请求');
+  return 'accepted';
+}
+
+export function isActiveModelProbeCancelled(taskId: string): boolean {
+  return cancelledProbeTaskIds.has(taskId);
+}
 
 type SiteRow = typeof schema.sites.$inferSelect;
 type AccountRow = typeof schema.accounts.$inferSelect;
@@ -553,7 +617,16 @@ export function queueActiveModelProbe(input?: {
         : '主动模型测活（全部站点）',
       dedupeKey,
     },
-    () => runActiveModelProbe(scope, taskIdPromise, input?.authorizedTargetCount),
+    async () => {
+      // Clears the cancellation flag however the run ends, including the two
+      // pre-probe refusals that throw. A flag left behind would silently stop the
+      // next sweep, and task ids are not reused so nothing else can clear it.
+      try {
+        return await runActiveModelProbe(scope, taskIdPromise, input?.authorizedTargetCount);
+      } finally {
+        cancelledProbeTaskIds.delete(await taskIdPromise);
+      }
+    },
   );
   resolveTaskId(started.task.id);
 
@@ -634,6 +707,11 @@ async function runActiveModelProbe(
   const probeOutcomes: ProbeOutcome[] = [];
 
   await mapWithConcurrency(targets, probeConfig.concurrency, async (target) => {
+    // Checked per target rather than once, so a cancel lands within one probe
+    // instead of at the end of the sweep. Every target after the flag is set
+    // costs nothing, which is the whole point.
+    if (isActiveModelProbeCancelled(taskId)) return;
+
     const { site, account, credential } = target.discovery;
     const userAgent = resolveModelProbeUserAgent(probeConfig, site.probeUserAgent);
     const endpointType = normalizeModelProbeEndpointType(site.probeEndpointType);
@@ -714,14 +792,28 @@ async function runActiveModelProbe(
     skipped: probeOutcomes.filter((outcome) => outcome.status === 'skipped').length,
   };
 
+  const cancelled = isActiveModelProbeCancelled(taskId);
+  const remaining = Math.max(0, targets.length - probeOutcomes.length);
+
   // ONLY `unsupported` reaches the write path, filtered by construction rather
   // than by a later check so no future edit can leak `inconclusive` in.
   const unsupported = probeOutcomes.filter((outcome) => outcome.status === 'unsupported');
-  const sync = await syncUnsupportedToRouting(unsupported, probeConfig, log);
+  // A cancel withdraws the operator's authorization mid-sweep, so a partial run
+  // leaves no persistent routing effect behind. The verdicts themselves are still
+  // recorded in `model_probe_results` for inspection — nothing is lost, it simply
+  // is not applied. Completing the sweep is what earns the routing write.
+  const sync = cancelled
+    ? { disabled: 0, routingSynced: false }
+    : await syncUnsupportedToRouting(unsupported, probeConfig, log);
+  if (cancelled && unsupported.length > 0) {
+    log(`${unsupported.length} 个模型在取消前判定为 unsupported，但本次已取消，不会同步到路由`);
+  }
 
   log(
-    `完成：探测 ${probeOutcomes.length} 个模型，`
-    + `supported ${counts.supported}、unsupported ${counts.unsupported}、`
+    (cancelled ? '已取消：' : '完成：')
+    + `探测 ${probeOutcomes.length} 个模型`
+    + (cancelled ? `，另有 ${remaining} 个未探测` : '')
+    + `，supported ${counts.supported}、unsupported ${counts.unsupported}、`
     + `inconclusive ${counts.inconclusive}、skipped ${counts.skipped}；`
     + `禁用 ${sync.disabled} 个，路由${sync.routingSynced ? '已' : '未'}重建`,
   );
@@ -734,6 +826,8 @@ async function runActiveModelProbe(
     routingSynced: sync.routingSynced,
     skippedSites,
     invalidPatterns: invalid,
+    cancelled,
+    remaining,
   };
 }
 

@@ -105,6 +105,13 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   const [pollStopped, setPollStopped] = useState(false);
   /** True when this panel adopted a sweep that was already running on mount. */
   const [reattached, setReattached] = useState(false);
+  /**
+   * Which task the operator has asked to stop. Held as the task id rather than a
+   * boolean so a request can never appear to apply to a later sweep: every reset
+   * of `taskId` implicitly invalidates it.
+   */
+  const [cancelRequestedTaskId, setCancelRequestedTaskId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const notifiedTaskIdRef = useRef<string | null>(null);
   /**
    * Set synchronously by `startRun` so a reattach lookup still in flight cannot
@@ -120,6 +127,12 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
    * sweep spending more quota while the panel quietly dropped the first one.
    */
   const sweepInFlight = taskId !== null && (task === null || !isTerminal(task.status));
+
+  /**
+   * True once this sweep's cancellation has been accepted. Compared against the
+   * live task id so a stale request cannot label a different sweep.
+   */
+  const cancelRequested = taskId !== null && cancelRequestedTaskId === taskId;
 
   const scopePayload = useMemo<ModelProbeRunPayload>(
     () => (scopeSiteIds.length > 0 ? { siteIds: [...scopeSiteIds].sort((a, b) => a - b) } : {}),
@@ -214,6 +227,12 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
     } else if (!finished.result) {
       // Succeeded with no summary proves nothing about any model.
       toast.error('探测任务结束但没有返回结果摘要');
+    } else if (finished.result.cancelled) {
+      // Checked before the counters: a cancelled sweep must never be toasted as a
+      // success, however many models it happened to get through.
+      toast.info(
+        `探测已取消：${finished.result.probed} 个模型已探测，${finished.result.remaining} 个未探测`,
+      );
     } else if (finished.result.probed === 0) {
       toast.info('本次没有匹配到任何模型，没有发出任何探测请求');
     } else {
@@ -331,7 +350,37 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
     setPollStopped(false);
     setReused(false);
     setReattached(false);
+    setCancelRequestedTaskId(null);
     notifiedTaskIdRef.current = null;
+  };
+
+  /**
+   * Asks the server to stop the sweep. This does not stop it immediately: the
+   * model currently in flight still completes, and the run ends after it. So the
+   * panel keeps polling — the only honest end state is the one the task reports.
+   *
+   * A failure deliberately leaves the button live. The sweep is still spending
+   * quota, and a button that latches off after one failed attempt would take away
+   * the operator's only way to stop it.
+   */
+  const handleCancelRun = async () => {
+    if (!taskId || cancelling || cancelRequested) return;
+    setCancelling(true);
+    try {
+      const outcome = await api.cancelModelProbeRun(taskId);
+      setCancelRequestedTaskId(taskId);
+      if (outcome.status === 'already_finished') {
+        // Not an error: the button is rendered while the sweep looks live, so a
+        // sweep that finished between render and click is an ordinary race.
+        toast.info('这次探测已经结束了，没有需要取消的部分');
+      } else {
+        toast.info('已请求取消：正在探测的这个模型结束后不再发起新的请求');
+      }
+    } catch (error: any) {
+      toast.error(error?.message || '取消探测失败');
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const unverifiedSites = useMemo(
@@ -510,7 +559,27 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
 
     return (
       <div style={{ marginTop: 12 }}>
-        {summary.probed === 0 && (
+        {/*
+          A cancelled sweep is not a finished one. The counters below describe
+          only the part that ran, so this names the remainder before them — and
+          says plainly that the unsupported verdicts were not written to routing,
+          because the run service withholds that sync when cancelled.
+        */}
+        {summary.cancelled && (
+          <div className="alert alert-warning" data-testid="model-probe-task-cancelled">
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>这次探测已取消，不是一次完整的探测</div>
+            <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+              还有 {summary.remaining} 个模型没有被探测，它们既不算可用也不算不可用——只是没问过。
+              下面的数字只覆盖已经跑完的那一部分。
+            </div>
+            <div style={{ fontSize: 12, lineHeight: 1.7, marginTop: 6 }}>
+              本次的「不支持」结论未写入站点禁用模型：取消意味着这次探测的授权被收回，
+              结论保留下来供查看，但不会改动真实路由。
+            </div>
+          </div>
+        )}
+
+        {summary.probed === 0 && !summary.cancelled && (
           <div className="alert alert-warning" data-testid="model-probe-task-nothing-probed">
             <div style={{ fontWeight: 600, marginBottom: 4 }}>本次没有匹配到任何模型，没有发出任何探测请求</div>
             <div style={{ fontSize: 12, lineHeight: 1.7 }}>
@@ -705,12 +774,39 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
         >
           {starting ? <><span className="spinner spinner-sm" /> 发起中...</> : '发起探测'}
         </button>
+        {/*
+          Only offered while a sweep looks live. A running sweep is spending real
+          quota one model at a time, and before this the only way to stop it was
+          restarting the server — 不再跟随 merely stops watching it.
+        */}
+        {sweepInFlight && (
+          <button
+            type="button"
+            data-testid="model-probe-cancel-button"
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)' }}
+            onClick={() => handleCancelRun()}
+            disabled={cancelling || cancelRequested}
+          >
+            {cancelling ? <><span className="spinner spinner-sm" /> 取消中...</> : '取消探测'}
+          </button>
+        )}
       </div>
 
       {sweepInFlight && (
         <div style={{ ...hintStyle, marginTop: 10 }} data-testid="model-probe-run-active-hint">
           已有一次探测正在进行，发起按钮暂时不可用。改动站点范围后再发起并不会缩小这一次，而是额外新增一次探测，
-          所以请先等它结束。
+          所以请先等它结束，或点「取消探测」提前停下它。
+        </div>
+      )}
+
+      {cancelRequested && sweepInFlight && (
+        <div className="alert alert-info" data-testid="model-probe-cancel-requested" style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>已请求取消，正在收尾</div>
+          <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+            取消不会打断已经发出的那个请求：正在探测的模型会跑完，之后不再发起新的探测。
+            已经得到的结论会保留，但这次不会写入站点禁用模型。
+          </div>
         </div>
       )}
 

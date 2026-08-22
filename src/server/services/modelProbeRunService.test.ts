@@ -91,6 +91,7 @@ describe('modelProbeRunService', () => {
   let getBackgroundTask: BackgroundTaskModule['getBackgroundTask'];
   let listBackgroundTasks: BackgroundTaskModule['listBackgroundTasks'];
   let resetBackgroundTasks: BackgroundTaskModule['__resetBackgroundTasksForTests'];
+  let startBackgroundTask: BackgroundTaskModule['startBackgroundTask'];
   let config: typeof import('../config.js')['config'];
   let previousProxyRoutingEnabled = true;
   let dataDir = '';
@@ -113,6 +114,7 @@ describe('modelProbeRunService', () => {
     waitForBackgroundTaskCompletion = backgroundTaskModule.waitForBackgroundTaskCompletion;
     getBackgroundTask = backgroundTaskModule.getBackgroundTask;
     listBackgroundTasks = backgroundTaskModule.listBackgroundTasks;
+    startBackgroundTask = backgroundTaskModule.startBackgroundTask;
     resetBackgroundTasks = backgroundTaskModule.__resetBackgroundTasksForTests;
     config = configModule.config;
     previousProxyRoutingEnabled = config.proxyRoutingEnabled;
@@ -1023,7 +1025,215 @@ describe('modelProbeRunService', () => {
       expect(finished?.status).toBe('succeeded');
       expect(probeRuntimeModelMock).toHaveBeenCalledTimes(3);
     });
+  });
 
+  describe('cancellation', () => {
+    /**
+     * Before this a queued sweep could not be stopped at any layer, so a few
+     * hundred serial paid requests ended only when someone restarted the server.
+     * 不再跟随 stops the page following the task; it never stopped the task.
+     *
+     * The flag is checked BETWEEN models, so an already-issued request still
+     * completes — bounded by the probe timeout. That is stated in the service
+     * docblock and is why the assertion below is "one probe, not zero".
+     */
+    async function seedFourModelRun() {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      primeDiscovery([{ site, account, models: ['gpt-1', 'gpt-2', 'gpt-3', 'gpt-4'] }]);
+    }
+
+    it('stops between models, keeps what it probed, and reports itself cancelled', async () => {
+      await seedFourModelRun();
+
+      let taskId: string | null = null;
+      let cancelOutcome = '';
+      probeRuntimeModelMock.mockImplementation(async () => {
+        // Cancel from inside the first probe, so the sweep is genuinely in flight
+        // rather than cancelled before it started.
+        if (probeRuntimeModelMock.mock.calls.length === 1 && taskId) {
+          cancelOutcome = service.requestActiveModelProbeCancellation(taskId);
+        }
+        return probeResult();
+      });
+
+      const queued = service.queueActiveModelProbe();
+      taskId = queued.task.id;
+      const finished = await waitForBackgroundTaskCompletion(queued.task.id);
+
+      expect(cancelOutcome).toBe('accepted');
+      // The property that matters: the remaining three models cost nothing.
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+      expect(finished?.result).toMatchObject({
+        cancelled: true,
+        probed: 1,
+        remaining: 3,
+      });
+      // Partial results are KEPT — the one model really did answer.
+      const rows = await db.select().from(schema.modelProbeResults).all();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.modelName).toBe('gpt-1');
+      expect(getBackgroundTask(queued.task.id)?.logs.some((entry) => entry.message.includes('取消'))).toBe(true);
+    });
+
+    it('reports an uncancelled sweep over the same models as not cancelled', async () => {
+      // Pairs with the case above so neither can pass by probing nothing: same
+      // fixture, no cancel, all four probed and `cancelled` false.
+      await seedFourModelRun();
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      const { finished } = await runProbe();
+
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(4);
+      expect(finished?.result).toMatchObject({ cancelled: false, probed: 4, remaining: 0 });
+    });
+
+    it('withholds the routing sync from a cancelled sweep even with both switches on', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-'], { syncToRouting: true });
+      primeDiscovery([{ site, account, models: ['gpt-1', 'gpt-2'] }]);
+      await db.insert(schema.modelAvailability).values([
+        { accountId: account.id, modelName: 'gpt-1', available: true, isManual: false },
+        { accountId: account.id, modelName: 'gpt-2', available: true, isManual: false },
+      ]).run();
+
+      let taskId: string | null = null;
+      probeRuntimeModelMock.mockImplementation(async () => {
+        if (probeRuntimeModelMock.mock.calls.length === 1 && taskId) {
+          service.requestActiveModelProbeCancellation(taskId);
+        }
+        return probeResult({ status: 'unsupported', failureKind: 'error_body' });
+      });
+
+      const queued = service.queueActiveModelProbe();
+      taskId = queued.task.id;
+      const finished = await waitForBackgroundTaskCompletion(queued.task.id);
+
+      // Cancellation withdraws the operator's authorization mid-flight, so a
+      // partial sweep must not leave persistent routing effects behind. The
+      // verdict itself is still recorded for inspection.
+      expect(finished?.result).toMatchObject({ cancelled: true, disabled: 0, routingSynced: false });
+      expect(rebuildTokenRoutesFromAvailabilityMock).not.toHaveBeenCalled();
+      const availability = await db.select().from(schema.modelAvailability).all();
+      expect(availability.every((row) => row.available === true)).toBe(true);
+    });
+
+    it('control: the same unsupported verdict does sync when the sweep completes', async () => {
+      // Without this the assertion above could be satisfied by a sync path that
+      // never fires in this fixture at all.
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-'], { syncToRouting: true });
+      primeDiscovery([{ site, account, models: ['gpt-1'] }]);
+      await db.insert(schema.modelAvailability).values({
+        accountId: account.id,
+        modelName: 'gpt-1',
+        available: true,
+        isManual: false,
+      }).run();
+      probeRuntimeModelMock.mockResolvedValue(probeResult({ status: 'unsupported', failureKind: 'error_body' }));
+
+      const { finished } = await runProbe();
+
+      expect(finished?.result).toMatchObject({ cancelled: false, disabled: 1, routingSynced: true });
+    });
+
+    /**
+     * The cancel path must not become a way to flag *any* background task. It
+     * shares an id space with every other task type, and the flag it sets is only
+     * ever read by the probe loop — so flagging a foreign task would silently do
+     * nothing while telling the operator it worked.
+     */
+    it('refuses to cancel a background task that is not a probe sweep', async () => {
+      let release: (() => void) | null = null;
+      const blocked = new Promise<void>((resolve) => { release = resolve; });
+      const foreign = startBackgroundTask(
+        { type: 'some-other-task', title: '别的后台任务' },
+        async () => { await blocked; },
+      );
+      try {
+        expect(foreign.task.status === 'pending' || foreign.task.status === 'running').toBe(true);
+        expect(service.requestActiveModelProbeCancellation(foreign.task.id)).toBe('not_found');
+        expect(service.isActiveModelProbeCancelled(foreign.task.id)).toBe(false);
+      } finally {
+        release?.();
+        await waitForBackgroundTaskCompletion(foreign.task.id);
+      }
+    });
+
+    it('refuses to cancel an unknown task or one that already finished', async () => {
+      expect(service.requestActiveModelProbeCancellation('no-such-task')).toBe('not_found');
+
+      await seedFourModelRun();
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+      const { queued } = await runProbe();
+
+      // Terminal, so there is nothing left to stop; saying `accepted` here would
+      // tell the operator a completed sweep was cancelled.
+      expect(service.requestActiveModelProbeCancellation(queued.task.id)).toBe('already_finished');
+    });
+
+    /**
+     * Pins that the cancellation flag is per-task state, not a module-level
+     * boolean: implemented as a latch, a second sweep over the same scope would
+     * stop before its first model and report itself cancelled.
+     *
+     * It also pins the cleanup directly. Because task ids are never reused, a
+     * missing `finally` is not observable through a later run's behaviour at all —
+     * only the flag itself shows it, so it is asserted rather than inferred.
+     */
+    it('clears a cancellation with its task and does not latch it across sweeps', async () => {
+      await seedFourModelRun();
+
+      let firstTaskId: string | null = null;
+      probeRuntimeModelMock.mockImplementation(async () => {
+        if (probeRuntimeModelMock.mock.calls.length === 1 && firstTaskId) {
+          service.requestActiveModelProbeCancellation(firstTaskId);
+        }
+        return probeResult();
+      });
+
+      const first = service.queueActiveModelProbe();
+      firstTaskId = first.task.id;
+      // Positive control: while the sweep is being cancelled the flag is set, so
+      // the cleared assertion below cannot pass by never having been set at all.
+      await waitForBackgroundTaskCompletion(first.task.id);
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+      expect(service.isActiveModelProbeCancelled(firstTaskId)).toBe(false);
+
+      probeRuntimeModelMock.mockReset();
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+      const second = await runProbe();
+
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(4);
+      expect(second.finished?.result).toMatchObject({ cancelled: false, probed: 4 });
+    });
+
+    /** The positive half of the assertion above, observed mid-flight. */
+    it('reports the flag as set while the sweep is still winding down', async () => {
+      await seedFourModelRun();
+
+      let taskId: string | null = null;
+      const flagDuringRun: boolean[] = [];
+      probeRuntimeModelMock.mockImplementation(async () => {
+        if (taskId) {
+          if (probeRuntimeModelMock.mock.calls.length === 1) {
+            service.requestActiveModelProbeCancellation(taskId);
+          }
+          flagDuringRun.push(service.isActiveModelProbeCancelled(taskId));
+        }
+        return probeResult();
+      });
+
+      const started = service.queueActiveModelProbe();
+      taskId = started.task.id;
+      await waitForBackgroundTaskCompletion(started.task.id);
+
+      expect(flagDuringRun).toEqual([true]);
+      expect(service.isActiveModelProbeCancelled(taskId)).toBe(false);
+    });
+  });
+
+  describe('probe failure isolation', () => {
     it('records a probe throw as inconclusive rather than aborting the run', async () => {
       const { site, account } = await seedSite();
       await setInterest(['^gpt-']);

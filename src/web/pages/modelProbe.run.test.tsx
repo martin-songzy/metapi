@@ -14,6 +14,7 @@ const { apiMock } = vi.hoisted(() => ({
     saveModelProbeSiteConfig: vi.fn(),
     previewModelProbe: vi.fn(),
     runModelProbe: vi.fn(),
+    cancelModelProbeRun: vi.fn(),
     getModelProbeTask: vi.fn(),
     getModelProbeTasks: vi.fn(),
     getModelProbeResults: vi.fn(),
@@ -58,6 +59,20 @@ function findByTestId(root: ReactTestInstance, testId: string): ReactTestInstanc
 function queryByTestId(root: ReactTestInstance, testId: string): ReactTestInstance | null {
   const matches = root.findAll((node) => node.props['data-testid'] === testId);
   return matches[0] ?? null;
+}
+
+/**
+ * Boolean form of `queryByTestId` for presence/absence assertions.
+ *
+ * `expect(queryByTestId(...)).toBeNull()` reports nothing useful when it fails:
+ * vitest tries to serialise the matched `ReactTestInstance` into the diff, and
+ * the resulting payload is large enough to kill the worker IPC channel with
+ * `RangeError: Invalid array length` — so a genuine regression shows up as an
+ * unhandled error with no test named. Comparing booleans keeps the diff to one
+ * line, which is what makes these assertions verifiable.
+ */
+function hasTestId(root: ReactTestInstance, testId: string): boolean {
+  return queryByTestId(root, testId) !== null;
 }
 
 async function click(node: ReactTestInstance) {
@@ -149,6 +164,8 @@ function buildSummary(overrides: Record<string, unknown> = {}) {
     routingSynced: true,
     skippedSites: [],
     invalidPatterns: [],
+    cancelled: false,
+    remaining: 0,
     ...overrides,
   };
 }
@@ -232,6 +249,7 @@ beforeEach(() => {
   apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
   apiMock.previewModelProbe.mockResolvedValue({ success: true, preview: buildPreview() });
   apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
+  apiMock.cancelModelProbeRun.mockResolvedValue({ status: 'accepted' });
   apiMock.getModelProbeResults.mockResolvedValue({
     success: true,
     items: [],
@@ -892,6 +910,298 @@ describe('ModelProbe run lifecycle', () => {
 
       await click(findByTestId(root.root, 'model-probe-run-button'));
       expect(apiMock.runModelProbe).toHaveBeenCalledTimes(2);
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+describe('ModelProbe run cancellation', () => {
+  it('offers a cancel button while a sweep is in flight and none when it is not', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      // Paired negative: before a sweep exists there is nothing to cancel, so a
+      // button rendered unconditionally would make the positive case meaningless.
+      expect(hasTestId(root.root, 'model-probe-cancel-button')).toBe(false);
+
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      expect(hasTestId(root.root, 'model-probe-cancel-button')).toBe(true);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('asks the server to stop the tracked task and keeps following it', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      const beforeCancel = apiMock.getModelProbeTask.mock.calls.length;
+
+      await click(findByTestId(root.root, 'model-probe-cancel-button'));
+
+      expect(apiMock.cancelModelProbeRun).toHaveBeenCalledTimes(1);
+      expect(apiMock.cancelModelProbeRun).toHaveBeenCalledWith('task-1');
+      // Cancelling is a request, not an answer: the in-flight model still has to
+      // finish, so the panel must keep polling until the task itself is terminal.
+      await advanceMs(2_000);
+      expect(apiMock.getModelProbeTask.mock.calls.length).toBeGreaterThan(beforeCancel);
+      expect(collectText(findByTestId(root.root, 'model-probe-cancel-requested'))).toContain('取消');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('sends only one cancel request no matter how many times the button is clicked', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await click(findByTestId(root.root, 'model-probe-cancel-button'));
+      const button = queryByTestId(root.root, 'model-probe-cancel-button');
+      if (button) await click(button);
+
+      expect(apiMock.cancelModelProbeRun).toHaveBeenCalledTimes(1);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('reports a cancelled sweep as cancelled, with its partial counts and remainder', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask
+      .mockResolvedValueOnce({ success: true, task: buildTask({ status: 'running' }) })
+      .mockResolvedValue({
+        success: true,
+        task: buildTask({
+          status: 'succeeded',
+          message: '已取消',
+          result: buildSummary({
+            probed: 3,
+            supported: 2,
+            unsupported: 1,
+            disabled: 0,
+            routingSynced: false,
+            cancelled: true,
+            remaining: 17,
+          }),
+        }),
+      });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(1_000);
+
+      const banner = collectText(findByTestId(root.root, 'model-probe-task-cancelled'));
+      expect(banner).toContain('已取消');
+      // The remainder is the honest part: 3 probed out of 20 is not "3 models
+      // exist", it is "17 were never asked".
+      expect(banner).toContain('17');
+
+      // Partial results are kept and still readable.
+      const summary = collectText(findByTestId(root.root, 'model-probe-task-summary'));
+      expect(summary).toContain('3');
+
+      // A cancelled sweep is not a completed one.
+      expect(collectText(root.root)).not.toContain('探测完成');
+      expect(toastTypes(root.root).some((cls) => cls.includes('toast-success'))).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('says unsupported verdicts were not written to routing when cancelled', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask
+      .mockResolvedValueOnce({ success: true, task: buildTask({ status: 'running' }) })
+      .mockResolvedValue({
+        success: true,
+        task: buildTask({
+          status: 'succeeded',
+          result: buildSummary({
+            unsupported: 4,
+            disabled: 0,
+            routingSynced: false,
+            cancelled: true,
+            remaining: 9,
+          }),
+        }),
+      });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(1_000);
+
+      const banner = collectText(findByTestId(root.root, 'model-probe-task-cancelled'));
+      expect(banner).toContain('未写入');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('does not show a cancelled banner on a sweep that ran to completion', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask
+      .mockResolvedValueOnce({ success: true, task: buildTask({ status: 'running' }) })
+      .mockResolvedValue({
+        success: true,
+        task: buildTask({ status: 'succeeded', result: buildSummary() }),
+      });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(1_000);
+
+      expect(hasTestId(root.root, 'model-probe-task-cancelled')).toBe(false);
+      expect(hasTestId(root.root, 'model-probe-task-summary')).toBe(true);
+      // Control for the assertions above: a completed sweep does say so.
+      expect(toastTypes(root.root).some((cls) => cls.includes('toast-success'))).toBe(true);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('hides the cancel button once the sweep is terminal', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask
+      .mockResolvedValueOnce({ success: true, task: buildTask({ status: 'running' }) })
+      .mockResolvedValue({
+        success: true,
+        task: buildTask({ status: 'succeeded', result: buildSummary() }),
+      });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      expect(hasTestId(root.root, 'model-probe-cancel-button')).toBe(true);
+
+      await advanceMs(1_000);
+      expect(hasTestId(root.root, 'model-probe-cancel-button')).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('treats an already-finished sweep as an ordinary race, not an error', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+    apiMock.cancelModelProbeRun.mockResolvedValue({ status: 'already_finished' });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await click(findByTestId(root.root, 'model-probe-cancel-button'));
+
+      expect(toastTypes(root.root).some((cls) => cls.includes('toast-error'))).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('surfaces a failed cancel request and lets the operator try again', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+    apiMock.cancelModelProbeRun.mockRejectedValue(new Error('取消请求失败'));
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await click(findByTestId(root.root, 'model-probe-cancel-button'));
+
+      expect(toastTypes(root.root).some((cls) => cls.includes('toast-error'))).toBe(true);
+      // A failed cancel must not latch the button off: the sweep is still
+      // spending, so the operator needs another shot at stopping it.
+      expect(hasTestId(root.root, 'model-probe-cancel-button')).toBe(true);
+      const retry = queryByTestId(root.root, 'model-probe-cancel-button');
+      expect(retry!.props.disabled).toBe(false);
+      await click(retry!);
+      expect(apiMock.cancelModelProbeRun).toHaveBeenCalledTimes(2);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('does not carry a cancel request into the next sweep after one is cancelled', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await click(findByTestId(root.root, 'model-probe-cancel-button'));
+      expect(hasTestId(root.root, 'model-probe-cancel-requested')).toBe(true);
+
+      // The first sweep reaches its cancelled terminal state normally.
+      apiMock.getModelProbeTask.mockResolvedValue({
+        success: true,
+        task: buildTask({
+          status: 'succeeded',
+          result: buildSummary({ cancelled: true, remaining: 5 }),
+        }),
+      });
+      await advanceMs(1_000);
+
+      // Now a *second*, freshly authorised sweep. This is the path where the
+      // request must not carry over: `startRun` assigns a new task id without
+      // going through 不再跟随, so a sweep-agnostic flag would open the new sweep
+      // already labelled cancelled, with its cancel button dead.
+      apiMock.runModelProbe.mockResolvedValue(queued({ taskId: 'task-2' }));
+      apiMock.getModelProbeTask.mockResolvedValue({
+        success: true,
+        task: buildTask({ id: 'task-2', status: 'running' }),
+      });
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+
+      expect(apiMock.runModelProbe).toHaveBeenCalledTimes(2);
+      expect(hasTestId(root.root, 'model-probe-cancel-requested')).toBe(false);
+      const button = queryByTestId(root.root, 'model-probe-cancel-button');
+      expect(button).not.toBe(null);
+      expect(button!.props.disabled).toBe(false);
+
+      // And it can genuinely be cancelled in its own right.
+      await click(button!);
+      expect(apiMock.cancelModelProbeRun).toHaveBeenCalledTimes(2);
+      expect(apiMock.cancelModelProbeRun).toHaveBeenLastCalledWith('task-2');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('does not carry a cancel request past 不再跟随', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await click(findByTestId(root.root, 'model-probe-cancel-button'));
+      expect(hasTestId(root.root, 'model-probe-cancel-requested')).toBe(true);
+
+      // Detaching drops the tracked sweep; a later one must start clean rather
+      // than opening with someone else's cancel notice.
+      apiMock.getModelProbeTask.mockRejectedValue(new Error('任务查询失败'));
+      await advanceMs(5_000);
+      await click(findByTestId(root.root, 'model-probe-task-detach'));
+
+      apiMock.getModelProbeTask.mockResolvedValue({
+        success: true,
+        task: buildTask({ id: 'task-2', status: 'running' }),
+      });
+      apiMock.runModelProbe.mockResolvedValue(queued({ taskId: 'task-2' }));
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+
+      expect(hasTestId(root.root, 'model-probe-cancel-requested')).toBe(false);
+      expect(hasTestId(root.root, 'model-probe-cancel-button')).toBe(true);
     } finally {
       root.unmount();
     }
