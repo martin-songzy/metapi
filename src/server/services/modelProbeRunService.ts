@@ -107,8 +107,31 @@ export const MODEL_PROBE_CONFIRM_TARGET_THRESHOLD = 50;
 export const MODEL_PROBE_AUTHORIZED_COUNT_SLACK = 10;
 export const MODEL_PROBE_AUTHORIZED_COUNT_SLACK_RATIO = 0.1;
 
+/**
+ * Total for every input, including the non-finite ones.
+ *
+ * `Math.max(0, Math.trunc(NaN))` is `NaN`, not 0 — so a NaN used to propagate all
+ * the way out, and `targets.length > NaN` is always false, meaning the guard would
+ * have failed OPEN and licensed an unbounded paid sweep. The HTTP path cannot
+ * produce a NaN (`preview.totalModels` is a reduce over array lengths), so this is
+ * a latent trap for an internal caller rather than a reachable bug, but a guard
+ * whose degenerate input disables it is the wrong shape regardless.
+ *
+ * ZERO authorizes zero, with no slack. The absolute floor exists to keep small
+ * sweeps workable — authorize 51, run up to 61 — and there is nothing to keep
+ * workable at 0. The scenario is reachable over HTTP: when every site's model-list
+ * request times out, `preview.totalModels` is 0, that is under the dialog
+ * threshold, so the run is queued with `authorizedTargetCount: 0` and no dialog
+ * shown; discovery then recovers and the sweep issued up to 10 real paid requests
+ * the operator was told nothing about. `authorizedTargetCount` always comes from a
+ * FRESH preview taken at gate time, so 0 means "a fresh look found nothing to
+ * probe" — if the runner's own discovery then finds targets, the set moved between
+ * the two, which is precisely what this ceiling exists to refuse.
+ */
 export function modelProbeAuthorizedTargetCeiling(authorizedTargetCount: number): number {
-  const authorized = Math.max(0, Math.trunc(authorizedTargetCount));
+  const truncated = Math.trunc(authorizedTargetCount);
+  const authorized = Number.isFinite(truncated) ? Math.max(0, truncated) : 0;
+  if (authorized === 0) return 0;
   return authorized + Math.max(
     MODEL_PROBE_AUTHORIZED_COUNT_SLACK,
     Math.ceil(authorized * MODEL_PROBE_AUTHORIZED_COUNT_SLACK_RATIO),

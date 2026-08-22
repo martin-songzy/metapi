@@ -1025,6 +1025,81 @@ describe('modelProbeRunService', () => {
       expect(finished?.status).toBe('succeeded');
       expect(probeRuntimeModelMock).toHaveBeenCalledTimes(3);
     });
+
+    /**
+     * LITERAL expected values, on purpose.
+     *
+     * The three behavioural tests above all derive `discovered` from
+     * `modelProbeAuthorizedTargetCeiling` itself, so they pin the boundary
+     * *relative to* the formula and the formula to nothing. An independent
+     * reviewer changed the ratio from 0.1 to 3.9 and all 70 tests stayed green: an
+     * authorization of 40 then permitted 196 probes, i.e. the confirmation gate was
+     * unbound almost to the hard 300 cap — which is exactly what this slack exists
+     * to prevent. The coarser mutants that WERE caught were caught incidentally, by
+     * the derived `discovered` crossing `MAX_ACTIVE_PROBE_RUN_TARGETS`, not because
+     * any test asserted the slack.
+     *
+     * A test that recomputes the implementation cannot detect a change to it.
+     */
+    it('allows a concrete, bounded overrun at each end of the range', () => {
+      // 40 -> 50 is the absolute floor; 100 is the crossover where the two terms
+      // agree; 200 -> 220 is the ratio. Together they pin BOTH terms and the point
+      // control passes from one to the other.
+      //
+      // The reviewer's suggested literal for zero was `0 -> 10`, which documents the
+      // behaviour its OWN next finding calls wrong: an authorization of nothing
+      // licensed ten paid probes. Zero authorizes zero — see the function docblock.
+      expect(service.modelProbeAuthorizedTargetCeiling(0)).toBe(0);
+      expect(service.modelProbeAuthorizedTargetCeiling(1)).toBe(11);
+      expect(service.modelProbeAuthorizedTargetCeiling(40)).toBe(50);
+      expect(service.modelProbeAuthorizedTargetCeiling(60)).toBe(70);
+      expect(service.modelProbeAuthorizedTargetCeiling(100)).toBe(110);
+      expect(service.modelProbeAuthorizedTargetCeiling(101)).toBe(112);
+      expect(service.modelProbeAuthorizedTargetCeiling(200)).toBe(220);
+
+      // The slack must stay far below the failure it exists to stop — a whole site
+      // reappearing between the gate and the sweep. Stated as a bound rather than
+      // as an equality so it survives a deliberate, small retune of either term.
+      for (const authorized of [0, 1, 40, 60, 100, 200, 300]) {
+        const ceiling = service.modelProbeAuthorizedTargetCeiling(authorized);
+        expect(ceiling, `ceiling(${authorized})`).toBeLessThanOrEqual(authorized + 30 + authorized * 0.25);
+      }
+    });
+
+    it('clamps a fractional, negative or non-finite authorization before applying slack', () => {
+      // Reached only by an internal caller: the HTTP path passes
+      // `preview.totalModels`, a reduce over array lengths. Pinned anyway because
+      // `length > NaN` is always false, so a NaN reaching the comparison would
+      // silently disable the guard — failing OPEN on a paid operation — and
+      // `Math.max(0, Math.trunc(NaN))` is NaN, not 0, so the existing clamp did not
+      // stop it. Every degenerate input now licenses nothing.
+      expect(service.modelProbeAuthorizedTargetCeiling(-5)).toBe(0);
+      expect(service.modelProbeAuthorizedTargetCeiling(40.9)).toBe(50);
+      expect(service.modelProbeAuthorizedTargetCeiling(Number.NaN)).toBe(0);
+      expect(service.modelProbeAuthorizedTargetCeiling(Number.POSITIVE_INFINITY)).toBe(0);
+    });
+
+    it('refuses a sweep authorized for zero targets, before any probe', async () => {
+      // The reachable scenario: every site's model-list request times out at gate
+      // time, so `preview.totalModels` is 0, which is under the dialog threshold —
+      // the run is queued with no confirmation. Discovery then recovers.
+      const { finished } = await seedAuthorizedRun({ discovered: 4, authorized: 0 });
+
+      expect(finished?.status).toBe('failed');
+      // Quota is the property, not the status.
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+      expect(await db.select().from(schema.modelProbeResults).all()).toHaveLength(0);
+    });
+
+    it('still lets a zero-target sweep finish when discovery also finds nothing', async () => {
+      // Paired with the refusal above: authorizing 0 and discovering 0 is a
+      // consistent no-op, not an error. Without this, "zero authorizes zero" could
+      // be implemented as "zero always fails".
+      const { finished } = await seedAuthorizedRun({ discovered: 0, authorized: 0 });
+
+      expect(finished?.status).toBe('succeeded');
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+    });
   });
 
   describe('cancellation', () => {
