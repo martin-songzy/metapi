@@ -416,6 +416,44 @@ describe('ModelProbe per-site configuration panel', () => {
     }
   });
 
+  it('says a blank custom User-Agent inherits the global preset, not that it sends none', async () => {
+    const root = await renderPage();
+    try {
+      const customInput = findByTestId(root.root, 'model-probe-site-user-agent-custom-9');
+
+      // The server treats a blank per-site override as "use the global default
+      // preset" (`resolveModelProbeUserAgent`). Telling the operator it means
+      // "send no User-Agent" is the inverse, and it is the exact setting they
+      // reach for when a site rejects the global UA.
+      expect(String(customInput.props.placeholder)).not.toContain('不发送');
+      expect(String(customInput.props.placeholder)).toContain('继承');
+
+      const panelText = collectText(findByTestId(root.root, 'model-probe-sites-panel'));
+      expect(panelText).toContain('继承全局');
+      // The one way to send no UA at all has to be discoverable.
+      expect(panelText).toContain('自定义 / 不发送');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('warns in place that clearing the custom field will fall back to 继承全局', async () => {
+    const root = await renderPage();
+    try {
+      const customInput = findByTestId(root.root, 'model-probe-site-user-agent-custom-9');
+      await act(async () => {
+        customInput.props.onChange({ target: { value: '   ' } });
+      });
+
+      // Without this, the select silently flipping back to 继承全局 after saving
+      // reads as the panel having discarded the operator's choice.
+      const notice = collectText(findByTestId(root.root, 'model-probe-site-user-agent-blank-9'));
+      expect(notice).toContain('继承全局');
+    } finally {
+      root.unmount();
+    }
+  });
+
   it('saves an inherited User-Agent as an empty string', async () => {
     const root = await renderPage();
     try {

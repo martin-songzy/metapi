@@ -147,14 +147,26 @@ export default function ModelProbeSitesPanel({
         options={userAgentOptions}
       />
       {draft.userAgentChoice === MODEL_PROBE_UA_CUSTOM && (
-        <input
-          type="text"
-          data-testid={`model-probe-site-user-agent-custom-${site.id}`}
-          value={draft.customUserAgent}
-          onChange={(event) => updateDraft(site.id, { customUserAgent: event.target.value })}
-          placeholder="留空表示不发送 User-Agent"
-          style={textInputStyle}
-        />
+        <>
+          <input
+            type="text"
+            data-testid={`model-probe-site-user-agent-custom-${site.id}`}
+            value={draft.customUserAgent}
+            onChange={(event) => updateDraft(site.id, { customUserAgent: event.target.value })}
+            // A blank override is stored as `''`, and the server reads `''` as
+            // "inherit the global default preset" — never as "omit the header".
+            placeholder="留空表示继承全局默认 UA"
+            style={textInputStyle}
+          />
+          {draft.customUserAgent.trim().length === 0 && (
+            <div
+              data-testid={`model-probe-site-user-agent-blank-${site.id}`}
+              style={{ fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.6 }}
+            >
+              留空保存后等于「继承全局」，选择框也会显示回继承全局，这是正常的，不是设置被丢弃。
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -181,6 +193,9 @@ export default function ModelProbeSitesPanel({
         <div style={{ fontSize: 15, fontWeight: 600 }}>站点探测设置</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, lineHeight: 1.6 }}>
           每个站点可单独指定探测使用的接口类型与 User-Agent。接口类型选「自动」时按站点平台能力推导；User-Agent 选「继承全局」时使用上方的默认预设。
+          <br />
+          站点这一列只有「继承全局」和「发送某个具体 UA」两种状态：留空即继承，无法只让单个站点不发送 UA。
+          确实需要完全不发送时，请把上方的「默认 User-Agent」设为「自定义 / 不发送」，并让这些站点保持继承全局。
         </div>
       </div>
 
