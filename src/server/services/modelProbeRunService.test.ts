@@ -952,6 +952,78 @@ describe('modelProbeRunService', () => {
       expect(atCap.exceedsRunLimit).toBe(false);
     });
 
+    /**
+     * The confirmation gate lives in `modelProbeApiService`, which computes its own
+     * preview. Before this, the number it gated on never reached the runner: the
+     * runner re-ran discovery and was bounded only by the hard cap. So a
+     * model-list request that timed out during the gate (contributing 0 targets,
+     * total under the dialog threshold, no dialog shown) and then recovered before
+     * the run turned an unconfirmed click into hundreds of real paid requests.
+     *
+     * These cases drive the discovered set independently of the authorized count,
+     * which is the only way to observe the binding at all.
+     */
+    async function seedAuthorizedRun(input: { discovered: number; authorized?: number }) {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      const models = Array.from({ length: input.discovered }, (_unused, index) => `gpt-${index}`);
+      primeDiscovery([{ site, account, models }]);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      return runProbe(
+        input.authorized === undefined
+          ? undefined
+          : { authorizedTargetCount: input.authorized },
+      );
+    }
+
+    it('refuses a sweep that materially exceeds the authorized count, before any probe', async () => {
+      // The reported scenario: the gate saw 40 (under the 50-target dialog
+      // threshold, so no confirmation was ever shown) and the runner's own
+      // discovery then found a recovered site carrying far more.
+      const { finished } = await seedAuthorizedRun({ discovered: 250, authorized: 40 });
+
+      expect(finished?.status).toBe('failed');
+      // Actionable: both numbers, so the operator knows the set moved rather than
+      // that "something" was refused.
+      expect(finished?.error).toContain('40');
+      expect(finished?.error).toContain('250');
+      // The property that matters is quota, not the status: nothing was spent.
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+      expect(await db.select().from(schema.modelProbeResults).all()).toHaveLength(0);
+    });
+
+    it('allows the discovered set to drift upward within the authorized slack', async () => {
+      // Paired with the refusal above so neither can pass by refusing everything:
+      // an exact-match rule would fail a run whenever a site legitimately gained
+      // one model between the gate and the sweep, which is its own defect.
+      const authorized = 60;
+      const discovered = service.modelProbeAuthorizedTargetCeiling(authorized);
+      const { finished } = await seedAuthorizedRun({ discovered, authorized });
+
+      expect(finished?.status).toBe('succeeded');
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(discovered);
+    }, 30_000);
+
+    it('refuses one target past the authorized ceiling', async () => {
+      const authorized = 60;
+      const discovered = service.modelProbeAuthorizedTargetCeiling(authorized) + 1;
+      const { finished } = await seedAuthorizedRun({ discovered, authorized });
+
+      // Pins the boundary itself: an off-by-one either way would show up here and
+      // not in the two tests above.
+      expect(finished?.status).toBe('failed');
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+    });
+
+    it('runs a set smaller than the authorized count without complaint', async () => {
+      // Spending LESS than what was authorized needs no permission.
+      const { finished } = await seedAuthorizedRun({ discovered: 3, authorized: 200 });
+
+      expect(finished?.status).toBe('succeeded');
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(3);
+    });
+
     it('records a probe throw as inconclusive rather than aborting the run', async () => {
       const { site, account } = await seedSite();
       await setInterest(['^gpt-']);

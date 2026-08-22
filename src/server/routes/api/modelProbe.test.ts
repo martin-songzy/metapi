@@ -383,7 +383,46 @@ describe('model probe API routes', () => {
       expect(response.statusCode).toBe(202);
       const body = response.json() as { success: boolean; taskId: string; reused: boolean; targetCount: number };
       expect(body).toMatchObject({ success: true, taskId: 'task-1', reused: false, targetCount: 4 });
-      expect(queueActiveModelProbeMock).toHaveBeenCalledWith({ siteIds: [siteId] });
+      // The gate's own count travels with the scope. Previously it did not, so the
+      // runner rediscovered with no memory of what was authorized and the gate
+      // bounded nothing that actually executed.
+      expect(queueActiveModelProbeMock).toHaveBeenCalledWith({
+        siteIds: [siteId],
+        authorizedTargetCount: 4,
+      });
+    });
+
+    /**
+     * The gate must hand its count to the runner on EVERY queue path, not only
+     * after a dialog. A sweep below the threshold is waved through without
+     * confirmation, and that is exactly the case the reported failure scenario
+     * exploited: 40 targets at gate time, no dialog, then a recovered site pushing
+     * the real sweep to ~250.
+     */
+    it('authorizes the runner with its own count even when no dialog was needed', async () => {
+      previewActiveModelProbeMock.mockResolvedValue(emptyPreview({ totalModels: 40 }));
+      queueActiveModelProbeMock.mockReturnValue(queued('task-unconfirmed'));
+
+      const response = await app.inject({ method: 'POST', url: '/api/model-probe/run', payload: {} });
+
+      expect(response.statusCode).toBe(202);
+      expect(queueActiveModelProbeMock).toHaveBeenCalledWith({ authorizedTargetCount: 40 });
+      const [call] = queueActiveModelProbeMock.mock.calls;
+      expect((call?.[0] as { authorizedTargetCount?: number })?.authorizedTargetCount).toBe(40);
+    });
+
+    it('authorizes the runner with the confirmed count after a dialog', async () => {
+      previewActiveModelProbeMock.mockResolvedValue(emptyPreview({ totalModels: 51 }));
+      queueActiveModelProbeMock.mockReturnValue(queued('task-echoed'));
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/model-probe/run',
+        payload: { confirmedTargetCount: 51 },
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(queueActiveModelProbeMock).toHaveBeenCalledWith({ authorizedTargetCount: 51 });
     });
 
     it('reports a joined run rather than starting a second one', async () => {

@@ -24,6 +24,7 @@ import type { ModelProbeLiveFailure } from './modelProbeDiscoveryService.js';
 import {
   ACTIVE_MODEL_PROBE_TASK_TYPE,
   MAX_ACTIVE_PROBE_RUN_TARGETS,
+  MODEL_PROBE_CONFIRM_TARGET_THRESHOLD,
   previewActiveModelProbe,
   queueActiveModelProbe,
   type ModelProbePreview,
@@ -49,12 +50,12 @@ import {
 export const MODEL_PROBE_REDACTED_MASK = '[redacted]';
 
 /**
- * Above this many probe targets a run needs the operator to echo the count back.
- * 50 sequential probes at the default concurrency of 1 is already minutes of real
- * upstream traffic, so it is the point where "I clicked the wrong button" should
- * cost a dialog rather than quota.
+ * Re-exported from `modelProbeRunService`, which owns it alongside the hard cap
+ * and now re-checks it. Kept exported here because the limits payload and the
+ * route's 409 bodies read it from this module; a second literal would let the
+ * gate and the runner disagree about the same threshold.
  */
-export const MODEL_PROBE_CONFIRM_TARGET_THRESHOLD = 50;
+export { MODEL_PROBE_CONFIRM_TARGET_THRESHOLD };
 
 /**
  * Matches the column cap in `modelProbeRunService.upsertModelProbeResult`, so a
@@ -527,6 +528,15 @@ export type ModelProbeRunDecision =
  * or an invented one has to fail the comparison instead of waving the sweep
  * through. Preview is read-only and issues no probe requests, so paying for it on
  * every run is cheap relative to what a run costs.
+ *
+ * The count this gate settles on is then handed to `queueActiveModelProbe` as
+ * `authorizedTargetCount`, and the runner re-checks its own rediscovery against
+ * it. Without that the gate bounded only itself: the runner discovered
+ * independently, so a site that contributed 0 targets here (a timed-out model-list
+ * request) and recovered before the sweep could turn a dialog-free click into
+ * hundreds of paid requests. The number is passed even when it was under the
+ * dialog threshold — "authorized" means "this gate saw it and allowed it", which
+ * covers both the confirmed and the waved-through case.
  */
 export async function requestActiveModelProbeRun(request: ModelProbeRunRequest): Promise<ModelProbeRunDecision> {
   const scope = request.siteIds ? { siteIds: request.siteIds } : {};
@@ -545,6 +555,6 @@ export async function requestActiveModelProbeRun(request: ModelProbeRunRequest):
     return { outcome: 'confirmation_required', targetCount, preview: response };
   }
 
-  const { task, reused } = queueActiveModelProbe(scope);
+  const { task, reused } = queueActiveModelProbe({ ...scope, authorizedTargetCount: targetCount });
   return { outcome: 'queued', taskId: task.id, reused, targetCount, preview: response };
 }

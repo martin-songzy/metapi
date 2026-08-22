@@ -58,6 +58,46 @@ export const ACTIVE_MODEL_PROBE_DEDUPE_PREFIX = 'active-model-probe';
 export const MAX_ACTIVE_PROBE_RUN_TARGETS = 300;
 
 /**
+ * Above this many probe targets a run needs the operator to echo the count back.
+ * 50 sequential probes at the default concurrency of 1 is already minutes of real
+ * upstream traffic, so it is the point where "I clicked the wrong button" should
+ * cost a dialog rather than quota.
+ *
+ * Defined HERE, next to the cap, and re-exported by `modelProbeApiService` — the
+ * HTTP gate and the runner's own re-check must not be able to describe the same
+ * threshold differently. The dependency only runs one way (the api service imports
+ * this module, never the reverse), so this is the end that can own it.
+ */
+export const MODEL_PROBE_CONFIRM_TARGET_THRESHOLD = 50;
+
+/**
+ * How far the freshly discovered target set may exceed what the gate authorized.
+ *
+ * The gate demands an EXACT echo of its own preview, but the runner discovers
+ * again, so the two legitimately disagree: a site gains or loses a model between
+ * the two calls. Requiring exactness here would therefore fail a paid run the
+ * operator correctly authorized, which is its own defect — so the runner allows
+ * bounded drift and refuses only a material excess.
+ *
+ * Two slack terms, because one alone is wrong at one end of the range. The
+ * absolute floor keeps small sweeps workable (authorize 51, run up to 61) where a
+ * ratio would allow almost nothing; the ratio keeps the allowance proportional at
+ * the top (authorize 200, run up to 220) where a fixed 10 would be noise. Both are
+ * far below the failure this exists to stop, which is a whole site reappearing
+ * between the gate and the sweep and adding hundreds of targets.
+ */
+export const MODEL_PROBE_AUTHORIZED_COUNT_SLACK = 10;
+export const MODEL_PROBE_AUTHORIZED_COUNT_SLACK_RATIO = 0.1;
+
+export function modelProbeAuthorizedTargetCeiling(authorizedTargetCount: number): number {
+  const authorized = Math.max(0, Math.trunc(authorizedTargetCount));
+  return authorized + Math.max(
+    MODEL_PROBE_AUTHORIZED_COUNT_SLACK,
+    Math.ceil(authorized * MODEL_PROBE_AUTHORIZED_COUNT_SLACK_RATIO),
+  );
+}
+
+/**
  * Model-list discovery is a plain management read (one GET per site, the same
  * call a normal model refresh makes), not probe traffic, so it does not share the
  * deliberately-1 probe concurrency. The floor keeps a preview over a dozen sites
@@ -275,6 +315,20 @@ export function buildModelProbeRunLimitMessage(targetCount: number): string {
     + '请收窄模型兴趣正则，或缩小站点范围后重试。';
 }
 
+/**
+ * Operator copy for a sweep refused because the discovered set outgrew what the
+ * gate authorized. Names both numbers: the point is that the set MOVED, and an
+ * operator who only sees "refused" cannot tell that from a cap violation.
+ */
+export function buildModelProbeAuthorizedCountMessage(input: {
+  authorizedTargetCount: number;
+  discoveredTargetCount: number;
+}): string {
+  return `发起时确认的目标数量是 ${input.authorizedTargetCount} 个，`
+    + `真正开始探测前重新发现到 ${input.discoveredTargetCount} 个，已超出允许的浮动范围，`
+    + '本次不会消耗任何额度。可能有站点在这期间恢复或新增了模型；请重新预览确认范围后再发起。';
+}
+
 function truncate(value: string, max: number): string {
   const normalized = String(value || '').trim();
   return normalized.length > max ? normalized.slice(0, max) : normalized;
@@ -455,8 +509,25 @@ export async function previewActiveModelProbe(input?: { siteIds?: number[] }): P
  * Queues one sweep. `dedupeKey` is derived from the requested scope so a
  * double-click, or two operators pressing the same button, join the running task
  * instead of doubling the upstream request volume.
+ *
+ * `authorizedTargetCount` is what makes the confirmation gate binding: the runner
+ * rediscovers, and without this it was bounded only by `MAX_ACTIVE_PROBE_RUN_TARGETS`,
+ * so the number the operator was shown constrained nothing. `requestActiveModelProbeRun`
+ * always supplies it — including for a sweep small enough to need no dialog, where
+ * the authorized number is simply the count the gate itself computed and waved
+ * through. Omitting it means "no gate ran", which leaves the cap as the only bound;
+ * that is the pre-existing behaviour and it is reachable only by an internal caller,
+ * because every HTTP request goes through the gate.
+ *
+ * Deliberately NOT part of the dedupe key. Two requests over the same scope with
+ * different authorized counts must still join one task: giving them distinct keys
+ * would let two sweeps run the same scope concurrently and double the quota spend,
+ * which is worse than the joined task enforcing the earlier — smaller — authorization.
  */
-export function queueActiveModelProbe(input?: { siteIds?: number[] }): {
+export function queueActiveModelProbe(input?: {
+  siteIds?: number[];
+  authorizedTargetCount?: number;
+}): {
   task: BackgroundTask;
   reused: boolean;
 } {
@@ -482,7 +553,7 @@ export function queueActiveModelProbe(input?: { siteIds?: number[] }): {
         : '主动模型测活（全部站点）',
       dedupeKey,
     },
-    () => runActiveModelProbe(scope, taskIdPromise),
+    () => runActiveModelProbe(scope, taskIdPromise, input?.authorizedTargetCount),
   );
   resolveTaskId(started.task.id);
 
@@ -492,6 +563,7 @@ export function queueActiveModelProbe(input?: { siteIds?: number[] }): {
 async function runActiveModelProbe(
   scope: ModelProbeScope,
   taskIdPromise: Promise<string>,
+  authorizedTargetCount?: number,
 ): Promise<ModelProbeRunSummary> {
   const taskId = await taskIdPromise;
   const log = (message: string) => { appendBackgroundTaskLog(taskId, message); };
@@ -534,8 +606,21 @@ async function runActiveModelProbe(
   }
 
   const skippedSites = [...siteSkips, ...discoverySkips];
+  // Both guards run before the first probe, so a refusal costs nothing. The cap
+  // is checked first: it is the absolute ceiling, and its message tells the
+  // operator to narrow the regex, which is the more useful instruction when a set
+  // violates both bounds.
   if (targets.length > MAX_ACTIVE_PROBE_RUN_TARGETS) {
     throw new Error(buildModelProbeRunLimitMessage(targets.length));
+  }
+  if (
+    authorizedTargetCount !== undefined
+    && targets.length > modelProbeAuthorizedTargetCeiling(authorizedTargetCount)
+  ) {
+    throw new Error(buildModelProbeAuthorizedCountMessage({
+      authorizedTargetCount,
+      discoveredTargetCount: targets.length,
+    }));
   }
 
   log(`共 ${outcomes.length} 个站点、${targets.length} 个模型待探测，并发 ${probeConfig.concurrency}`);
