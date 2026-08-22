@@ -1,6 +1,6 @@
 import { asc, eq } from 'drizzle-orm';
 import cron from 'node-cron';
-import { db, schema } from '../db/index.js';
+import { db, runtimeDbDialect, schema } from '../db/index.js';
 import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
@@ -1568,6 +1568,70 @@ function detectImportMetadata(data: RawBackupData): {
   };
 }
 
+/**
+ * Upserts one restored `model_probe_results` row on the (site_id, model_name)
+ * unique key.
+ *
+ * Upsert rather than insert: a hand-edited backup file can carry the same
+ * (siteId, modelName) twice, and the unique key would then roll back the whole
+ * restore instead of letting the later verdict win.
+ *
+ * The conflict clause is dialect-specific and Drizzle exposes a different
+ * builder per dialect: SQLite / PostgreSQL take `onConflictDoUpdate` while MySQL
+ * only exposes `onDuplicateKeyUpdate`. Branch at runtime the way
+ * `upsertSetting` and `modelProbeRunService` do. `tx` is the transaction handle,
+ * so the restore stays inside one transaction.
+ *
+ * Exported for the MySQL builder test: this file's tests run on SQLite only, so
+ * a SQLite round trip cannot catch a MySQL-only builder mistake here.
+ */
+export async function upsertRestoredModelProbeResult(
+  tx: { insert: (table: unknown) => any },
+  values: {
+    siteId: number;
+    accountId: number | null;
+    modelName: string;
+    status: string;
+    latencyMs: number | null;
+    httpStatus: number | null;
+    failureKind: string | null;
+    reason: string | null;
+    endpointUsed: string | null;
+    promptUsed: string | null;
+    userAgentUsed: string | null;
+    // Nullable to match the column: `checked_at` carries a database default, and
+    // a hand-edited backup can omit it.
+    checkedAt: string | null;
+  },
+): Promise<void> {
+  const updateSet = {
+    accountId: values.accountId,
+    status: values.status,
+    latencyMs: values.latencyMs,
+    httpStatus: values.httpStatus,
+    failureKind: values.failureKind,
+    reason: values.reason,
+    endpointUsed: values.endpointUsed,
+    promptUsed: values.promptUsed,
+    userAgentUsed: values.userAgentUsed,
+    checkedAt: values.checkedAt,
+  };
+
+  if (runtimeDbDialect === 'mysql') {
+    await (tx.insert(schema.modelProbeResults).values(values) as any)
+      .onDuplicateKeyUpdate({ set: updateSet })
+      .run();
+    return;
+  }
+
+  await (tx.insert(schema.modelProbeResults).values(values) as any)
+    .onConflictDoUpdate({
+      target: [schema.modelProbeResults.siteId, schema.modelProbeResults.modelName],
+      set: updateSet,
+    })
+    .run();
+}
+
 async function importAccountsSection(section: AccountsBackupSection): Promise<void> {
   const runtimeState = await collectCurrentRuntimeStateSnapshot();
   const importedIndexes = buildRuntimeIdentityIndexesFromSection(section);
@@ -1768,24 +1832,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         userAgentUsed: row.userAgentUsed ?? null,
         checkedAt: row.checkedAt,
       };
-      // Upsert rather than insert: a hand-edited file can carry the same
-      // (siteId, modelName) twice, and the unique key would then roll back the
-      // whole restore instead of letting the later verdict win.
-      await tx.insert(schema.modelProbeResults).values(values).onConflictDoUpdate({
-        target: [schema.modelProbeResults.siteId, schema.modelProbeResults.modelName],
-        set: {
-          accountId: values.accountId,
-          status: values.status,
-          latencyMs: values.latencyMs,
-          httpStatus: values.httpStatus,
-          failureKind: values.failureKind,
-          reason: values.reason,
-          endpointUsed: values.endpointUsed,
-          promptUsed: values.promptUsed,
-          userAgentUsed: values.userAgentUsed,
-          checkedAt: values.checkedAt,
-        },
-      }).run();
+      await upsertRestoredModelProbeResult(tx, values);
     }
 
     const importedManualModelKeys = new Set<string>();
