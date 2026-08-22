@@ -41,22 +41,35 @@ export type ModelProbeCredentialKind = 'api_token' | 'access_token' | 'managed_t
  * whether cached models are safe to act on instead of parsing prose.
  */
 export type ModelProbeLiveFailure = {
-  kind: 'auth' | 'timeout' | 'transport';
+  /**
+   * `empty_unknown` is the common case, not an edge case. Most adapters swallow
+   * errors inside `getModels` and return `[]` (see `newApi.ts` and
+   * `standardApiProvider.ts`, both `catch { return []; }`), so for them a revoked
+   * credential is indistinguishable from a site that genuinely has no models.
+   */
+  kind: 'auth' | 'timeout' | 'transport' | 'empty_unknown';
   status: number | null;
   message: string;
 };
 
-export type ModelProbeDiscoveryTarget = {
+type ModelProbeDiscoveryBase = {
   site: SiteRow;
   account: AccountRow;
   credential: string;
   models: string[];
-  source: ModelProbeDiscoverySource;
   credentialKind: ModelProbeCredentialKind;
   notes?: string[];
-  /** Present only when `source === 'cached'` — why the live fetch did not supply models. */
-  liveFailure?: ModelProbeLiveFailure;
 };
+
+/**
+ * Modelled as a discriminated union so that "cached models with no stated reason"
+ * is unrepresentable. A cached result means the credential was never confirmed
+ * working, and the caller must be able to see that structurally rather than
+ * having it read as a clean success.
+ */
+export type ModelProbeDiscoveryTarget =
+  | (ModelProbeDiscoveryBase & { source: 'live'; liveFailure?: never })
+  | (ModelProbeDiscoveryBase & { source: 'cached'; liveFailure: ModelProbeLiveFailure });
 
 export type ModelProbeDiscoveryErrorCode =
   | 'site_not_found'
@@ -324,18 +337,30 @@ export async function discoverModelsForActiveProbe(input: {
     );
   }
 
+  // Reaching here means the live fetch produced no models. If the adapter threw,
+  // we know why; if it returned [] we do not, because most adapters swallow the
+  // error. Either way the credential is UNVERIFIED, so a cached result must carry
+  // a reason. Never leave this null: that is what would let a revoked credential
+  // read as a clean success.
+  const effectiveLiveFailure: ModelProbeLiveFailure = liveFailure ?? {
+    kind: 'empty_unknown',
+    status: null,
+    message: '上游返回空模型列表且未抛出错误；多数适配器在 getModels 内部吞掉异常，'
+      + '因此无法区分「站点确实没有模型」与「凭据已失效」',
+  };
+
   // OAuth-only accounts (Codex / Claude / Gemini CLI / Antigravity) need cloud
   // discovery that this read-only v1 intentionally does not perform, so their
   // adapters can legitimately come back empty. Say so rather than implying the
   // account simply has no models.
-  const notes: string[] = [];
-  if (liveFailure) notes.push(`实时模型发现失败：${liveFailure.message}`);
+  const notes: string[] = [`实时模型发现未返回模型：${effectiveLiveFailure.message}`];
   if (oauthProvider) {
     notes.push(`未执行 ${oauthProvider} OAuth 云端模型发现（本版本不支持），仅使用上述来源`);
   }
 
   const cachedModels = await readCachedModelNames(account.id);
   if (cachedModels.length > 0) {
+    notes.push('以下模型来自缓存，本次未验证凭据是否仍然有效');
     return {
       site,
       account,
@@ -344,14 +369,13 @@ export async function discoverModelsForActiveProbe(input: {
       source: 'cached',
       credentialKind,
       notes,
-      ...(liveFailure ? { liveFailure } : {}),
+      liveFailure: effectiveLiveFailure,
     };
   }
 
-  const reasons = notes.length > 0 ? `（${notes.join('；')}）` : '';
   throw new ModelProbeDiscoveryError(
     'no_models',
-    `未获取到可探测的模型：实时发现与缓存记录均为空${reasons}`,
-    { oauthProvider, liveFailure },
+    `未获取到可探测的模型：实时发现与缓存记录均为空（${notes.join('；')}）`,
+    { oauthProvider, liveFailure: effectiveLiveFailure },
   );
 }

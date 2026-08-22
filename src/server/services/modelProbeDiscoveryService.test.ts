@@ -384,6 +384,70 @@ describe('discoverModelsForActiveProbe', () => {
     expect(result.source).toBe('live');
   });
 
+  // Most adapters (newApi.ts:875, standardApiProvider.ts:75) do `catch { return [] }`,
+  // so a revoked credential arrives here as an ordinary empty list. Only oneApi and
+  // veloera propagate. A cached result therefore has to be self-describing as
+  // unverified, whatever the adapter did.
+  it('marks cached models from a silently-empty adapter as empty_unknown, not clean success', async () => {
+    primeTables({
+      accounts: [account({ id: 1, apiToken: 'sk-maybe-revoked' })],
+      modelAvailability: [{ modelName: 'cached-model' }],
+    });
+    // Exactly what an error-swallowing adapter does on a revoked credential.
+    getModelsMock.mockResolvedValue([]);
+
+    const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+    const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+    expect(result.source).toBe('cached');
+    expect(result.liveFailure).toBeDefined();
+    expect(result.liveFailure!.kind).toBe('empty_unknown');
+    // Must not read as a verified credential.
+    expect(result.notes?.join(' ')).toMatch(/未验证/);
+  });
+
+  it('never returns a cached result without a reason, whatever the adapter did', async () => {
+    const adapterBehaviours: Array<() => void> = [
+      () => getModelsMock.mockResolvedValue([]),
+      () => getModelsMock.mockResolvedValue(['   ', null as unknown as string]),
+      () => getModelsMock.mockRejectedValue(new Error('HTTP 502: bad gateway')),
+      () => getModelsMock.mockRejectedValue(new Error('fetch failed')),
+    ];
+
+    const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+    for (const applyBehaviour of adapterBehaviours) {
+      primeTables({
+        accounts: [account({ id: 1, apiToken: 'sk-one' })],
+        modelAvailability: [{ modelName: 'cached-model' }],
+      });
+      getModelsMock.mockReset();
+      applyBehaviour();
+
+      const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(result.source).toBe('cached');
+      // The invariant: cached implies a stated, non-null reason.
+      expect(result.liveFailure).not.toBeNull();
+      expect(result.liveFailure).not.toBeUndefined();
+      expect(result.liveFailure!.message.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('attaches a reason to no_models even when the adapter failed silently', async () => {
+    primeTables({
+      accounts: [account({ id: 1, apiToken: 'sk-one' })],
+      modelAvailability: [],
+    });
+    getModelsMock.mockResolvedValue([]);
+
+    const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+    await expect(discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 }))
+      .rejects.toMatchObject({
+        code: 'no_models',
+        liveFailure: { kind: 'empty_unknown' },
+      });
+  });
+
   it('falls back to cached model availability when the live fetch returns nothing', async () => {
     primeTables({
       accounts: [account({ id: 1, apiToken: 'sk-one' })],
