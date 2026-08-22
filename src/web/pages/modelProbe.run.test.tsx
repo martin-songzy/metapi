@@ -1042,7 +1042,15 @@ describe('ModelProbe run cancellation', () => {
       await advanceMs(1_000);
 
       const banner = collectText(findByTestId(root.root, 'model-probe-task-cancelled'));
-      expect(banner).toContain('未写入');
+      // Asserted on the effect the run service actually withholds. The earlier
+      // assertion looked for 未写入, which the banner reached by claiming the
+      // verdicts were not written to 站点禁用模型 — a table
+      // `syncUnsupportedToRouting` never writes on any path, cancelled or not, so
+      // the wording implied a completed sweep would. The intent was right and the
+      // mechanism named was wrong.
+      expect(banner).toContain('未同步到路由');
+      expect(banner).toContain('不会把任何模型标记为不可用');
+      expect(banner).not.toContain('站点禁用模型');
     } finally {
       root.unmount();
     }

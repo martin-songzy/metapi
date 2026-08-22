@@ -57,9 +57,56 @@ export type ModelProbeConfigDraft = {
   concurrencyText: string;
   timeoutMsText: string;
   syncToRouting: boolean;
-  /** Carried through untouched: this panel does not edit the preset table. */
+  /**
+   * Carried through, and editable in exactly one place: the value of the
+   * `custom` preset. See `MODEL_PROBE_CUSTOM_UA_PRESET_ID` for why the other
+   * presets stay read-only.
+   */
   userAgents: ModelProbeUserAgentPreset[];
 };
+
+/**
+ * The id of the one preset whose VALUE the global panel lets an operator edit.
+ *
+ * The server ships it with an empty value (`DEFAULT_USER_AGENT_PRESETS` in
+ * `src/server/services/modelProbeConfigService.ts`), which the resolver reads as
+ * "send no User-Agent". With no input bound to it, picking 自定义 at global level
+ * could only ever mean "send nothing", so the custom option was inert and a
+ * custom UA was expressible per-site only — 30 sites meant setting it 30 times.
+ *
+ * The two built-in presets stay read-only on purpose: their version strings are
+ * maintained by hand in the server source, and letting the panel overwrite them
+ * would make 「Claude Code」 mean something other than Claude Code.
+ *
+ * The literal duplicates the server's preset id because web code may not import
+ * from `src/server`; a test asserts both still match. Distinct from
+ * `MODEL_PROBE_UA_CUSTOM` below despite the identical string: that one is a
+ * UI-only sentinel in the per-SITE select and is never stored, while this is a
+ * real preset id that round-trips through the config.
+ */
+export const MODEL_PROBE_CUSTOM_UA_PRESET_ID = 'custom';
+
+export function customUserAgentPresetValue(presets: readonly ModelProbeUserAgentPreset[]): string {
+  return presets.find((preset) => preset.id === MODEL_PROBE_CUSTOM_UA_PRESET_ID)?.value ?? '';
+}
+
+export function hasCustomUserAgentPreset(presets: readonly ModelProbeUserAgentPreset[]): boolean {
+  return presets.some((preset) => preset.id === MODEL_PROBE_CUSTOM_UA_PRESET_ID);
+}
+
+/**
+ * Returns a new preset list with the custom preset's value replaced. Presets are
+ * copied rather than mutated so the draft stays a fresh object and React sees the
+ * change.
+ */
+export function withCustomUserAgentValue(
+  presets: readonly ModelProbeUserAgentPreset[],
+  value: string,
+): ModelProbeUserAgentPreset[] {
+  return presets.map((preset) => (
+    preset.id === MODEL_PROBE_CUSTOM_UA_PRESET_ID ? { ...preset, value } : { ...preset }
+  ));
+}
 
 export function splitConfigLines(text: string): string[] {
   const seen = new Set<string>();
@@ -98,6 +145,7 @@ export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfi
 export function configPayloadFromDraft(
   draft: ModelProbeConfigDraft,
   limits: ModelProbeConfigLimits,
+  saved: Pick<ModelProbeConfig, 'concurrency' | 'timeoutMs'>,
 ): ModelProbeConfigPayload {
   return {
     interestPatterns: splitConfigLines(draft.interestPatternsText),
@@ -105,21 +153,47 @@ export function configPayloadFromDraft(
     userAgents: draft.userAgents.map((preset) => ({ ...preset })),
     defaultUserAgentId: draft.defaultUserAgentId,
     errorKeywords: splitConfigLines(draft.errorKeywordsText),
-    concurrency: clampDraftInteger(draft.concurrencyText, limits.minConcurrency, limits.maxConcurrency),
-    timeoutMs: clampDraftInteger(draft.timeoutMsText, limits.minTimeoutMs, limits.maxTimeoutMs),
+    concurrency: clampDraftInteger(
+      draft.concurrencyText,
+      limits.minConcurrency,
+      limits.maxConcurrency,
+      saved.concurrency,
+    ),
+    timeoutMs: clampDraftInteger(
+      draft.timeoutMsText,
+      limits.minTimeoutMs,
+      limits.maxTimeoutMs,
+      saved.timeoutMs,
+    ),
     syncToRouting: draft.syncToRouting,
   };
 }
 
 /**
- * Clamps to the server-reported bounds so a typo cannot be silently rewritten by
- * the server into something the operator never saw. A blank or non-numeric field
- * falls back to the minimum, matching the server's own floor.
+ * Clamps a typed number to the server-reported bounds so a typo cannot be
+ * silently rewritten by the server into something the operator never saw.
+ *
+ * A blank or non-numeric field is NOT a value — it is the absence of one — so it
+ * falls back to `fallback`, which callers pass as the currently saved setting.
+ * Falling back to `min` instead (as this did) disagrees with the server on the
+ * field where it matters: `clampInteger` in
+ * `src/server/services/modelProbeConfigService.ts` returns the DEFAULT for a
+ * blank input, and for `timeoutMs` the default is 15000 while the minimum is
+ * 3000. Clearing the timeout field therefore installed a 3s probe timeout the
+ * operator never chose, which manufactures `inconclusive` timeouts against
+ * slow-but-working models — the exact class of false verdict this feature exists
+ * to remove. Concurrency hid it, because there the server's default and minimum
+ * are both 1.
+ *
+ * Re-sending the saved value is preferred over sending the server's default
+ * because the web layer is not told what the defaults are (`limits` carries
+ * bounds only), and because a blanked field most plausibly means "I did not mean
+ * to change this".
  */
-export function clampDraftInteger(text: string, min: number, max: number): number {
+export function clampDraftInteger(text: string, min: number, max: number, fallback: number): number {
   const numeric = Number.parseInt(String(text ?? '').trim(), 10);
-  if (!Number.isFinite(numeric)) return min;
-  return Math.min(max, Math.max(min, numeric));
+  const resolved = Number.isFinite(numeric) ? numeric : fallback;
+  return Math.min(max, Math.max(min, resolved));
 }
 
 export type ModelProbePatternIssue = {

@@ -562,8 +562,13 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
         {/*
           A cancelled sweep is not a finished one. The counters below describe
           only the part that ran, so this names the remainder before them — and
-          says plainly that the unsupported verdicts were not written to routing,
+          says plainly that the unsupported verdicts were not applied to routing,
           because the run service withholds that sync when cancelled.
+
+          Stated as "not marked unavailable" rather than "not written to the site
+          disable list": `syncUnsupportedToRouting` never touches
+          `site_disabled_models` on ANY path, so naming it here would imply a
+          completed sweep does.
         */}
         {summary.cancelled && (
           <div className="alert alert-warning" data-testid="model-probe-task-cancelled">
@@ -573,8 +578,8 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
               下面的数字只覆盖已经跑完的那一部分。
             </div>
             <div style={{ fontSize: 12, lineHeight: 1.7, marginTop: 6 }}>
-              本次的「不支持」结论未写入站点禁用模型：取消意味着这次探测的授权被收回，
-              结论保留下来供查看，但不会改动真实路由。
+              本次的「不支持」结论未同步到路由：取消意味着这次探测的授权被收回，
+              结论保留下来供查看，但不会把任何模型标记为不可用。
             </div>
           </div>
         )}
@@ -599,7 +604,9 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           {renderCounter('不支持', summary.unsupported)}
           {renderCounter('未确定', summary.inconclusive)}
           {renderCounter('已跳过', summary.skipped)}
-          {renderCounter('写入禁用', summary.disabled)}
+          {/* `disabled` counts `model_availability` rows flipped to unavailable,
+              not entries added to a site disable list. */}
+          {renderCounter('标记不可用', summary.disabled)}
           {renderCounter('同步路由', summary.routingSynced ? '是' : '否')}
         </div>
 
@@ -805,7 +812,7 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           <div style={{ fontWeight: 600, marginBottom: 4 }}>已请求取消，正在收尾</div>
           <div style={{ fontSize: 12, lineHeight: 1.7 }}>
             取消不会打断已经发出的那个请求：正在探测的模型会跑完，之后不再发起新的探测。
-            已经得到的结论会保留，但这次不会写入站点禁用模型。
+            已经得到的结论会保留，但这次不会同步到路由，也不会把任何模型标记为不可用。
           </div>
         </div>
       )}

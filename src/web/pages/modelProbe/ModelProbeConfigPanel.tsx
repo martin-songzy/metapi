@@ -6,8 +6,12 @@ import ResponsiveFormGrid from '../../components/ResponsiveFormGrid.js';
 import {
   configDraftFromConfig,
   configPayloadFromDraft,
+  customUserAgentPresetValue,
   findInvalidInterestPatterns,
+  hasCustomUserAgentPreset,
   splitConfigLines,
+  withCustomUserAgentValue,
+  MODEL_PROBE_CUSTOM_UA_PRESET_ID,
   type ModelProbeConfigDraft,
 } from './modelProbeTypes.js';
 
@@ -82,6 +86,10 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
     description: preset.value || '不发送 User-Agent',
   }));
 
+  const customUserAgent = customUserAgentPresetValue(draft.userAgents);
+  const customUserAgentSelected = draft.defaultUserAgentId === MODEL_PROBE_CUSTOM_UA_PRESET_ID
+    && hasCustomUserAgentPreset(draft.userAgents);
+
   const handleSave = async () => {
     if (patternIssues.length > 0) {
       toast.error(`有 ${patternIssues.length} 条模型匹配正则无效，请先修正`);
@@ -90,7 +98,9 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
 
     setSaving(true);
     try {
-      const response = await api.saveModelProbeConfig(configPayloadFromDraft(draft, limits));
+      // `config` is the last saved record, and it is what a blanked numeric field
+      // falls back to — see `clampDraftInteger`.
+      const response = await api.saveModelProbeConfig(configPayloadFromDraft(draft, limits, config));
       onSaved(response.config);
       toast.success('全局探测配置已保存');
     } catch (error: any) {
@@ -195,7 +205,33 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
               onChange={(value) => setDraft((prev) => ({ ...prev, defaultUserAgentId: value }))}
               options={userAgentOptions}
             />
-            <div style={hintStyle}>站点未单独设置时使用。</div>
+            {/*
+              Only the 自定义 preset is editable here. Without this field the
+              custom option could only ever mean "send nothing", so a custom UA
+              was expressible per-site only. The two built-in presets keep their
+              hand-maintained version strings.
+            */}
+            {customUserAgentSelected && (
+              <input
+                type="text"
+                data-testid="model-probe-default-user-agent-custom"
+                value={customUserAgent}
+                onChange={(event) => setDraft((prev) => ({
+                  ...prev,
+                  userAgents: withCustomUserAgentValue(prev.userAgents, event.target.value),
+                }))}
+                placeholder="留空表示不发送 User-Agent"
+                style={{ ...numberInputStyle, marginTop: 8 }}
+              />
+            )}
+            <div style={hintStyle}>
+              站点未单独设置时使用。
+              {customUserAgentSelected && (
+                customUserAgent.trim().length === 0
+                  ? '当前为空，探测请求不会带 User-Agent。'
+                  : '这一条会同时出现在站点的 User-Agent 选项里。'
+              )}
+            </div>
           </div>
 
           <div>
@@ -238,8 +274,13 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
         />
         <span>
           <span style={{ fontSize: 13, fontWeight: 600 }}>把探测结论同步到路由</span>
-          <span style={{ ...hintStyle, display: 'block', marginTop: 2 }}>
-            开启后「不支持」的模型会写入站点禁用模型，直接影响真实路由；关闭时探测只记录结果。
+          <span
+            data-testid="model-probe-sync-to-routing-hint"
+            style={{ ...hintStyle, display: 'block', marginTop: 2 }}
+          >
+            开启后「不支持」的模型只在对应账号上被标记为不可用，并重建一次路由；
+            人工添加的模型不受影响，站点级别的禁用名单也不会被改动。
+            还需要服务端 PROXY_ROUTING_ENABLED=true 才会真的生效；关闭时探测只记录结果，不动路由。
           </span>
         </span>
       </label>

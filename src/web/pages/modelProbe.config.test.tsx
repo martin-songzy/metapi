@@ -150,6 +150,22 @@ function selectOptionLabels(select: ReactTestInstance): string[] {
     .map((label) => collectText(label).trim());
 }
 
+/**
+ * Matches on the option's label element rather than the button's whole text: the
+ * global User-Agent select also renders a description under each label, so a
+ * whole-button equality check finds nothing there.
+ */
+function findSelectOption(select: ReactTestInstance, label: string): ReactTestInstance {
+  return select.find((node) => (
+    node.props.className?.startsWith?.('modern-select-option')
+    && node.type === 'button'
+    && node.findAll((child) => (
+      child.props.className === 'modern-select-option-label'
+      && collectText(child).trim() === label
+    )).length === 1
+  ));
+}
+
 function findSaveConfigButton(root: ReactTestInstance): ReactTestInstance {
   return root.find((node) => (
     node.type === 'button'
@@ -341,8 +357,6 @@ describe('ModelProbe global configuration panel', () => {
       // the operator never chose and never saw.
       expect((await saveWith(root.root, 'model-probe-concurrency', '9')).concurrency).toBe(6);
       expect((await saveWith(root.root, 'model-probe-concurrency', '1')).concurrency).toBe(2);
-      // Blank falls back to the reported minimum, matching the server's floor.
-      expect((await saveWith(root.root, 'model-probe-concurrency', '')).concurrency).toBe(2);
     } finally {
       root.unmount();
     }
@@ -356,6 +370,148 @@ describe('ModelProbe global configuration panel', () => {
     } finally {
       root.unmount();
     }
+  });
+
+  /**
+   * A cleared field is the absence of a value, not a request for the lowest legal
+   * one. The earlier assertion here expected the reported MINIMUM and called that
+   * "the server's floor"; the server's `clampInteger` returns the DEFAULT for a
+   * blank input, and for `timeoutMs` that is 15000 against a 3000 minimum. So
+   * clearing the timeout used to install a 3s probe timeout — short enough to
+   * time out slow-but-working models and report them as unavailable.
+   *
+   * The fixture's saved config (concurrency 3, timeoutMs 15000) shares no value
+   * with the fixture's bounds (2..6, 4000..41000), so falling back to either
+   * bound, or to a hard-coded 1 / 15000 / 3000, fails these.
+   */
+  it('keeps the saved value when a numeric field is cleared, rather than dropping to the minimum', async () => {
+    const root = await renderPage();
+    try {
+      expect((await saveWith(root.root, 'model-probe-concurrency', '')).concurrency).toBe(3);
+
+      const timeout = (await saveWith(root.root, 'model-probe-timeout', '')).timeoutMs;
+      expect(timeout).toBe(15_000);
+      // Named explicitly: this is the value the old fallback produced, and it is
+      // the one that manufactures false timeouts.
+      expect(timeout).not.toBe(4_000);
+      expect(timeout).not.toBe(3_000);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps the saved value for a non-numeric field too', async () => {
+    const root = await renderPage();
+    try {
+      expect((await saveWith(root.root, 'model-probe-timeout', 'abc')).timeoutMs).toBe(15_000);
+      expect((await saveWith(root.root, 'model-probe-concurrency', '   ')).concurrency).toBe(3);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  /**
+   * `syncUnsupportedToRouting` (`src/server/services/modelProbeRunService.ts`)
+   * flips `available` on existing `model_availability` rows and rebuilds routes.
+   * Its docblock states it deliberately does NOT insert `site_disabled_models`,
+   * because that table is keyed by SITE rather than by account and never
+   * auto-clears. Copy that threatens the more destructive effect is wrong in the
+   * direction that deters an operator from a setting safer than advertised —
+   * the mirror image of the per-site UA placeholder fixed in 6cdddd3.
+   */
+  it('describes what syncing to routing actually writes, not 站点禁用模型', async () => {
+    const root = await renderPage();
+    try {
+      const hint = collectText(findByTestId(root.root, 'model-probe-sync-to-routing-hint'));
+
+      expect(hint).not.toContain('站点禁用模型');
+      // Paired positives, so the assertion above cannot pass by rendering an
+      // empty hint: the real effect and its second gate both have to be stated.
+      expect(hint).toContain('不可用');
+      expect(hint).toContain('路由');
+      expect(hint).toContain('PROXY_ROUTING_ENABLED');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('lets the global 自定义 User-Agent carry a value instead of only meaning "send nothing"', async () => {
+    const root = await renderPage();
+    try {
+      // Absent while a built-in preset is selected: those version strings are
+      // maintained in the server source and must not be editable here.
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-default-user-agent-custom'
+      ))).toHaveLength(0);
+
+      const select = findByTestId(root.root, 'model-probe-default-user-agent');
+      await act(async () => {
+        findSelectOption(select, '自定义 / 不发送').props.onClick();
+      });
+
+      const input = findByTestId(root.root, 'model-probe-default-user-agent-custom');
+      expect(input.props.value).toBe('');
+      await act(async () => {
+        input.props.onChange({ target: { value: 'probe-agent/9.9' } });
+      });
+
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.saveModelProbeConfig.mock.calls.at(-1)?.[0] as Record<string, any>;
+      expect(payload.defaultUserAgentId).toBe('custom');
+      expect(payload.userAgents).toEqual([
+        { id: 'claude-code', label: 'Claude Code', value: 'claude-cli/2.1.63 (external, cli)' },
+        { id: 'codex-cli', label: 'Codex CLI', value: 'codex_cli_rs/0.20.0' },
+        { id: 'custom', label: '自定义 / 不发送', value: 'probe-agent/9.9' },
+      ]);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('still lets the global 自定义 preset mean "send no User-Agent" when left blank', async () => {
+    const root = await renderPage();
+    try {
+      const select = findByTestId(root.root, 'model-probe-default-user-agent');
+      await act(async () => {
+        findSelectOption(select, '自定义 / 不发送').props.onClick();
+      });
+
+      // The one way to send no UA at all must stay reachable, and the panel has
+      // to say which of the two a blank field means.
+      const panel = collectText(findByTestId(root.root, 'model-probe-config-panel'));
+      expect(panel).toContain('不会带 User-Agent');
+
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.saveModelProbeConfig.mock.calls.at(-1)?.[0] as Record<string, any>;
+      expect(payload.userAgents.find((preset: any) => preset.id === 'custom').value).toBe('');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('mirrors the server preset id rather than inventing its own', () => {
+    const serverSource = readFileSync(
+      resolve(process.cwd(), 'src/server/services/modelProbeConfigService.ts'),
+      'utf8',
+    ).replace(/\r\n/g, '\n');
+    const webSource = readFileSync(
+      resolve(process.cwd(), 'src/web/pages/modelProbe/modelProbeTypes.ts'),
+      'utf8',
+    ).replace(/\r\n/g, '\n');
+
+    // Web code may not import from src/server, so the shared literal is pinned
+    // from both ends. If the server renames the preset, the custom UA field would
+    // otherwise silently stop appearing.
+    expect(serverSource).toContain("{ id: 'custom', label: '自定义 / 不发送', value: '' }");
+    expect(webSource).toContain("export const MODEL_PROBE_CUSTOM_UA_PRESET_ID = 'custom';");
   });
 
   it('flags patterns beyond the server-reported count cap', async () => {
