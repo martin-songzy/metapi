@@ -11,6 +11,7 @@ import {
 } from '../../api.js';
 import CenteredModal from '../../components/CenteredModal.js';
 import { useToast } from '../../components/Toast.js';
+import { MODEL_PROBE_TASK_TYPE } from './modelProbeTypes.js';
 
 /**
  * Operator-facing trigger for one probe sweep, plus the live progress of the task
@@ -93,7 +94,32 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   const [logs, setLogs] = useState<ModelProbeTaskLogEntry[]>([]);
   const [reused, setReused] = useState(false);
   const [pollError, setPollError] = useState('');
+  /**
+   * Bumped to re-arm the poll effect for an *unchanged* task id. Without it the
+   * effect could only ever restart when `taskId` changed value, so once polling
+   * gave up there was no route back: the server dedupes an unchanged scope and
+   * returns the same id, making `setTaskId` a no-op.
+   */
+  const [pollAttempt, setPollAttempt] = useState(0);
+  /** True once polling gave up. Drives the retry / stop-following affordance. */
+  const [pollStopped, setPollStopped] = useState(false);
+  /** True when this panel adopted a sweep that was already running on mount. */
+  const [reattached, setReattached] = useState(false);
   const notifiedTaskIdRef = useRef<string | null>(null);
+  /**
+   * Set synchronously by `startRun` so a reattach lookup still in flight cannot
+   * overwrite a sweep the operator just launched themselves.
+   */
+  const operatorStartedRef = useRef(false);
+
+  /**
+   * A tracked task with no terminal status yet counts as in flight, including
+   * the window before the first poll answers. While it is in flight a second
+   * 发起探测 must be refused: an unchanged scope would be deduped server-side,
+   * but a *changed* scope produces a new dedupe key, so the click would add a
+   * sweep spending more quota while the panel quietly dropped the first one.
+   */
+  const sweepInFlight = taskId !== null && (task === null || !isTerminal(task.status));
 
   const scopePayload = useMemo<ModelProbeRunPayload>(
     () => (scopeSiteIds.length > 0 ? { siteIds: [...scopeSiteIds].sort((a, b) => a - b) } : {}),
@@ -128,6 +154,10 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
    * `run_limit_exceeded` would just fail again — that code is not confirmable.
    */
   const startRun = async (payload: ModelProbeRunPayload) => {
+    // Guarded here and not only on `disabled`, so the refusal is a behaviour
+    // rather than a styling detail.
+    if (sweepInFlight) return;
+    operatorStartedRef.current = true;
     setStarting(true);
     setStartError('');
     try {
@@ -152,6 +182,8 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
       setLogs([]);
       setTask(null);
       setPollError('');
+      setPollStopped(false);
+      setReattached(false);
       notifiedTaskIdRef.current = null;
       setTaskId(outcome.data.taskId);
       if (outcome.data.reused) {
@@ -191,9 +223,10 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   }, [onRunFinished, toast]);
 
   /**
-   * One interval per task id, cleared both on a terminal status and on unmount.
-   * `cancelled` additionally drops a response that lands after teardown, so a
-   * closed page never writes state.
+   * One interval per (task id, attempt), cleared both on a terminal status and
+   * on unmount. `cancelled` additionally drops a response that lands after
+   * teardown, so a closed page never writes state. Keying on `pollAttempt` as
+   * well as `taskId` is what makes a give-up recoverable.
    */
   useEffect(() => {
     if (!taskId) return undefined;
@@ -230,6 +263,7 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
         // stop rather than leave a dead run looking alive forever.
         if (consecutiveFailures >= 3) {
           stop();
+          setPollStopped(true);
           toast.error(message);
         }
       }
@@ -242,7 +276,63 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
       cancelled = true;
       stop();
     };
-  }, [announceTerminal, taskId, toast]);
+  }, [announceTerminal, pollAttempt, taskId, toast]);
+
+  /**
+   * `taskId` is component state, so before this a navigation away and back — or
+   * any reload — lost a sweep that was still running and still spending quota,
+   * leaving the panel with no sign it existed. Runs once on mount and adopts the
+   * newest non-terminal probe task the server still knows about.
+   *
+   * A failure here is deliberately silent: not finding a sweep to rejoin is the
+   * normal case, and an error banner about it would push the operator toward the
+   * one button that costs money.
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    const reattach = async () => {
+      try {
+        const response = await api.getModelProbeTasks();
+        if (cancelled || operatorStartedRef.current) return;
+        const rows = Array.isArray(response?.tasks) ? response.tasks : [];
+        // The list is newest-first, so the first match is the newest sweep.
+        const running = rows.find(
+          (row) => row.type === MODEL_PROBE_TASK_TYPE && !isTerminal(row.status),
+        );
+        if (!running) return;
+        setReattached(true);
+        setTaskId(running.id);
+      } catch {
+        // Intentionally ignored: see above.
+      }
+    };
+
+    void reattach();
+    return () => { cancelled = true; };
+  }, []);
+
+  /** Re-arms the interval for the same task without discarding the transcript. */
+  const handleRetryPolling = () => {
+    setPollStopped(false);
+    setPollError('');
+    setPollAttempt((prev) => prev + 1);
+  };
+
+  /**
+   * Stops *following* the task; it does not stop the sweep. Without this the run
+   * guard would convert an unreachable task into a permanently disabled button.
+   */
+  const handleStopFollowing = () => {
+    setTaskId(null);
+    setTask(null);
+    setLogs([]);
+    setPollError('');
+    setPollStopped(false);
+    setReused(false);
+    setReattached(false);
+    notifiedTaskIdRef.current = null;
+  };
 
   const unverifiedSites = useMemo(
     () => (preview?.sites ?? []).filter((site) => !site.credentialVerified),
@@ -451,13 +541,29 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
 
   const renderTask = () => {
     if (!taskId) return null;
+    // `等待任务状态` may only be claimed while polling is genuinely still trying.
+    // Once it has given up, the status is unknown, not pending.
+    const taskStatusLabel = task
+      ? ` · ${task.status}`
+      : (pollStopped ? ' · 状态未知' : ' · 等待任务状态');
     return (
       <div style={{ marginTop: 16, borderTop: '1px solid var(--color-border)', paddingTop: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 14, fontWeight: 600 }}>本次探测进度</div>
-          {task && !isTerminal(task.status) && <span className="spinner spinner-sm" />}
-          <span style={hintStyle}>任务 {taskId}{task ? ` · ${task.status}` : ' · 等待任务状态'}</span>
+          {/*
+            Spinner tracks "we are actively polling", not "a task object exists",
+            so the window before the first answer shows motion — and a stopped
+            poll shows none.
+          */}
+          {sweepInFlight && !pollStopped && <span className="spinner spinner-sm" />}
+          <span style={hintStyle}>任务 {taskId}{taskStatusLabel}</span>
         </div>
+
+        {reattached && (
+          <div className="alert alert-info" data-testid="model-probe-task-reattached" style={{ marginTop: 10 }}>
+            打开这个页面之前就已在运行的探测，已经自动接回它的进度。这不是新发起的探测，没有额外消耗额度。
+          </div>
+        )}
 
         {reused && (
           <div className="alert alert-info" data-testid="model-probe-task-reused" style={{ marginTop: 10 }}>
@@ -469,10 +575,46 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           <div style={{ ...hintStyle, marginTop: 8 }}>{task.message}</div>
         )}
 
-        {pollError && (
+        {pollError && !pollStopped && (
           <div className="alert alert-warning" data-testid="model-probe-task-poll-error" style={{ marginTop: 10 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>无法获取任务状态，进度可能已停止更新</div>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>暂时无法获取任务状态，正在重试</div>
             <div style={{ fontSize: 12, lineHeight: 1.7 }}>{pollError}</div>
+          </div>
+        )}
+
+        {/*
+          Polling gave up, but the sweep itself very likely did not: it is running
+          on the server and still spending quota. So this says what stopped, and
+          offers the two honest ways forward instead of leaving the panel stuck.
+        */}
+        {pollStopped && (
+          <div className="alert alert-error" data-testid="model-probe-task-poll-stopped" style={{ marginTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>已停止获取任务状态，进度不再更新</div>
+            <div style={{ fontSize: 12, lineHeight: 1.7 }}>{pollError}</div>
+            <div style={{ fontSize: 12, lineHeight: 1.7, marginTop: 6 }}>
+              这只代表本页拿不到状态，服务端的探测可能仍在运行并继续消耗额度，不要当作它已经结束。
+              连接恢复后点「重试」继续跟随同一个任务；确认不再关心它时点「不再跟随」，之后才能发起新的探测。
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+              <button
+                type="button"
+                data-testid="model-probe-task-poll-retry"
+                className="btn btn-ghost"
+                style={{ border: '1px solid var(--color-border)' }}
+                onClick={() => handleRetryPolling()}
+              >
+                重试
+              </button>
+              <button
+                type="button"
+                data-testid="model-probe-task-detach"
+                className="btn btn-ghost"
+                style={{ border: '1px solid var(--color-border)' }}
+                onClick={() => handleStopFollowing()}
+              >
+                不再跟随
+              </button>
+            </div>
           </div>
         )}
 
@@ -516,6 +658,10 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
         <div style={{ ...hintStyle, marginTop: 6 }}>
           探测会用站点自己的密钥发出真实请求，会消耗上游额度。先预览确认范围，再发起。
         </div>
+        <div style={{ ...hintStyle, marginTop: 6 }} data-testid="model-probe-run-dedupe-hint">
+          范围没有变化时再次发起并不会新开一次探测，服务端会识别出等价的任务，本页只是重新跟随它的进度；
+          离开页面后回来也会自动接回仍在运行的那一次。
+        </div>
       </div>
 
       <div style={{ marginBottom: 12 }}>
@@ -555,11 +701,18 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           data-testid="model-probe-run-button"
           className="btn btn-primary"
           onClick={() => startRun(scopePayload)}
-          disabled={busy}
+          disabled={busy || sweepInFlight}
         >
           {starting ? <><span className="spinner spinner-sm" /> 发起中...</> : '发起探测'}
         </button>
       </div>
+
+      {sweepInFlight && (
+        <div style={{ ...hintStyle, marginTop: 10 }} data-testid="model-probe-run-active-hint">
+          已有一次探测正在进行，发起按钮暂时不可用。改动站点范围后再发起并不会缩小这一次，而是额外新增一次探测，
+          所以请先等它结束。
+        </div>
+      )}
 
       {previewError && (
         <div className="alert alert-error" data-testid="model-probe-preview-error" style={{ marginTop: 12 }}>

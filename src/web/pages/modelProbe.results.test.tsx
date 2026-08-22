@@ -377,6 +377,79 @@ describe('ModelProbe results applied-filter echo', () => {
   });
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((inner) => { resolve = inner; });
+  return { promise, resolve };
+}
+
+describe('ModelProbe results staleness', () => {
+  it('ignores a slow earlier response that lands after a newer one', async () => {
+    const slow = deferred<unknown>();
+    const fast = deferred<unknown>();
+    apiMock.getModelProbeResults
+      .mockReturnValueOnce(slow.promise)
+      .mockReturnValueOnce(fast.promise);
+
+    const root = await renderPage();
+    try {
+      // Second request issued while the first is still in flight.
+      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+
+      await act(async () => {
+        fast.resolve(resultsResponse(
+          [{ ...SUPPORTED_ROW, id: 7, modelName: 'FRESH-MODEL' }],
+          { sortBy: 'latency', order: 'asc', limit: 50, offset: 0 },
+          1,
+        ));
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('FRESH-MODEL');
+
+      await act(async () => {
+        slow.resolve(resultsResponse(
+          [{ ...SUPPORTED_ROW, id: 8, modelName: 'STALE-MODEL' }],
+          { sortBy: 'checkedAt', order: 'desc', limit: 50, offset: 0 },
+          1,
+        ));
+      });
+      await flushMicrotasks();
+
+      // The superseded response must not repaint the table, or the rows would
+      // disagree with the sort control that is rendered as active.
+      const pageText = collectText(root.root);
+      expect(pageText).not.toContain('STALE-MODEL');
+      expect(pageText).toContain('FRESH-MODEL');
+      expect(collectText(findByTestId(root.root, 'model-probe-results-applied'))).toContain('响应速度');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps the newer error rather than a superseded success', async () => {
+    const slow = deferred<unknown>();
+    apiMock.getModelProbeResults
+      .mockReturnValueOnce(slow.promise)
+      .mockRejectedValueOnce(new Error('结果查询失败'));
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-sort-balance'));
+      expect(collectText(findByTestId(root.root, 'model-probe-results-error'))).toContain('结果查询失败');
+
+      await act(async () => {
+        slow.resolve(resultsResponse([{ ...SUPPORTED_ROW, id: 9, modelName: 'STALE-MODEL' }], undefined, 1));
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root.root)).not.toContain('STALE-MODEL');
+      expect(collectText(findByTestId(root.root, 'model-probe-results-error'))).toContain('结果查询失败');
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
 describe('ModelProbe results safety and layout', () => {
   it('renders an upstream reason literally, never as markup', async () => {
     apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([

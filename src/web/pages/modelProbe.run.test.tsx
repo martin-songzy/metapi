@@ -15,6 +15,7 @@ const { apiMock } = vi.hoisted(() => ({
     previewModelProbe: vi.fn(),
     runModelProbe: vi.fn(),
     getModelProbeTask: vi.fn(),
+    getModelProbeTasks: vi.fn(),
     getModelProbeResults: vi.fn(),
   },
 }));
@@ -23,6 +24,16 @@ vi.mock('../api.js', () => ({ api: apiMock }));
 
 const RUN_PANEL_SOURCE = readFileSync(
   resolve(process.cwd(), 'src/web/pages/modelProbe/ModelProbeRunPanel.tsx'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+
+const RUN_SERVICE_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/server/services/modelProbeRunService.ts'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+
+const PROBE_TYPES_SOURCE = readFileSync(
+  resolve(process.cwd(), 'src/web/pages/modelProbe/modelProbeTypes.ts'),
   'utf8',
 ).replace(/\r\n/g, '\n');
 
@@ -142,10 +153,14 @@ function buildSummary(overrides: Record<string, unknown> = {}) {
   };
 }
 
+// `active-model-probe` is the literal the server stores and serialises; the
+// earlier `active_model_probe` fixture never matched the wire value.
+const PROBE_TASK_TYPE = 'active-model-probe';
+
 function buildTask(overrides: Record<string, unknown> = {}) {
   return {
     id: 'task-1',
-    type: 'active_model_probe',
+    type: PROBE_TASK_TYPE,
     title: '模型可用性探测',
     status: 'running' as const,
     message: '正在探测',
@@ -209,6 +224,7 @@ beforeEach(() => {
   });
   apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
   apiMock.previewModelProbe.mockResolvedValue({ success: true, preview: buildPreview() });
+  apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
   apiMock.getModelProbeResults.mockResolvedValue({
     success: true,
     items: [],
@@ -693,7 +709,9 @@ describe('ModelProbe terminal state honesty', () => {
       await click(findByTestId(root.root, 'model-probe-run-button'));
       await advanceMs(5_000);
 
-      expect(collectText(findByTestId(root.root, 'model-probe-task-poll-error'))).toContain('任务查询失败');
+      // After giving up, the banner is the terminal `poll-stopped` one rather
+      // than the transient `poll-error` one.
+      expect(collectText(findByTestId(root.root, 'model-probe-task-poll-stopped'))).toContain('任务查询失败');
       const stopped = apiMock.getModelProbeTask.mock.calls.length;
       await advanceMs(10_000);
       expect(apiMock.getModelProbeTask.mock.calls.length).toBe(stopped);
@@ -733,6 +751,239 @@ describe('ModelProbe run scope', () => {
     } finally {
       root.unmount();
     }
+  });
+});
+
+describe('ModelProbe run lifecycle', () => {
+  it('refuses to queue a second sweep while the tracked one is still running', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      expect(apiMock.runModelProbe).toHaveBeenCalledTimes(1);
+
+      // A mid-run scope change used to produce a *second* dedupe key, so this
+      // click added a sweep rather than narrowing the first one — and the panel
+      // then stopped mentioning the sweep still spending quota.
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-scope-site-9').props.onChange({ target: { checked: true } });
+      });
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+
+      expect(apiMock.runModelProbe).toHaveBeenCalledTimes(1);
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(true);
+      expect(collectText(findByTestId(root.root, 'model-probe-run-active-hint'))).toContain('正在进行');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('re-enables the run button once the tracked sweep reaches a terminal status', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask
+      .mockResolvedValueOnce({ success: true, task: buildTask({ status: 'running' }) })
+      .mockResolvedValue({
+        success: true,
+        task: buildTask({ status: 'succeeded', result: buildSummary() }),
+      });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(true);
+
+      await advanceMs(1_000);
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps the poll failure on screen when 发起探测 is clicked again', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockRejectedValue(new Error('任务查询失败'));
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(5_000);
+
+      const stopped = findByTestId(root.root, 'model-probe-task-poll-stopped');
+      // The sweep may well still be running upstream, so the banner must not
+      // imply the run stopped along with the polling.
+      expect(collectText(stopped)).toContain('服务端');
+
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+
+      // Previously this cleared logs/task/pollError and left `等待任务状态` with
+      // neither a spinner nor an error — a UI that never updates again.
+      expect(apiMock.runModelProbe).toHaveBeenCalledTimes(1);
+      expect(collectText(findByTestId(root.root, 'model-probe-task-poll-stopped'))).toContain('任务查询失败');
+      expect(collectText(root.root)).not.toContain('等待任务状态');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('restarts polling for an unchanged task id when the operator retries', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockRejectedValue(new Error('任务查询失败'));
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(5_000);
+      const gaveUp = apiMock.getModelProbeTask.mock.calls.length;
+      await advanceMs(5_000);
+      expect(apiMock.getModelProbeTask.mock.calls.length).toBe(gaveUp);
+
+      apiMock.getModelProbeTask.mockResolvedValue({
+        success: true,
+        task: buildTask({ status: 'running', message: '继续探测' }),
+      });
+      await click(findByTestId(root.root, 'model-probe-task-poll-retry'));
+
+      expect(apiMock.getModelProbeTask.mock.calls.length).toBeGreaterThan(gaveUp);
+      expect(queryByTestId(root.root, 'model-probe-task-poll-stopped')).toBeNull();
+      expect(queryByTestId(root.root, 'model-probe-task-poll-error')).toBeNull();
+
+      // The interval itself must be re-armed, not just one extra shot fired.
+      const afterRetry = apiMock.getModelProbeTask.mock.calls.length;
+      await advanceMs(2_000);
+      expect(apiMock.getModelProbeTask.mock.calls.length).toBeGreaterThan(afterRetry);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('lets the operator stop following an unreachable task and then run again', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockRejectedValue(new Error('任务查询失败'));
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(5_000);
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(true);
+
+      // Without this escape hatch the run guard would turn a lost poll into a
+      // permanently disabled button.
+      await click(findByTestId(root.root, 'model-probe-task-detach'));
+
+      expect(queryByTestId(root.root, 'model-probe-task-poll-stopped')).toBeNull();
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(false);
+
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      expect(apiMock.runModelProbe).toHaveBeenCalledTimes(2);
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+describe('ModelProbe run reattach', () => {
+  it('adopts a probe sweep that was already running when the page mounted', async () => {
+    apiMock.getModelProbeTasks.mockResolvedValue({
+      tasks: [{ id: 'task-9', type: PROBE_TASK_TYPE, status: 'running', createdAt: '2026-08-21T02:00:00.000Z' }],
+    });
+    apiMock.getModelProbeTask.mockResolvedValue({
+      success: true,
+      task: buildTask({ id: 'task-9', status: 'running', message: '正在探测' }),
+    });
+
+    const root = await renderPage();
+    try {
+      // Previously a remount lost the sweep entirely: zero polls, no progress
+      // section, and the only discoverable recovery was the button the panel
+      // warns spends real quota.
+      expect(apiMock.getModelProbeTask).toHaveBeenCalledWith('task-9');
+      expect(collectText(findByTestId(root.root, 'model-probe-task-reattached'))).toContain('已在运行');
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(true);
+
+      const before = apiMock.getModelProbeTask.mock.calls.length;
+      await advanceMs(1_000);
+      expect(apiMock.getModelProbeTask.mock.calls.length).toBeGreaterThan(before);
+      expect(apiMock.runModelProbe).not.toHaveBeenCalled();
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('ignores finished sweeps and other task types', async () => {
+    apiMock.getModelProbeTasks.mockResolvedValue({
+      tasks: [
+        { id: 'other-1', type: 'site-announcement-sync', status: 'running', createdAt: '2026-08-21T02:10:00.000Z' },
+        { id: 'task-old', type: PROBE_TASK_TYPE, status: 'succeeded', createdAt: '2026-08-21T02:05:00.000Z' },
+        { id: 'task-bad', type: PROBE_TASK_TYPE, status: 'failed', createdAt: '2026-08-21T02:04:00.000Z' },
+      ],
+    });
+
+    const root = await renderPage();
+    try {
+      expect(apiMock.getModelProbeTask).not.toHaveBeenCalled();
+      expect(queryByTestId(root.root, 'model-probe-task-reattached')).toBeNull();
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('adopts the newest running sweep when several are listed', async () => {
+    apiMock.getModelProbeTasks.mockResolvedValue({
+      tasks: [
+        { id: 'task-new', type: PROBE_TASK_TYPE, status: 'pending', createdAt: '2026-08-21T02:20:00.000Z' },
+        { id: 'task-older', type: PROBE_TASK_TYPE, status: 'running', createdAt: '2026-08-21T02:00:00.000Z' },
+      ],
+    });
+    apiMock.getModelProbeTask.mockResolvedValue({
+      success: true,
+      task: buildTask({ id: 'task-new', status: 'pending' }),
+    });
+
+    const root = await renderPage();
+    try {
+      expect(apiMock.getModelProbeTask).toHaveBeenCalledWith('task-new');
+      expect(apiMock.getModelProbeTask).not.toHaveBeenCalledWith('task-older');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('stays usable when the task list cannot be read', async () => {
+    apiMock.getModelProbeTasks.mockRejectedValue(new Error('任务列表不可用'));
+
+    const root = await renderPage();
+    try {
+      // A failed reattach lookup must not block a fresh run, and must not
+      // fabricate a progress section for a task it never found.
+      expect(queryByTestId(root.root, 'model-probe-task-reattached')).toBeNull();
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(false);
+      expect(collectText(root.root)).not.toContain('任务列表不可用');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('explains up front that re-running an unchanged scope rejoins instead of adding a sweep', async () => {
+    const root = await renderPage();
+    try {
+      // This is the copy that removes the trap: pressing 发起探测 for a scope
+      // already running is safe, but nothing used to say so in advance.
+      const hint = collectText(findByTestId(root.root, 'model-probe-run-dedupe-hint'));
+      expect(hint).toContain('不会');
+      expect(hint).toContain('跟随');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('pins the probe task type to the literal the server stores', () => {
+    // The web cannot import from `src/server`, so this keeps the two copies of
+    // the task type honest instead of letting them drift silently apart.
+    expect(RUN_SERVICE_SOURCE).toContain("export const ACTIVE_MODEL_PROBE_TASK_TYPE = 'active-model-probe';");
+    expect(PROBE_TYPES_SOURCE).toContain("export const MODEL_PROBE_TASK_TYPE = 'active-model-probe';");
   });
 });
 

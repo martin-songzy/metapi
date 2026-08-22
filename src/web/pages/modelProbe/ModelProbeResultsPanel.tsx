@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   api,
   type ModelProbeResult,
@@ -108,29 +108,40 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
   const [loadError, setLoadError] = useState('');
   const [filterOpen, setFilterOpen] = useState(false);
 
-  const load = useCallback(async (next: ModelProbeResultsQuery) => {
-    setLoading(true);
-    try {
-      const response = await api.getModelProbeResults(next);
-      setItems(Array.isArray(response.items) ? response.items : []);
-      setTotal(Number.isFinite(response.total) ? response.total : 0);
-      setAppliedQuery(response.query ?? {});
-      setLoadError('');
-    } catch (error: any) {
-      const message = error?.message || '加载探测结果失败';
-      setItems([]);
-      setTotal(0);
-      setAppliedQuery(null);
-      setLoadError(message);
-      toast.error(message);
-    } finally {
-      setLoading(false);
-    }
-  }, [toast]);
-
+  /**
+   * `cancelled` is the repo's standard stale-response guard (see `TokensPanel`,
+   * `Models`, `ModelProbeRunPanel`). Without it a slow earlier request can land
+   * after a newer one and repaint the table, leaving the rows disagreeing with
+   * the sort button rendered as active and with the applied-filter echo.
+   */
   useEffect(() => {
-    void load(query);
-  }, [load, query, refreshToken]);
+    let cancelled = false;
+    setLoading(true);
+
+    const load = async () => {
+      try {
+        const response = await api.getModelProbeResults(query);
+        if (cancelled) return;
+        setItems(Array.isArray(response.items) ? response.items : []);
+        setTotal(Number.isFinite(response.total) ? response.total : 0);
+        setAppliedQuery(response.query ?? {});
+        setLoadError('');
+      } catch (error: any) {
+        if (cancelled) return;
+        const message = error?.message || '加载探测结果失败';
+        setItems([]);
+        setTotal(0);
+        setAppliedQuery(null);
+        setLoadError(message);
+        toast.error(message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void load();
+    return () => { cancelled = true; };
+  }, [query, refreshToken, toast]);
 
   /** Any filter or sort change resets paging: page 3 of the old filter is meaningless. */
   const applyQuery = (patch: Partial<ModelProbeResultsQuery>) => {

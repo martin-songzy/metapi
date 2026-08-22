@@ -19,6 +19,15 @@ export {
 };
 
 /**
+ * The `type` a probe sweep carries in `/api/tasks`, used to recognise a sweep
+ * worth reattaching to. It duplicates `ACTIVE_MODEL_PROBE_TASK_TYPE` in
+ * `src/server/services/modelProbeRunService.ts` because web code may not import
+ * from `src/server`; a test asserts both literals still match, so the two cannot
+ * drift apart unnoticed. A shared module would be the better home for it.
+ */
+export const MODEL_PROBE_TASK_TYPE = 'active-model-probe';
+
+/**
  * Only `'auto'` is renamed for display; the other three are the literal endpoint
  * names an operator reads in upstream docs and logs, so translating them would
  * make the select harder to map onto reality.

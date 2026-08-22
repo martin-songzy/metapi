@@ -1005,6 +1005,24 @@ export type ModelProbeTaskResponse = {
   task: ModelProbeTask;
 };
 
+/**
+ * One row of `/api/tasks`, narrowed to what reattaching needs. Deliberately
+ * omits `result` and `logs`: that list carries every task type, so typing those
+ * fields as a probe summary would be a claim about tasks this page knows
+ * nothing about. The full object comes from `getModelProbeTask` afterwards.
+ */
+export type ModelProbeTaskListEntry = {
+  id: string;
+  type: string;
+  status: ModelProbeTaskStatus;
+  createdAt: string;
+};
+
+/** Note: `/api/tasks` returns no `success` field, only `tasks`. */
+export type ModelProbeTaskListResponse = {
+  tasks: ModelProbeTaskListEntry[];
+};
+
 export const api = {
   // Sites
   getSites: () => request("/api/sites"),
@@ -1549,6 +1567,15 @@ export const api = {
   getModelProbeTask: (taskId: string) =>
     request<ModelProbeTaskResponse>(
       `/api/tasks/${encodeURIComponent(taskId)}`,
+    ),
+  /**
+   * Typed view of `/api/tasks` used to reattach to a sweep that is still running
+   * after a navigation or reload. `getTasks` covers the same endpoint but is
+   * untyped, and this page must not import `any`.
+   */
+  getModelProbeTasks: (limit = 50) =>
+    request<ModelProbeTaskListResponse>(
+      `/api/tasks?limit=${Math.max(1, Math.min(200, Math.trunc(limit)))}`,
     ),
 
   // Auth management
