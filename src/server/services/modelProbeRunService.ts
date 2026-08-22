@@ -19,6 +19,7 @@ import {
   type ModelProbeLiveFailure,
 } from './modelProbeDiscoveryService.js';
 import { chooseModelProbePrompt } from './modelProbePrompts.js';
+import { maskCredentialInText } from './modelProbeSecrets.js';
 import { probeRuntimeModel, type RuntimeModelProbeStatus } from './runtimeModelProbe.js';
 import type { ModelProbeFailureKind } from './modelProbeResponseClassifier.js';
 import type { UpstreamEndpoint } from './upstreamEndpointRuntime.js';
@@ -74,6 +75,14 @@ const MAX_RESULTS_LIMIT = 500;
  * from an upstream relay. Task 10 redacts these at the HTTP boundary; they are
  * enumerated here rather than pre-redacted so an operator debugging from the
  * server side still sees the original wording.
+ *
+ * BOTH redaction and length-bounding belong to that boundary
+ * (`modelProbeApiService.redactUpstreamProbeText`), and neither is applied here.
+ * Nothing in this module truncates a `message`: cutting text short before the
+ * redactor runs would hand it a body a secret can straddle, which is exactly the
+ * failure the boundary's overlap window exists to prevent. The one length cap in
+ * this file is `MAX_PERSISTED_REASON_LENGTH`, which is a database column limit and
+ * applies only to the persisted `reason` — see `upsertModelProbeResult`.
  *
  * Everything not listed here is either generated locally or a plain identifier.
  * No credential ever enters any of these structures: only projected fields are
@@ -150,44 +159,94 @@ type DiscoveryOutcome = {
   notes: string[];
 };
 
-function normalizeSiteIds(siteIds?: number[]): number[] | null {
-  if (!Array.isArray(siteIds)) return null;
+/**
+ * The set of sites one sweep may touch.
+ *
+ * A discriminated union rather than `number[] | null`, because the two states
+ * that union conflated are opposites in the only dimension that matters here:
+ * "no filter, probe every site" and "a filter that selected nothing" must
+ * produce the maximum and the minimum amount of real-quota traffic
+ * respectively. The previous `normalizeSiteIds` returned `null` for both, so an
+ * explicitly empty selection probed every site.
+ */
+export type ModelProbeScope =
+  | { kind: 'all' }
+  | { kind: 'ids'; siteIds: number[] };
+
+/** An explicitly supplied scope that names no usable site. */
+export class ModelProbeScopeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelProbeScopeError';
+  }
+}
+
+/**
+ * Turns an optional id list into a scope. Absent means every site; present
+ * means exactly the sites named.
+ *
+ * An empty or unusable list is an ERROR, not an empty run. Two reasons:
+ *
+ * 1. `contracts/modelProbePayloads.ts` already answers 400 for `[]` and for a
+ *    non-positive id (`siteIdsSchema`, `.min(1)` plus `z.number().int().positive()`).
+ *    Two layers disagreeing about whether the same payload is valid is exactly
+ *    how the original bug survived: the contract refused it while this function
+ *    silently widened it to every site. One rule, stated once.
+ * 2. An empty run would still queue a background task, log a sweep and report
+ *    `succeeded` over a scope the operator never got. A refusal names the
+ *    problem at the call site instead.
+ *
+ * Every entry must be a positive integer, so `[3, 0]` is refused rather than
+ * quietly narrowed to `[3]`: silently dropping an id from a quota-spending
+ * scope is the same class of bug as silently widening it. Ids are deduped and
+ * sorted so one scope always yields one dedupe key.
+ */
+export function resolveModelProbeScope(siteIds?: number[] | null): ModelProbeScope {
+  if (siteIds === undefined || siteIds === null) return { kind: 'all' };
+  if (!Array.isArray(siteIds)) {
+    throw new ModelProbeScopeError('站点范围必须是站点 ID 数组');
+  }
+
   const unique = new Set<number>();
   for (const raw of siteIds) {
     const numeric = Number(raw);
-    if (!Number.isInteger(numeric) || numeric <= 0) continue;
+    if (!Number.isInteger(numeric) || numeric <= 0) {
+      throw new ModelProbeScopeError(`站点范围包含无效的站点 ID：${String(raw)}`);
+    }
     unique.add(numeric);
   }
-  if (unique.size === 0) return null;
-  return [...unique].sort((left, right) => left - right);
+  if (unique.size === 0) {
+    throw new ModelProbeScopeError(
+      '本次没有选择任何站点，不会执行探测。要探测全部站点请不要传入 siteIds。',
+    );
+  }
+
+  return { kind: 'ids', siteIds: [...unique].sort((left, right) => left - right) };
 }
 
-export function buildActiveModelProbeDedupeKey(siteIds?: number[]): string {
-  const normalized = normalizeSiteIds(siteIds);
-  return `${ACTIVE_MODEL_PROBE_DEDUPE_PREFIX}:${normalized ? normalized.join(',') : 'all'}`;
+/**
+ * `all` and a joined id list can never collide, because ids are positive
+ * integers and no list of them spells `all`. That matters: two different scopes
+ * sharing one key would make one sweep silently join the wrong running task.
+ */
+export function buildActiveModelProbeDedupeKey(scope: ModelProbeScope): string {
+  const suffix = scope.kind === 'all' ? 'all' : scope.siteIds.join(',');
+  return `${ACTIVE_MODEL_PROBE_DEDUPE_PREFIX}:${suffix}`;
+}
+
+/**
+ * Operator copy for a refused oversized sweep, defined next to the cap it
+ * describes so the HTTP 409 and the run service's own guard cannot drift into
+ * saying different things about the same limit.
+ */
+export function buildModelProbeRunLimitMessage(targetCount: number): string {
+  return `本次匹配到 ${targetCount} 个探测目标，超过单次上限 ${MAX_ACTIVE_PROBE_RUN_TARGETS} 个。`
+    + '请收窄模型兴趣正则，或缩小站点范围后重试。';
 }
 
 function truncate(value: string, max: number): string {
   const normalized = String(value || '').trim();
   return normalized.length > max ? normalized.slice(0, max) : normalized;
-}
-
-export const MODEL_PROBE_CREDENTIAL_MASK = '[redacted-credential]';
-
-/**
- * Strips the credential we just sent out of upstream-authored text.
- *
- * Some relays echo the rejected key back in their error body, and `reason` is
- * both persisted and served to the results page. This is the one secret whose
- * value is known at this point, so masking it here is cheap and closes the path
- * before anything is written. Generic secret scrubbing is not attempted: it
- * belongs at the HTTP boundary, over the fields
- * `MODEL_PROBE_UPSTREAM_TEXT_FIELDS` names.
- */
-function maskCredential(text: string, credential: string): string {
-  const secret = String(credential || '').trim();
-  if (!secret || secret.length < 8) return text;
-  return text.split(secret).join(MODEL_PROBE_CREDENTIAL_MASK);
 }
 
 /**
@@ -198,7 +257,7 @@ function maskCredential(text: string, credential: string): string {
  * disabled site on purpose is the single-site flow's job (`probeSiteModels`), not
  * this one's. The exclusion is reported rather than silent.
  */
-async function resolveTargetSites(siteIds: number[] | null): Promise<{
+async function resolveTargetSites(scope: ModelProbeScope): Promise<{
   sites: SiteRow[];
   skipped: ModelProbeSkippedSite[];
 }> {
@@ -211,7 +270,10 @@ async function resolveTargetSites(siteIds: number[] | null): Promise<{
     )
     .all();
 
-  const requested = siteIds ? new Set(siteIds) : null;
+  // Only `kind: 'all'` means "no filter". A scope carrying ids always filters,
+  // even if that leaves nothing — the union makes "selected nothing" and
+  // "selected everything" impossible to confuse.
+  const requested = scope.kind === 'ids' ? new Set(scope.siteIds) : null;
   const selected = requested ? rows.filter((row) => requested.has(row.id)) : rows;
 
   const sites: SiteRow[] = [];
@@ -229,9 +291,9 @@ async function resolveTargetSites(siteIds: number[] | null): Promise<{
     sites.push(row);
   }
 
-  if (requested) {
+  if (scope.kind === 'ids') {
     const found = new Set(selected.map((row) => row.id));
-    for (const siteId of siteIds ?? []) {
+    for (const siteId of scope.siteIds) {
       if (found.has(siteId)) continue;
       skipped.push({
         siteId,
@@ -328,7 +390,8 @@ export async function previewActiveModelProbe(input?: { siteIds?: number[] }): P
   // whole preview, and the caller needs to see which entry was dropped.
   const { patterns, invalid } = compileInterestPatterns(probeConfig.interestPatterns);
 
-  const { sites, skipped: skippedSites } = await resolveTargetSites(normalizeSiteIds(input?.siteIds));
+  // Throws on an explicitly empty or unusable scope, before any discovery call.
+  const { sites, skipped: skippedSites } = await resolveTargetSites(resolveModelProbeScope(input?.siteIds));
   const { outcomes, skipped: discoverySkips } = await discoverAcrossSites({
     sites,
     probeConfig,
@@ -366,8 +429,10 @@ export function queueActiveModelProbe(input?: { siteIds?: number[] }): {
   task: BackgroundTask;
   reused: boolean;
 } {
-  const siteIds = normalizeSiteIds(input?.siteIds);
-  const dedupeKey = buildActiveModelProbeDedupeKey(siteIds ?? undefined);
+  // Throws before a task exists, so an empty selection cannot even queue a
+  // no-op sweep that would report `succeeded` over a scope nobody asked for.
+  const scope = resolveModelProbeScope(input?.siteIds);
+  const dedupeKey = buildActiveModelProbeDedupeKey(scope);
 
   const running = getRunningTaskByDedupeKey(dedupeKey);
   if (running) return { task: running, reused: true };
@@ -381,10 +446,12 @@ export function queueActiveModelProbe(input?: { siteIds?: number[] }): {
   const started = startBackgroundTask(
     {
       type: ACTIVE_MODEL_PROBE_TASK_TYPE,
-      title: siteIds ? `主动模型测活（${siteIds.length} 个站点）` : '主动模型测活（全部站点）',
+      title: scope.kind === 'ids'
+        ? `主动模型测活（${scope.siteIds.length} 个站点）`
+        : '主动模型测活（全部站点）',
       dedupeKey,
     },
-    () => runActiveModelProbe(siteIds, taskIdPromise),
+    () => runActiveModelProbe(scope, taskIdPromise),
   );
   resolveTaskId(started.task.id);
 
@@ -392,7 +459,7 @@ export function queueActiveModelProbe(input?: { siteIds?: number[] }): {
 }
 
 async function runActiveModelProbe(
-  siteIds: number[] | null,
+  scope: ModelProbeScope,
   taskIdPromise: Promise<string>,
 ): Promise<ModelProbeRunSummary> {
   const taskId = await taskIdPromise;
@@ -407,7 +474,7 @@ async function runActiveModelProbe(
     log('未配置有效的模型兴趣正则，本次不会探测任何模型（空列表按设计匹配 0 个模型）');
   }
 
-  const { sites, skipped: siteSkips } = await resolveTargetSites(siteIds);
+  const { sites, skipped: siteSkips } = await resolveTargetSites(scope);
   for (const skip of siteSkips) {
     log(`跳过站点 ${skip.siteName}（${skip.code}）：${skip.message}`);
   }
@@ -437,10 +504,7 @@ async function runActiveModelProbe(
 
   const skippedSites = [...siteSkips, ...discoverySkips];
   if (targets.length > MAX_ACTIVE_PROBE_RUN_TARGETS) {
-    throw new Error(
-      `本次匹配到 ${targets.length} 个探测目标，超过单次上限 ${MAX_ACTIVE_PROBE_RUN_TARGETS} 个。`
-      + '请收窄模型兴趣正则，或缩小站点范围后重试。',
-    );
+    throw new Error(buildModelProbeRunLimitMessage(targets.length));
   }
 
   log(`共 ${outcomes.length} 个站点、${targets.length} 个模型待探测，并发 ${probeConfig.concurrency}`);
@@ -506,7 +570,13 @@ async function runActiveModelProbe(
       latencyMs,
       httpStatus,
       failureKind,
-      reason: maskCredential(reason, credential),
+      // The one secret whose value is known here, so mask it by value before
+      // anything is written: some relays echo the rejected key back in their
+      // error body, and `reason` is both persisted and served to the results
+      // page. Shape-based scrubbing of secrets the probe never held is a
+      // separate control at the HTTP boundary, over the fields
+      // `MODEL_PROBE_UPSTREAM_TEXT_FIELDS` names.
+      reason: maskCredentialInText(reason, credential),
       endpointUsed,
       promptUsed: prompt,
       userAgentUsed: userAgent,

@@ -471,6 +471,13 @@ describe('model probe API routes', () => {
       expect(response.statusCode).toBe(409);
       expect(response.json()).toMatchObject({ code: 'run_limit_exceeded' });
       expect(queueActiveModelProbeMock).not.toHaveBeenCalled();
+
+      // The operator copy comes from the run service, which owns the cap, rather
+      // than from a second template here that could describe the same limit
+      // differently.
+      expect((response.json() as { message: string }).message).toBe(
+        runService.buildModelProbeRunLimitMessage(runService.MAX_ACTIVE_PROBE_RUN_TARGETS + 1),
+      );
     });
 
     it('rejects an invalid body before touching the services', async () => {

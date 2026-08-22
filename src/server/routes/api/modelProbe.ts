@@ -21,6 +21,7 @@ import {
   updateModelProbeSiteConfig,
 } from '../../services/modelProbeApiService.js';
 import {
+  buildModelProbeRunLimitMessage,
   listActiveModelProbeResults,
   previewActiveModelProbe,
 } from '../../services/modelProbeRunService.js';
@@ -115,8 +116,10 @@ export async function modelProbeRoutes(app: FastifyInstance) {
       return reply.code(409).send({
         success: false,
         code: decision.outcome,
-        message: `本次匹配到 ${decision.targetCount} 个探测目标，超过单次上限 ${limits.maxRunTargets} 个。`
-          + '请收窄模型兴趣正则，或缩小站点范围后重试。',
+        // Built by the run service, which owns the cap. A copy here would let
+        // the 409 and the run service's own refusal describe the same limit
+        // differently.
+        message: buildModelProbeRunLimitMessage(decision.targetCount),
         targetCount: decision.targetCount,
         confirmTargetThreshold: limits.confirmTargetThreshold,
         maxRunTargets: limits.maxRunTargets,

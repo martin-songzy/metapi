@@ -89,6 +89,7 @@ describe('modelProbeRunService', () => {
   let getDefaultModelProbeConfig: ProbeConfigModule['getDefaultModelProbeConfig'];
   let waitForBackgroundTaskCompletion: BackgroundTaskModule['waitForBackgroundTaskCompletion'];
   let getBackgroundTask: BackgroundTaskModule['getBackgroundTask'];
+  let listBackgroundTasks: BackgroundTaskModule['listBackgroundTasks'];
   let resetBackgroundTasks: BackgroundTaskModule['__resetBackgroundTasksForTests'];
   let config: typeof import('../config.js')['config'];
   let previousProxyRoutingEnabled = true;
@@ -111,6 +112,7 @@ describe('modelProbeRunService', () => {
     getDefaultModelProbeConfig = probeConfigModule.getDefaultModelProbeConfig;
     waitForBackgroundTaskCompletion = backgroundTaskModule.waitForBackgroundTaskCompletion;
     getBackgroundTask = backgroundTaskModule.getBackgroundTask;
+    listBackgroundTasks = backgroundTaskModule.listBackgroundTasks;
     resetBackgroundTasks = backgroundTaskModule.__resetBackgroundTasksForTests;
     config = configModule.config;
     previousProxyRoutingEnabled = config.proxyRoutingEnabled;
@@ -391,6 +393,93 @@ describe('modelProbeRunService', () => {
       expect(serialized).not.toContain('apiToken');
       expect(serialized).not.toContain('accessToken');
       expect(serialized).not.toContain('apiKey');
+    });
+  });
+
+  /**
+   * An explicit site selection that names nothing must probe NOTHING.
+   *
+   * The regression this pins: `normalizeSiteIds` used to return `null` for an
+   * empty result and `resolveTargetSites` read `null` as "no filter, every
+   * site", so `siteIds: []` (or `[0]`, or `[-1]`) ran the widest possible sweep
+   * against real paid quota when asked for the narrowest. `undefined` still
+   * legitimately means "every site", so all three cases are asserted together —
+   * a fix that refused `undefined` too would be just as wrong.
+   */
+  describe('scope resolution', () => {
+    const emptyScopes: Array<[string, number[]]> = [
+      ['an empty list', []],
+      ['a zero id', [0]],
+      ['a negative id', [-1]],
+      ['a non-integer id', [1.5]],
+      ['ids that are all unusable', [0, -3]],
+    ];
+
+    for (const [label, siteIds] of emptyScopes) {
+      it(`refuses a preview scoped by ${label} instead of previewing every site`, async () => {
+        await seedSite({ name: 'must-not-be-touched' });
+        await seedSite({ name: 'also-must-not-be-touched' });
+        await setInterest(['gpt']);
+        primeDiscovery([]);
+
+        await expect(service.previewActiveModelProbe({ siteIds })).rejects.toThrow(
+          service.ModelProbeScopeError,
+        );
+        expect(discoverModelsForActiveProbeMock).not.toHaveBeenCalled();
+      });
+
+      it(`refuses a run scoped by ${label} without queueing a task`, async () => {
+        await seedSite();
+        await setInterest(['gpt']);
+        primeDiscovery([]);
+
+        expect(() => service.queueActiveModelProbe({ siteIds })).toThrow(service.ModelProbeScopeError);
+        // A refusal before the task exists: an empty run would otherwise report
+        // `succeeded` over a scope the operator never chose.
+        expect(listBackgroundTasks()).toHaveLength(0);
+        expect(discoverModelsForActiveProbeMock).not.toHaveBeenCalled();
+        expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+      });
+    }
+
+    it('refuses a partly unusable list rather than quietly narrowing it', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['gpt']);
+      primeDiscovery([{ site, account, models: ['gpt-4o'] }]);
+
+      // Dropping the bad entry and probing site N anyway would silently change
+      // the scope the operator asked for; the payload contract 400s this too.
+      await expect(service.previewActiveModelProbe({ siteIds: [site.id, 0] })).rejects.toThrow(
+        service.ModelProbeScopeError,
+      );
+      expect(discoverModelsForActiveProbeMock).not.toHaveBeenCalled();
+    });
+
+    it('still treats an omitted scope as every site', async () => {
+      const first = await seedSite({ name: 'one' });
+      const second = await seedSite({ name: 'two' });
+      await setInterest(['gpt']);
+      primeDiscovery([
+        { site: first.site, account: first.account, models: ['gpt-4o'] },
+        { site: second.site, account: second.account, models: ['gpt-5'] },
+      ]);
+
+      const preview = await service.previewActiveModelProbe();
+
+      expect(discoverModelsForActiveProbeMock).toHaveBeenCalledTimes(2);
+      expect(preview.sites).toHaveLength(2);
+    });
+
+    it('keeps "all" and an explicit id list on distinct dedupe keys', () => {
+      const all = service.buildActiveModelProbeDedupeKey(service.resolveModelProbeScope());
+      const scoped = service.buildActiveModelProbeDedupeKey(
+        service.resolveModelProbeScope([9, 3, 3]),
+      );
+
+      expect(all).toBe('active-model-probe:all');
+      // Deduped and sorted, so one scope is always one key.
+      expect(scoped).toBe('active-model-probe:3,9');
+      expect(all).not.toBe(scoped);
     });
   });
 
@@ -789,12 +878,78 @@ describe('modelProbeRunService', () => {
 
       await runProbe();
 
+      const { MODEL_PROBE_CREDENTIAL_MASK } = await import('./modelProbeSecrets.js');
       const row = await db.select().from(schema.modelProbeResults).get();
       expect(row?.reason).not.toContain(CREDENTIAL);
-      expect(row?.reason).toContain(service.MODEL_PROBE_CREDENTIAL_MASK);
+      expect(row?.reason).toContain(MODEL_PROBE_CREDENTIAL_MASK);
 
       const served = await service.listActiveModelProbeResults({});
       expect(JSON.stringify(served)).not.toContain(CREDENTIAL);
+    });
+
+    /**
+     * The server-side ceiling on one sweep, pinned independently of the API's
+     * 409 gate.
+     *
+     * It is the last line of defence: the route refuses an oversized run using a
+     * freshly computed preview, but this cap sits after discovery inside the run
+     * itself, so it also covers the case where the model list grew between the
+     * preview and the sweep. Its whole job is to spend NO quota, so the
+     * assertion is that zero probes were issued — not merely that the task
+     * failed.
+     */
+    it('refuses a sweep over the run-target cap before issuing a single probe', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      const models = Array.from(
+        { length: service.MAX_ACTIVE_PROBE_RUN_TARGETS + 1 },
+        (_unused, index) => `gpt-${index}`,
+      );
+      primeDiscovery([{ site, account, models }]);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      const { finished } = await runProbe();
+
+      expect(finished?.status).toBe('failed');
+      expect(finished?.error).toContain(String(service.MAX_ACTIVE_PROBE_RUN_TARGETS));
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+      expect(await db.select().from(schema.modelProbeResults).all()).toHaveLength(0);
+    });
+
+    it('runs a sweep sitting exactly on the cap', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      const models = Array.from(
+        { length: service.MAX_ACTIVE_PROBE_RUN_TARGETS },
+        (_unused, index) => `gpt-${index}`,
+      );
+      primeDiscovery([{ site, account, models }]);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      const { finished } = await runProbe();
+
+      // The cap is a ceiling, not a fence one short of it: an off-by-one that
+      // refused the allowed maximum would be caught here.
+      expect(finished?.status).toBe('succeeded');
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(service.MAX_ACTIVE_PROBE_RUN_TARGETS);
+    }, 30_000);
+
+    it('flags a preview whose target set would be refused by the cap', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      const models = Array.from(
+        { length: service.MAX_ACTIVE_PROBE_RUN_TARGETS + 1 },
+        (_unused, index) => `gpt-${index}`,
+      );
+      primeDiscovery([{ site, account, models }]);
+
+      const over = await service.previewActiveModelProbe();
+      expect(over.totalModels).toBe(service.MAX_ACTIVE_PROBE_RUN_TARGETS + 1);
+      expect(over.exceedsRunLimit).toBe(true);
+
+      primeDiscovery([{ site, account, models: models.slice(0, service.MAX_ACTIVE_PROBE_RUN_TARGETS) }]);
+      const atCap = await service.previewActiveModelProbe();
+      expect(atCap.exceedsRunLimit).toBe(false);
     });
 
     it('records a probe throw as inconclusive rather than aborting the run', async () => {
@@ -942,6 +1097,18 @@ describe('modelProbeRunService', () => {
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/\/\/.*$/gm, '');
     }
+
+    it('masks credentials through the shared module instead of a private copy', async () => {
+      const code = await readServiceCode();
+
+      // One owner for value-based masking (`modelProbeSecrets.ts`). A second
+      // local implementation is how the two drift apart — e.g. one keeping an
+      // 8-character floor the other loses.
+      expect(code).toContain("from './modelProbeSecrets.js'");
+      expect(code).toContain('maskCredentialInText(');
+      expect(code).not.toMatch(/function\s+maskCredential\s*\(/);
+      expect(code).not.toContain('[redacted-credential]');
+    });
 
     it('registers no interval timer of its own', async () => {
       // The whole point of an *active* probe is that an operator triggers it.
