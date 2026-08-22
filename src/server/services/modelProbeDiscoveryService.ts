@@ -342,18 +342,25 @@ export async function discoverModelsForActiveProbe(input: {
   // error. Either way the credential is UNVERIFIED, so a cached result must carry
   // a reason. Never leave this null: that is what would let a revoked credential
   // read as a clean success.
+  //
+  // The copy below is operator-facing: `empty_unknown` is the MOST COMMON failure
+  // path (most adapters return `[]` instead of throwing), and this message ends up
+  // in `notes[0]`, in the `no_models` error and on the results page. It therefore
+  // states what the operator observes and what to check, not how the adapter layer
+  // is implemented. `kind: 'empty_unknown'` is the machine-readable half for anyone
+  // who needs the distinction.
   const effectiveLiveFailure: ModelProbeLiveFailure = liveFailure ?? {
     kind: 'empty_unknown',
     status: null,
-    message: '上游返回空模型列表且未抛出错误；多数适配器在 getModels 内部吞掉异常，'
-      + '因此无法区分「站点确实没有模型」与「凭据已失效」',
+    message: '上游没有返回任何模型，也没有报错。可能是该账号在此站点确实没有可用模型，'
+      + '也可能是凭据已失效，请先确认账号凭据仍然有效',
   };
 
   // OAuth-only accounts (Codex / Claude / Gemini CLI / Antigravity) need cloud
   // discovery that this read-only v1 intentionally does not perform, so their
   // adapters can legitimately come back empty. Say so rather than implying the
   // account simply has no models.
-  const notes: string[] = [`实时模型发现未返回模型：${effectiveLiveFailure.message}`];
+  const notes: string[] = [`获取模型列表失败：${effectiveLiveFailure.message}`];
   if (oauthProvider) {
     notes.push(`未执行 ${oauthProvider} OAuth 云端模型发现（本版本不支持），仅使用上述来源`);
   }
@@ -375,7 +382,7 @@ export async function discoverModelsForActiveProbe(input: {
 
   throw new ModelProbeDiscoveryError(
     'no_models',
-    `未获取到可探测的模型：实时发现与缓存记录均为空（${notes.join('；')}）`,
+    `没有可探测的模型：实时获取和历史缓存都是空的。${notes.join('；')}`,
     { oauthProvider, liveFailure: effectiveLiveFailure },
   );
 }

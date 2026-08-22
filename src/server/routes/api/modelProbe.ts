@@ -1,0 +1,174 @@
+import { FastifyInstance, FastifyReply } from 'fastify';
+
+import {
+  parseModelProbeConfigPayload,
+  parseModelProbePreviewPayload,
+  parseModelProbeResultsQuery,
+  parseModelProbeRunPayload,
+  parseModelProbeSiteConfigPayload,
+} from '../../contracts/modelProbePayloads.js';
+import {
+  isModelProbeConfigValidationError,
+  loadModelProbeConfig,
+} from '../../services/modelProbeConfigService.js';
+import {
+  applyModelProbeConfigPatch,
+  getModelProbeConfigLimits,
+  listModelProbeSites,
+  requestActiveModelProbeRun,
+  toModelProbePreviewResponse,
+  toModelProbeResultResponse,
+  updateModelProbeSiteConfig,
+} from '../../services/modelProbeApiService.js';
+import {
+  listActiveModelProbeResults,
+  previewActiveModelProbe,
+} from '../../services/modelProbeRunService.js';
+
+/**
+ * Thin adapter for the active model probe. Every handler does exactly three
+ * things: parse with a Zod contract, delegate to a service, shape the status code.
+ *
+ * No protocol conversion, no retry, no verdict logic, and no direct database
+ * access live here — those belong to `services/modelProbeApiService.ts` and the
+ * probe services it calls. The routing stack is deliberately absent from this
+ * file's import graph so every endpoint keeps working with
+ * `PROXY_ROUTING_ENABLED=false`.
+ */
+
+function sendBadRequest(reply: FastifyReply, message: string) {
+  return reply.code(400).send({ success: false, message });
+}
+
+function parseSiteIdParam(raw: string): number | null {
+  const siteId = Number.parseInt(raw, 10);
+  if (!Number.isInteger(siteId) || siteId <= 0) return null;
+  return siteId;
+}
+
+export async function modelProbeRoutes(app: FastifyInstance) {
+  app.get('/api/model-probe/config', async () => ({
+    success: true,
+    config: await loadModelProbeConfig(),
+    limits: getModelProbeConfigLimits(),
+  }));
+
+  app.put<{ Body: unknown }>('/api/model-probe/config', async (request, reply) => {
+    const parsed = parseModelProbeConfigPayload(request.body);
+    if (!parsed.success) return sendBadRequest(reply, parsed.error);
+
+    try {
+      return {
+        success: true,
+        config: await applyModelProbeConfigPatch(parsed.data),
+        limits: getModelProbeConfigLimits(),
+      };
+    } catch (error) {
+      // A regex the operator can fix is a 400, not a server fault.
+      if (isModelProbeConfigValidationError(error)) {
+        return reply.code(400).send({
+          success: false,
+          message: error.message,
+          invalidPatterns: error.invalidPatterns,
+        });
+      }
+      throw error;
+    }
+  });
+
+  app.get('/api/model-probe/sites', async () => ({
+    success: true,
+    sites: await listModelProbeSites(),
+  }));
+
+  app.put<{ Params: { id: string }; Body: unknown }>('/api/model-probe/sites/:id', async (request, reply) => {
+    const siteId = parseSiteIdParam(request.params.id);
+    if (siteId === null) return sendBadRequest(reply, 'Invalid site id.');
+
+    const parsed = parseModelProbeSiteConfigPayload(request.body);
+    if (!parsed.success) return sendBadRequest(reply, parsed.error);
+
+    const site = await updateModelProbeSiteConfig(siteId, parsed.data);
+    if (!site) {
+      return reply.code(404).send({ success: false, message: 'site not found' });
+    }
+    return { success: true, site };
+  });
+
+  app.post<{ Body: unknown }>('/api/model-probe/preview', async (request, reply) => {
+    const parsed = parseModelProbePreviewPayload(request.body);
+    if (!parsed.success) return sendBadRequest(reply, parsed.error);
+
+    const scope = parsed.data.siteIds ? { siteIds: parsed.data.siteIds } : {};
+    const preview = await previewActiveModelProbe(scope);
+    return { success: true, preview: toModelProbePreviewResponse(preview) };
+  });
+
+  app.post<{ Body: unknown }>('/api/model-probe/run', async (request, reply) => {
+    const parsed = parseModelProbeRunPayload(request.body);
+    if (!parsed.success) return sendBadRequest(reply, parsed.error);
+
+    const decision = await requestActiveModelProbeRun(parsed.data);
+    const limits = getModelProbeConfigLimits();
+
+    if (decision.outcome === 'run_limit_exceeded') {
+      return reply.code(409).send({
+        success: false,
+        code: decision.outcome,
+        message: `本次匹配到 ${decision.targetCount} 个探测目标，超过单次上限 ${limits.maxRunTargets} 个。`
+          + '请收窄模型兴趣正则，或缩小站点范围后重试。',
+        targetCount: decision.targetCount,
+        confirmTargetThreshold: limits.confirmTargetThreshold,
+        maxRunTargets: limits.maxRunTargets,
+        preview: decision.preview,
+      });
+    }
+
+    if (decision.outcome === 'confirmation_required') {
+      return reply.code(409).send({
+        success: false,
+        code: decision.outcome,
+        message: `本次将探测 ${decision.targetCount} 个模型，超过 ${limits.confirmTargetThreshold} 个需要二次确认。`
+          + '确认后请携带相同的目标数量重试。',
+        targetCount: decision.targetCount,
+        confirmTargetThreshold: limits.confirmTargetThreshold,
+        maxRunTargets: limits.maxRunTargets,
+        preview: decision.preview,
+      });
+    }
+
+    return reply.code(202).send({
+      success: true,
+      queued: true,
+      taskId: decision.taskId,
+      reused: decision.reused,
+      targetCount: decision.targetCount,
+      preview: decision.preview,
+    });
+  });
+
+  app.get<{ Querystring: Record<string, unknown> }>('/api/model-probe/results', async (request, reply) => {
+    const parsed = parseModelProbeResultsQuery(request.query);
+    if (!parsed.success) return sendBadRequest(reply, parsed.error);
+
+    // Blank params leave the key present with an `undefined` value, so build the
+    // service query by testing `!== undefined` rather than by key presence.
+    const query = parsed.data;
+    const results = await listActiveModelProbeResults({
+      ...(query.model !== undefined ? { model: query.model } : {}),
+      ...(query.siteId !== undefined ? { siteId: query.siteId } : {}),
+      ...(query.status !== undefined ? { status: query.status } : {}),
+      ...(query.sortBy !== undefined ? { sortBy: query.sortBy } : {}),
+      ...(query.order !== undefined ? { order: query.order } : {}),
+      ...(query.limit !== undefined ? { limit: query.limit } : {}),
+      ...(query.offset !== undefined ? { offset: query.offset } : {}),
+    });
+
+    return {
+      success: true,
+      items: results.items.map(toModelProbeResultResponse),
+      total: results.total,
+      query,
+    };
+  });
+}

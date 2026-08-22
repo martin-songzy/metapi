@@ -773,6 +773,238 @@ export type DownstreamApiKeyTrendResponse = {
   buckets: DownstreamApiKeyTrendBucket[];
 };
 
+// Active model probe. Mirrors the server responses in
+// `src/server/routes/api/modelProbe.ts`; no `any` so a server-side shape change
+// surfaces as a web typecheck failure rather than at runtime.
+export type ModelProbeEndpointTypeOption = "auto" | "chat" | "messages" | "responses";
+
+export type ModelProbeUserAgentPreset = {
+  id: string;
+  label: string;
+  value: string;
+};
+
+export type ModelProbeConfig = {
+  interestPatterns: string[];
+  prompts: string[];
+  userAgents: ModelProbeUserAgentPreset[];
+  defaultUserAgentId: string;
+  errorKeywords: string[];
+  concurrency: number;
+  timeoutMs: number;
+  syncToRouting: boolean;
+};
+
+export type ModelProbeConfigLimits = {
+  minConcurrency: number;
+  maxConcurrency: number;
+  minTimeoutMs: number;
+  maxTimeoutMs: number;
+  maxInterestPatterns: number;
+  maxInterestPatternLength: number;
+  maxPrompts: number;
+  maxErrorKeywords: number;
+  confirmTargetThreshold: number;
+  maxRunTargets: number;
+};
+
+export type ModelProbeConfigResponse = {
+  success: boolean;
+  config: ModelProbeConfig;
+  limits: ModelProbeConfigLimits;
+};
+
+export type ModelProbeConfigPayload = Partial<ModelProbeConfig>;
+
+export type ModelProbeSite = {
+  id: number;
+  name: string;
+  url: string;
+  platform: string;
+  status: string;
+  probeEndpointType: ModelProbeEndpointTypeOption;
+  probeUserAgent: string;
+};
+
+export type ModelProbeSitesResponse = {
+  success: boolean;
+  sites: ModelProbeSite[];
+};
+
+export type ModelProbeSiteConfigPayload = {
+  probeEndpointType?: ModelProbeEndpointTypeOption;
+  probeUserAgent?: string;
+};
+
+export type ModelProbeSiteConfigResponse = {
+  success: boolean;
+  site: ModelProbeSite;
+};
+
+export type ModelProbeLiveFailure = {
+  kind: "auth" | "timeout" | "transport" | "empty_unknown";
+  status: number | null;
+  message: string;
+};
+
+export type ModelProbePreviewSite = {
+  siteId: number;
+  siteName: string;
+  source: "live" | "cached";
+  /** False whenever the model list came from cache: the credential was never proven. */
+  credentialVerified: boolean;
+  discoveredCount: number;
+  models: string[];
+  liveFailure: ModelProbeLiveFailure | null;
+  notes: string[];
+};
+
+export type ModelProbeSkippedSite = {
+  siteId: number;
+  siteName: string;
+  code: string;
+  message: string;
+};
+
+export type ModelProbeInvalidPattern = {
+  source: string;
+  reason: string;
+};
+
+export type ModelProbePreview = {
+  sites: ModelProbePreviewSite[];
+  totalModels: number;
+  invalidPatterns: ModelProbeInvalidPattern[];
+  skipped: ModelProbeSkippedSite[];
+  exceedsRunLimit: boolean;
+};
+
+export type ModelProbePreviewResponse = {
+  success: boolean;
+  preview: ModelProbePreview;
+};
+
+export type ModelProbeRunPayload = {
+  siteIds?: number[];
+  /**
+   * Echo of the target count the operator confirmed. Send it only after an
+   * explicit confirmation: the server compares it against a freshly computed
+   * preview and refuses with 409 when it does not match.
+   */
+  confirmedTargetCount?: number;
+};
+
+export type ModelProbeRunResponse = {
+  success: true;
+  queued: true;
+  taskId: string;
+  reused: boolean;
+  targetCount: number;
+  preview: ModelProbePreview;
+};
+
+/**
+ * 409 body for both gates. `confirmation_required` is recoverable by resending
+ * with `confirmedTargetCount: targetCount`; `run_limit_exceeded` is not — the
+ * operator has to narrow the interest patterns or the site scope.
+ */
+export type ModelProbeRunConflict = {
+  success: false;
+  code: "confirmation_required" | "run_limit_exceeded";
+  message: string;
+  targetCount: number;
+  confirmTargetThreshold: number;
+  maxRunTargets: number;
+  preview: ModelProbePreview;
+};
+
+export type ModelProbeResultStatus =
+  | "supported"
+  | "unsupported"
+  | "inconclusive"
+  | "skipped";
+
+export type ModelProbeResultSortBy = "latency" | "balance" | "checkedAt";
+
+export type ModelProbeResult = {
+  id: number;
+  siteId: number;
+  siteName: string;
+  accountId: number | null;
+  accountUsername: string | null;
+  balance: number | null;
+  modelName: string;
+  status: ModelProbeResultStatus;
+  latencyMs: number | null;
+  httpStatus: number | null;
+  failureKind: string | null;
+  reason: string | null;
+  endpointUsed: string | null;
+  promptUsed: string | null;
+  userAgentUsed: string | null;
+  checkedAt: string | null;
+};
+
+export type ModelProbeResultsQuery = {
+  model?: string;
+  siteId?: number;
+  status?: ModelProbeResultStatus;
+  sortBy?: ModelProbeResultSortBy;
+  order?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+};
+
+export type ModelProbeResultsResponse = {
+  success: boolean;
+  items: ModelProbeResult[];
+  total: number;
+  /** Echo of the filters the server actually applied. */
+  query: ModelProbeResultsQuery;
+};
+
+/** `BackgroundTask.result` for a finished sweep. */
+export type ModelProbeRunSummary = {
+  siteCount: number;
+  probed: number;
+  supported: number;
+  unsupported: number;
+  inconclusive: number;
+  skipped: number;
+  disabled: number;
+  routingSynced: boolean;
+  skippedSites: ModelProbeSkippedSite[];
+  invalidPatterns: ModelProbeInvalidPattern[];
+};
+
+export type ModelProbeTaskLogEntry = {
+  seq: number;
+  message: string;
+  createdAt: string;
+};
+
+export type ModelProbeTaskStatus = "pending" | "running" | "succeeded" | "failed";
+
+export type ModelProbeTask = {
+  id: string;
+  type: string;
+  title: string;
+  status: ModelProbeTaskStatus;
+  message: string;
+  error: string | null;
+  result: ModelProbeRunSummary | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  logs: ModelProbeTaskLogEntry[];
+};
+
+export type ModelProbeTaskResponse = {
+  success: boolean;
+  task: ModelProbeTask;
+};
+
 export const api = {
   // Sites
   getSites: () => request("/api/sites"),
@@ -1247,6 +1479,77 @@ export const api = {
       `/api/tasks?limit=${Math.max(1, Math.min(200, Math.trunc(limit)))}`,
     ),
   getTask: (id: string) => request(`/api/tasks/${encodeURIComponent(id)}`),
+
+  // Active model probe
+  getModelProbeConfig: () =>
+    request<ModelProbeConfigResponse>("/api/model-probe/config"),
+  saveModelProbeConfig: (data: ModelProbeConfigPayload) =>
+    request<ModelProbeConfigResponse>("/api/model-probe/config", {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  getModelProbeSites: () =>
+    request<ModelProbeSitesResponse>("/api/model-probe/sites"),
+  saveModelProbeSiteConfig: (
+    siteId: number,
+    data: ModelProbeSiteConfigPayload,
+  ) =>
+    request<ModelProbeSiteConfigResponse>(
+      `/api/model-probe/sites/${encodeURIComponent(String(siteId))}`,
+      { method: "PUT", body: JSON.stringify(data) },
+    ),
+  previewModelProbe: (payload: { siteIds?: number[] } = {}) =>
+    request<ModelProbePreviewResponse>("/api/model-probe/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      // Discovery fans out one model-list GET per site, so allow more than the
+      // 30s default before the browser gives up on a wide preview.
+      timeoutMs: 120_000,
+    }),
+  /**
+   * Does not throw on the 409 confirmation gate: the caller needs the preview
+   * summary in that body to render the confirmation dialog, and `request()` would
+   * collapse it into an Error message. Every other failure still throws.
+   */
+  runModelProbe: async (
+    payload: ModelProbeRunPayload = {},
+  ): Promise<
+    | { status: "queued"; data: ModelProbeRunResponse }
+    | { status: "conflict"; data: ModelProbeRunConflict }
+  > => {
+    const res = await fetchAuthenticatedResponse("/api/model-probe/run", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      timeoutMs: 120_000,
+    });
+    if (res.status === 409) {
+      return {
+        status: "conflict",
+        data: (await res.json()) as ModelProbeRunConflict,
+      };
+    }
+    if (!res.ok) {
+      throw new Error(await extractResponseErrorMessage(res));
+    }
+    return { status: "queued", data: (await res.json()) as ModelProbeRunResponse };
+  },
+  getModelProbeResults: (query: ModelProbeResultsQuery = {}) =>
+    request<ModelProbeResultsResponse>(
+      `/api/model-probe/results${buildQueryString({
+        model: query.model,
+        siteId: query.siteId,
+        status: query.status,
+        sortBy: query.sortBy,
+        order: query.order,
+        limit: query.limit,
+        offset: query.offset,
+      })}`,
+    ),
+  /** Typed view of `/api/tasks/:id` for polling one probe sweep. */
+  getModelProbeTask: (taskId: string) =>
+    request<ModelProbeTaskResponse>(
+      `/api/tasks/${encodeURIComponent(taskId)}`,
+    ),
 
   // Auth management
   getAuthInfo: () => request("/api/settings/auth/info"),

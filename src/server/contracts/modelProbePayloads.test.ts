@@ -174,54 +174,75 @@ describe('parseModelProbeSiteConfigPayload', () => {
 });
 
 describe('parseModelProbePreviewPayload', () => {
-  it('requires a positive integer site id', () => {
-    const ok = parseModelProbePreviewPayload({ siteId: 7 });
+  it('treats an omitted scope as every site', () => {
+    const ok = parseModelProbePreviewPayload({});
     expect(ok.success).toBe(true);
-    if (ok.success) expect(ok.data.siteId).toBe(7);
+    if (ok.success) expect(ok.data.siteIds).toBeUndefined();
+  });
 
-    for (const siteId of [0, -1, 1.5, '7', undefined]) {
-      const bad = parseModelProbePreviewPayload({ siteId });
+  it('dedupes and sorts an explicit site scope', () => {
+    const ok = parseModelProbePreviewPayload({ siteIds: [7, 3, 7] });
+    expect(ok.success).toBe(true);
+    if (ok.success) expect(ok.data.siteIds).toEqual([3, 7]);
+  });
+
+  it('rejects an empty list rather than reading it as every site', () => {
+    const bad = parseModelProbePreviewPayload({ siteIds: [] });
+    expect(bad.success).toBe(false);
+    if (!bad.success) expect(bad.error).toContain('siteIds');
+  });
+
+  it('rejects non-positive, fractional and non-numeric site ids', () => {
+    for (const siteIds of [[0], [-1], [1.5], ['7']]) {
+      const bad = parseModelProbePreviewPayload({ siteIds });
       expect(bad.success).toBe(false);
       if (bad.success) continue;
-      expect(bad.error).toContain('siteId');
+      expect(bad.error).toContain('siteIds');
     }
+  });
+
+  it('rejects the single-site shape so a caller cannot silently probe everything', () => {
+    const bad = parseModelProbePreviewPayload({ siteId: 7 });
+    expect(bad.success).toBe(false);
+    if (!bad.success) expect(bad.error).toContain('siteId');
   });
 });
 
 describe('parseModelProbeRunPayload', () => {
-  it('accepts a site id with optional explicit models and overrides', () => {
-    const result = parseModelProbeRunPayload({
-      siteId: 3,
-      models: [' gpt-5 ', 'gpt-5', ''],
-      userAgentId: 'codex-cli',
-      concurrency: 2,
-      timeoutMs: 9000,
-    });
+  it('accepts an optional scope with an optional confirmation count', () => {
+    const result = parseModelProbeRunPayload({ siteIds: [3, 3, 1], confirmedTargetCount: 51 });
 
     expect(result.success).toBe(true);
     if (!result.success) return;
-    expect(result.data.siteId).toBe(3);
-    expect(result.data.models).toEqual(['gpt-5']);
-    expect(result.data.userAgentId).toBe('codex-cli');
-    expect(result.data.concurrency).toBe(2);
+    expect(result.data.siteIds).toEqual([1, 3]);
+    expect(result.data.confirmedTargetCount).toBe(51);
   });
 
-  it('defaults models to undefined so the caller can fall back to interest matching', () => {
-    const result = parseModelProbeRunPayload({ siteId: 3 });
+  it('accepts an empty body as a full sweep awaiting confirmation', () => {
+    const result = parseModelProbeRunPayload({});
     expect(result.success).toBe(true);
-    if (result.success) expect(result.data.models).toBeUndefined();
+    if (!result.success) return;
+    expect(result.data.siteIds).toBeUndefined();
+    expect(result.data.confirmedTargetCount).toBeUndefined();
   });
 
-  it('rejects a missing site id and out-of-range overrides', () => {
-    expect(parseModelProbeRunPayload({}).success).toBe(false);
+  it('accepts a zero confirmation count and rejects a negative one', () => {
+    expect(parseModelProbeRunPayload({ confirmedTargetCount: 0 }).success).toBe(true);
 
-    const concurrency = parseModelProbeRunPayload({ siteId: 3, concurrency: 99 });
-    expect(concurrency.success).toBe(false);
-    if (!concurrency.success) expect(concurrency.error).toContain('concurrency');
+    const negative = parseModelProbeRunPayload({ confirmedTargetCount: -1 });
+    expect(negative.success).toBe(false);
+    if (!negative.success) expect(negative.error).toContain('confirmedTargetCount');
+  });
 
-    const timeout = parseModelProbeRunPayload({ siteId: 3, timeoutMs: 10 });
-    expect(timeout.success).toBe(false);
-    if (!timeout.success) expect(timeout.error).toContain('timeoutMs');
+  it('rejects fields the run service cannot honour', () => {
+    for (const body of [
+      { models: ['gpt-5'] },
+      { userAgentId: 'codex-cli' },
+      { concurrency: 2 },
+      { timeoutMs: 9000 },
+    ]) {
+      expect(parseModelProbeRunPayload(body).success).toBe(false);
+    }
   });
 });
 
@@ -287,5 +308,66 @@ describe('parseModelProbeResultsQuery', () => {
     const siteId = parseModelProbeResultsQuery({ siteId: 'abc' });
     expect(siteId.success).toBe(false);
     if (!siteId.success) expect(siteId.error).toContain('siteId');
+  });
+
+  it('accepts the model filter, sort field, order and offset the results service supports', () => {
+    const result = parseModelProbeResultsQuery({
+      model: '  GPT-5  ',
+      sortBy: 'balance',
+      order: 'asc',
+      offset: '40',
+    });
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.model).toBe('GPT-5');
+    expect(result.data.sortBy).toBe('balance');
+    expect(result.data.order).toBe('asc');
+    expect(result.data.offset).toBe(40);
+  });
+
+  it('accepts every sort field and order', () => {
+    for (const sortBy of ['latency', 'balance', 'checkedAt']) {
+      expect(parseModelProbeResultsQuery({ sortBy }).success).toBe(true);
+    }
+    for (const order of ['asc', 'desc']) {
+      expect(parseModelProbeResultsQuery({ order }).success).toBe(true);
+    }
+  });
+
+  it('accepts offset 0 because paging starts at the first row', () => {
+    const result = parseModelProbeResultsQuery({ offset: '0' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.offset).toBe(0);
+  });
+
+  it('rejects an unknown sort field instead of silently falling back', () => {
+    const sortBy = parseModelProbeResultsQuery({ sortBy: 'cost' });
+    expect(sortBy.success).toBe(false);
+    if (!sortBy.success) expect(sortBy.error).toContain('sortBy');
+
+    const order = parseModelProbeResultsQuery({ order: 'ascending' });
+    expect(order.success).toBe(false);
+    if (!order.success) expect(order.error).toContain('order');
+  });
+
+  it('rejects a negative offset and an over-long model filter', () => {
+    const offset = parseModelProbeResultsQuery({ offset: '-1' });
+    expect(offset.success).toBe(false);
+    if (!offset.success) expect(offset.error).toContain('offset');
+
+    const model = parseModelProbeResultsQuery({ model: 'a'.repeat(201) });
+    expect(model.success).toBe(false);
+    if (!model.success) expect(model.error).toContain('model');
+  });
+
+  it('treats every new filter as absent when the UI sends it blank', () => {
+    const result = parseModelProbeResultsQuery({ model: '', sortBy: '', order: '', offset: '' });
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.model).toBeUndefined();
+    expect(result.data.sortBy).toBeUndefined();
+    expect(result.data.order).toBeUndefined();
+    expect(result.data.offset).toBeUndefined();
   });
 });

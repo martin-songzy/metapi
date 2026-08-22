@@ -7,6 +7,7 @@ import {
   startBackgroundTask,
   subscribeToBackgroundTaskLogs,
 } from '../../services/backgroundTaskService.js';
+import { redactBackgroundTaskLogForResponse } from '../../services/modelProbeApiService.js';
 import { type UpdateCenterVersionSource } from '../../services/updateCenterVersionService.js';
 import {
   getUpdateCenterDeployBlockMessage,
@@ -286,8 +287,11 @@ export async function updateCenterRoutes(app: FastifyInstance) {
       reply.raw.end();
     };
 
+    // This stream resolves ANY task id, not just an update-center one, so it is a
+    // second exit for probe task logs and has to apply the same redaction the
+    // `/api/tasks` routes do.
     for (const entry of task.logs) {
-      writeSseEvent(reply, 'log', entry);
+      writeSseEvent(reply, 'log', redactBackgroundTaskLogForResponse(task.type, entry));
     }
 
     if (task.status !== 'pending' && task.status !== 'running') {
@@ -296,7 +300,7 @@ export async function updateCenterRoutes(app: FastifyInstance) {
     }
 
     const unsubscribe = subscribeToBackgroundTaskLogs(taskId, (entry) => {
-      writeSseEvent(reply, 'log', entry);
+      writeSseEvent(reply, 'log', redactBackgroundTaskLogForResponse(task.type, entry));
     });
 
     const interval = setInterval(() => {

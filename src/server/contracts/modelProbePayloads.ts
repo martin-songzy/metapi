@@ -70,39 +70,45 @@ const modelProbeSiteConfigPayloadSchema = z.object({
 
 const siteIdSchema = z.number().int().positive();
 
-const modelProbePreviewPayloadSchema = z.object({
-  siteId: siteIdSchema,
-}).strict();
+export const MAX_MODEL_PROBE_SITE_IDS = 200;
 
 /**
- * An explicitly supplied model list is trimmed and deduped here, then collapsed
- * to `undefined` when nothing survives so the caller falls back to interest
- * matching instead of silently probing zero models.
+ * Preview and run are cross-site sweeps, so the scope is a site-id LIST, not a
+ * single id: `previewActiveModelProbe` / `queueActiveModelProbe` accept
+ * `{ siteIds }` and nothing else, and a payload field the service cannot honour
+ * would be silently ignored.
+ *
+ * Omitting `siteIds` means "every active site". An explicitly supplied list must
+ * name at least one site: collapsing `[]` to "all sites" would turn a UI where
+ * the operator deselected everything into a full sweep against real quota. Ids
+ * are deduped and sorted so the same scope always produces the same dedupe key.
  */
-const explicitModelsSchema = z.array(z.string())
-  .transform((models) => {
-    const normalized: string[] = [];
-    const seen = new Set<string>();
-    for (const entry of models) {
-      const model = entry.trim();
-      if (!model) continue;
-      const dedupeKey = model.toLowerCase();
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      normalized.push(model);
-    }
-    return normalized.length > 0 ? normalized : undefined;
-  });
+const siteIdsSchema = z.array(siteIdSchema)
+  .min(1)
+  .max(MAX_MODEL_PROBE_SITE_IDS)
+  .transform((siteIds) => [...new Set(siteIds)].sort((left, right) => left - right));
+
+const modelProbePreviewPayloadSchema = z.object({
+  siteIds: siteIdsSchema.optional(),
+}).strict();
 
 const modelProbeRunPayloadSchema = z.object({
-  siteId: siteIdSchema,
-  models: explicitModelsSchema.optional(),
-  userAgentId: z.string().trim().min(1).optional(),
-  concurrency: probeConcurrencySchema.optional(),
-  timeoutMs: probeTimeoutSchema.optional(),
+  siteIds: siteIdsSchema.optional(),
+  /**
+   * Echo of the target count the operator was shown. The run endpoint compares
+   * it against a freshly computed preview, so a stale or invented number cannot
+   * wave a large sweep through.
+   */
+  confirmedTargetCount: z.number().int().nonnegative().optional(),
 }).strict();
 
 export const MODEL_PROBE_RESULT_STATUSES = ['supported', 'unsupported', 'inconclusive', 'skipped'] as const;
+
+export const MODEL_PROBE_RESULT_SORT_FIELDS = ['latency', 'balance', 'checkedAt'] as const;
+export const MODEL_PROBE_RESULT_SORT_ORDERS = ['asc', 'desc'] as const;
+
+/** Substring filter on the model name; the service lowercases and LIKEs it. */
+const MAX_MODEL_FILTER_LENGTH = 200;
 
 /**
  * A cleared UI filter serializes as an empty param (`?siteId=&status=`), and
@@ -114,25 +120,45 @@ const blankToUndefined = <S extends z.ZodTypeAny>(schema: S) => z.preprocess(
   schema.optional(),
 );
 
-const optionalQueryNumber = z.union([z.number(), z.string()])
-  .transform((value, ctx) => {
-    const numeric = typeof value === 'number' ? value : Number(value.trim());
-    if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric <= 0) {
-      ctx.addIssue({ code: 'custom', message: 'Expected a positive integer.' });
-      return z.NEVER;
-    }
-    return numeric;
-  });
+function queryIntegerSchema(options: { min: number }) {
+  return z.union([z.number(), z.string()])
+    .transform((value, ctx) => {
+      const numeric = typeof value === 'number' ? value : Number(value.trim());
+      if (!Number.isFinite(numeric) || !Number.isInteger(numeric) || numeric < options.min) {
+        ctx.addIssue({
+          code: 'custom',
+          message: options.min > 0
+            ? 'Expected a positive integer.'
+            : 'Expected a non-negative integer.',
+        });
+        return z.NEVER;
+      }
+      return numeric;
+    });
+}
+
+const optionalQueryNumber = queryIntegerSchema({ min: 1 });
+/** Paging starts at row 0, so `offset` must accept it where ids and limits may not. */
+const optionalQueryOffset = queryIntegerSchema({ min: 0 });
 
 /**
  * Unlike the request bodies above this schema is not strict: query strings pick
  * up unrelated params (cache busters, pagination cursors) and rejecting a probe
  * results listing over one of those would be a pointless failure.
+ *
+ * `model` / `sortBy` / `order` / `offset` were added once the results service
+ * grew sorting and paging. Validating the sort field here rather than letting the
+ * service fall through to its default keeps a typo an explicit 400 instead of a
+ * table silently sorted by something else.
  */
 const modelProbeResultsQuerySchema = z.object({
+  model: blankToUndefined(z.string().trim().max(MAX_MODEL_FILTER_LENGTH)),
   siteId: blankToUndefined(optionalQueryNumber),
   status: blankToUndefined(z.enum(MODEL_PROBE_RESULT_STATUSES)),
+  sortBy: blankToUndefined(z.enum(MODEL_PROBE_RESULT_SORT_FIELDS)),
+  order: blankToUndefined(z.enum(MODEL_PROBE_RESULT_SORT_ORDERS)),
   limit: blankToUndefined(optionalQueryNumber.pipe(z.number().max(500))),
+  offset: blankToUndefined(optionalQueryOffset),
 });
 
 export type ModelProbeConfigPayload = z.output<typeof modelProbeConfigPayloadSchema>;
