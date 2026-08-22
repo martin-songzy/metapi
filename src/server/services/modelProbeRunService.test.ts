@@ -1306,6 +1306,87 @@ describe('modelProbeRunService', () => {
       expect(flagDuringRun).toEqual([true]);
       expect(service.isActiveModelProbeCancelled(taskId)).toBe(false);
     });
+
+    /**
+     * The mirror of every case above, and the one they all miss: a cancel arriving
+     * while the LAST model's probe is in flight. The flag is read after
+     * `mapWithConcurrency` resolves, so such a cancel is observed by nothing except
+     * the summary — every model was probed and every request was paid for, yet the
+     * run reported `cancelled: true, remaining: 0` and withheld the routing sync.
+     * The operator was shown 「已取消」 above 「还有 0 个模型没有被探测」 and had to
+     * re-run the whole sweep at full quota cost to apply verdicts it had already
+     * earned.
+     *
+     * The withholding is gated on the sweep being PARTIAL, which is what the
+     * service's own comment says it is for. `remaining: 0` is not partial.
+     *
+     * The competing reading, recorded because it is not unreasonable: an operator
+     * cancelling because the interest regex was wrong does not want those verdicts
+     * applied at all. It loses on two counts — `model_availability` is a reversible
+     * per-account flip rather than sticky site-wide state, and the verdicts are
+     * accurate about the models that were actually probed — against a full re-spend
+     * of real money on the other side.
+     */
+    it('applies the routing sync when the cancel lands after the final model', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-'], { syncToRouting: true });
+      primeDiscovery([{ site, account, models: ['gpt-1', 'gpt-2'] }]);
+      await db.insert(schema.modelAvailability).values([
+        { accountId: account.id, modelName: 'gpt-1', available: true, isManual: false },
+        { accountId: account.id, modelName: 'gpt-2', available: true, isManual: false },
+      ]).run();
+
+      let taskId: string | null = null;
+      probeRuntimeModelMock.mockImplementation(async () => {
+        // From inside the LAST probe, so nothing is left for the loop to skip.
+        if (probeRuntimeModelMock.mock.calls.length === 2 && taskId) {
+          service.requestActiveModelProbeCancellation(taskId);
+        }
+        return probeResult({ status: 'unsupported', failureKind: 'error_body' });
+      });
+
+      const queued = service.queueActiveModelProbe();
+      taskId = queued.task.id;
+      const finished = await waitForBackgroundTaskCompletion(queued.task.id);
+
+      // `cancelled` stays true: the operator did press cancel, and reporting
+      // otherwise would deny something that happened.
+      expect(finished?.result).toMatchObject({
+        cancelled: true,
+        probed: 2,
+        remaining: 0,
+        disabled: 2,
+        routingSynced: true,
+      });
+      expect(rebuildTokenRoutesFromAvailabilityMock).toHaveBeenCalledTimes(1);
+      const availability = await db.select().from(schema.modelAvailability).all();
+      expect(availability.every((row) => row.available === false)).toBe(true);
+    });
+
+    it('says the cancel changed nothing when it landed after the last model', async () => {
+      // The log line is the operator's only account of what a cancel cost them, so
+      // it must not claim an incomplete sweep when nothing was skipped.
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      primeDiscovery([{ site, account, models: ['gpt-1'] }]);
+
+      let taskId: string | null = null;
+      probeRuntimeModelMock.mockImplementation(async () => {
+        if (taskId) service.requestActiveModelProbeCancellation(taskId);
+        return probeResult();
+      });
+
+      const queued = service.queueActiveModelProbe();
+      taskId = queued.task.id;
+      await waitForBackgroundTaskCompletion(queued.task.id);
+
+      const logs = getBackgroundTask(queued.task.id)?.logs.map((entry) => entry.message) ?? [];
+      const terminal = logs.at(-1) ?? '';
+      expect(terminal).toContain('取消');
+      // Would have read 「另有 0 个未探测」.
+      expect(terminal).not.toContain('另有 0 个');
+      expect(terminal).toContain('全部目标都已探测完');
+    });
   });
 
   describe('probe failure isolation', () => {

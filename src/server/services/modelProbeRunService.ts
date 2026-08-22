@@ -44,7 +44,10 @@ import type { UpstreamEndpoint } from './upstreamEndpointRuntime.js';
  *    run loop reads between models, so an operator who realises the interest regex
  *    was wrong stops paying for it within one probe. A cancelled sweep keeps its
  *    partial results, reports `cancelled: true`, and is never presented as a
- *    completed one.
+ *    completed one. What the routing write is withheld from is a sweep that
+ *    actually left work undone (`remaining > 0`), not merely one whose flag is set:
+ *    a cancel landing while the final model was already in flight stops nothing, so
+ *    treating it as partial would discard a fully paid sweep's verdicts.
  *
  * Every entry point here keeps working with `PROXY_ROUTING_ENABLED=false`. What
  * makes that true is that nothing routing-related *executes* unless a caller asks
@@ -829,25 +832,42 @@ async function runActiveModelProbe(
 
   const cancelled = isActiveModelProbeCancelled(taskId);
   const remaining = Math.max(0, targets.length - probeOutcomes.length);
+  // `remaining === 0` means every target produced an outcome, because a worker that
+  // bails on the flag returns without pushing one. So a cancelled run with nothing
+  // remaining is one where the cancel arrived while the LAST model's probe was
+  // already in flight: it stopped nothing, and every request was paid for.
+  const abandonedWork = cancelled && remaining > 0;
 
   // ONLY `unsupported` reaches the write path, filtered by construction rather
   // than by a later check so no future edit can leak `inconclusive` in.
   const unsupported = probeOutcomes.filter((outcome) => outcome.status === 'unsupported');
-  // A cancel withdraws the operator's authorization mid-sweep, so a partial run
+  // A cancel withdraws the operator's authorization mid-sweep, so a PARTIAL run
   // leaves no persistent routing effect behind. The verdicts themselves are still
   // recorded in `model_probe_results` for inspection — nothing is lost, it simply
-  // is not applied. Completing the sweep is what earns the routing write.
-  const sync = cancelled
+  // is not applied.
+  //
+  // Gated on partial-ness rather than on the flag, because those come apart in
+  // exactly one case and it is the case above. Withholding there spent the whole
+  // sweep's quota, discarded every verdict it earned, and made the operator pay for
+  // all of it again — while telling them 「已取消」 next to 「还有 0 个模型没有被探测」.
+  //
+  // The competing reading is that a cancel means "do not act on this sweep at all",
+  // even a complete one. It loses on two counts: `syncUnsupportedToRouting` flips
+  // `model_availability` per account and reversibly rather than writing sticky
+  // site-wide state, and the verdicts are accurate about the models actually
+  // probed. A full re-spend of real money is the heavier cost.
+  const sync = abandonedWork
     ? { disabled: 0, routingSynced: false }
     : await syncUnsupportedToRouting(unsupported, probeConfig, log);
-  if (cancelled && unsupported.length > 0) {
+  if (abandonedWork && unsupported.length > 0) {
     log(`${unsupported.length} 个模型在取消前判定为 unsupported，但本次已取消，不会同步到路由`);
   }
 
   log(
     (cancelled ? '已取消：' : '完成：')
     + `探测 ${probeOutcomes.length} 个模型`
-    + (cancelled ? `，另有 ${remaining} 个未探测` : '')
+    + (abandonedWork ? `，另有 ${remaining} 个未探测` : '')
+    + (cancelled && !abandonedWork ? '，取消到达时全部目标都已探测完，没有漏掉任何模型' : '')
     + `，supported ${counts.supported}、unsupported ${counts.unsupported}、`
     + `inconclusive ${counts.inconclusive}、skipped ${counts.skipped}；`
     + `禁用 ${sync.disabled} 个，路由${sync.routingSynced ? '已' : '未'}重建`,

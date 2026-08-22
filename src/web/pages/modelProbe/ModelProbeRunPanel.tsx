@@ -229,10 +229,13 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
       toast.error('探测任务结束但没有返回结果摘要');
     } else if (finished.result.cancelled) {
       // Checked before the counters: a cancelled sweep must never be toasted as a
-      // success, however many models it happened to get through.
-      toast.info(
-        `探测已取消：${finished.result.probed} 个模型已探测，${finished.result.remaining} 个未探测`,
-      );
+      // success, however many models it happened to get through. Still `info` and
+      // not `success` when nothing remained — the operator asked to stop and should
+      // be told the request arrived too late to save anything, rather than reading a
+      // plain success and assuming the cancel worked.
+      toast.info(finished.result.remaining > 0
+        ? `探测已取消：${finished.result.probed} 个模型已探测，${finished.result.remaining} 个未探测`
+        : `探测已取消，但取消时全部 ${finished.result.probed} 个模型都已探测完，没有省下请求`);
     } else if (finished.result.probed === 0) {
       toast.info('本次没有匹配到任何模型，没有发出任何探测请求');
     } else {
@@ -570,7 +573,7 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           `site_disabled_models` on ANY path, so naming it here would imply a
           completed sweep does.
         */}
-        {summary.cancelled && (
+        {summary.cancelled && (summary.remaining > 0 ? (
           <div className="alert alert-warning" data-testid="model-probe-task-cancelled">
             <div style={{ fontWeight: 600, marginBottom: 4 }}>这次探测已取消，不是一次完整的探测</div>
             <div style={{ fontSize: 12, lineHeight: 1.7 }}>
@@ -582,7 +585,22 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
               结论保留下来供查看，但不会把任何模型标记为不可用。
             </div>
           </div>
-        )}
+        ) : (
+          /*
+            The cancel arrived while the last model's probe was already in flight,
+            so it stopped nothing. Rendering the banner above here read
+            「不是一次完整的探测」 directly above 「还有 0 个模型没有被探测」, and told
+            the operator the verdicts were withheld when the run service applies
+            them — `remaining: 0` means every target was probed and paid for.
+          */
+          <div className="alert alert-info" data-testid="model-probe-task-cancelled">
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>已取消，但取消到达时全部模型都探测完了</div>
+            <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+              取消请求赶在最后一个模型之后到达，所以没有省下任何请求，也没有漏掉任何模型。
+              下面的数字覆盖了这次的全部目标，结论按正常完成处理。
+            </div>
+          </div>
+        ))}
 
         {summary.probed === 0 && !summary.cancelled && (
           <div className="alert alert-warning" data-testid="model-probe-task-nothing-probed">

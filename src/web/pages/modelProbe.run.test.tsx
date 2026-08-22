@@ -1056,6 +1056,61 @@ describe('ModelProbe run cancellation', () => {
     }
   });
 
+  /**
+   * A cancel that arrives while the LAST model's probe is in flight stops nothing:
+   * every model was probed and every request was paid for. The banner used to
+   * render 「这次探测已取消，不是一次完整的探测」 directly above 「还有 0 个模型没有被
+   * 探测」 — self-contradictory on its face — and told the operator the verdicts
+   * were not applied, when with `remaining: 0` the run service now applies them.
+   */
+  it('does not claim missed models when a cancel landed after the last one', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask
+      .mockResolvedValueOnce({ success: true, task: buildTask({ status: 'running' }) })
+      .mockResolvedValue({
+        success: true,
+        task: buildTask({
+          status: 'succeeded',
+          message: '已取消',
+          result: buildSummary({
+            probed: 2,
+            supported: 0,
+            unsupported: 2,
+            disabled: 2,
+            routingSynced: true,
+            cancelled: true,
+            remaining: 0,
+          }),
+        }),
+      });
+
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      await advanceMs(1_000);
+
+      const banner = collectText(findByTestId(root.root, 'model-probe-task-cancelled'));
+      // Still says it was cancelled — the operator did press the button.
+      expect(banner).toContain('已取消');
+      // But not that anything was missed, and not that the verdicts were withheld.
+      expect(banner).not.toContain('还有 0 个');
+      expect(banner).not.toContain('不是一次完整的探测');
+      expect(banner).not.toContain('未同步到路由');
+      // Positive control, so the assertions above cannot pass on an empty banner:
+      // it has to say what actually happened.
+      expect(banner).toContain('全部');
+
+      // Same for the toast, which carried the same 「0 个未探测」.
+      const page = collectText(root.root);
+      expect(page).not.toContain('0 个未探测');
+      expect(page).toContain('没有省下请求');
+      // Still not a success: the operator asked to stop and the request was too late.
+      expect(toastTypes(root.root).some((cls) => cls.includes('toast-success'))).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
   it('does not show a cancelled banner on a sweep that ran to completion', async () => {
     apiMock.runModelProbe.mockResolvedValue(queued());
     apiMock.getModelProbeTask
