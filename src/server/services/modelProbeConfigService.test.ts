@@ -395,7 +395,12 @@ describe('modelProbeConfigService', () => {
     // config.ts evaluates buildConfig(process.env) once at import, before any test
     // body runs. So assert the property structurally over the source instead, the
     // same way modelProbePayloads.test.ts and db/returning.architecture.test.ts do.
-    it('imports nothing from the routing stack, so config works with PROXY_ROUTING_ENABLED=false', async () => {
+    //
+    // Scope note: this reads ONE file's import list. It does not and cannot show
+    // that the routing stack is absent from the transitive closure — it is not
+    // (runtimeModelProbe -> oauth/service -> modelService -> tokenRouter). The
+    // behavioural guarantee is pinned in modelProbe.e2e.test.ts instead.
+    it('names no routing module in its own import list', async () => {
       const source = await readFile(
         new URL('./modelProbeConfigService.ts', import.meta.url),
         'utf8',

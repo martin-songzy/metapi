@@ -799,7 +799,17 @@ describe('discoverModelsForActiveProbe', () => {
     expect(dbDeleteMock).not.toHaveBeenCalled();
   });
 
-  it('stays read-only and routing-free by construction', async () => {
+  /**
+   * Read-only is pinned behaviourally by the test above (no insert/update/delete
+   * on either path). This one adds the structural half: the write-path helpers and
+   * routing modules are not named in this file's own import list.
+   *
+   * "routing-free" means exactly that — this file. The transitive closure of the
+   * probe feature does reach routing via runtimeModelProbe -> oauth/service ->
+   * modelService -> tokenRouter, so no per-file import check can establish the
+   * closure property, and this one does not claim to.
+   */
+  it('stays read-only, and names no write-path or routing module in its own imports', async () => {
     const source = await import('node:fs/promises')
       .then((fs) => fs.readFile(new URL('./modelProbeDiscoveryService.ts', import.meta.url), 'utf8'));
 

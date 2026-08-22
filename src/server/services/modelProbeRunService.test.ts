@@ -1399,11 +1399,22 @@ describe('modelProbeRunService', () => {
       expect(await readServiceCode()).not.toContain('setInterval');
     });
 
-    it('keeps the routing stack out of its static import graph', async () => {
-      // Flipping process.env.PROXY_ROUTING_ENABLED in a test is a no-op (config.ts
-      // reads it once at import), so assert the property structurally the way
-      // modelProbeConfigService.test.ts does. Routing may only be reached through
-      // the dynamic import inside the sync branch.
+    /**
+     * Scoped deliberately to *this file's own* import list.
+     *
+     * It is not evidence that the routing stack is absent from the transitive
+     * closure, and the closure does in fact reach it: `runtimeModelProbe` imports
+     * `oauth/service.js`, which imports `modelService.js`, which imports
+     * `tokenRouter.js`. That edge predates this feature. So the honest reading of
+     * this assertion is narrow — this module names no routing module directly, and
+     * the sync path is written as a dynamic import.
+     *
+     * What actually protects `PROXY_ROUTING_ENABLED=false` is asserted separately:
+     * see the top-level-statement test below for "importing changes nothing", and
+     * `modelProbe.e2e.test.ts` for "a real run writes no routing state unless the
+     * operator turned the sync on".
+     */
+    it('names no routing module in its own import list, and reaches modelService only lazily', async () => {
       const code = await readServiceCode();
       const staticSpecifiers = [...code.matchAll(/^\s*import\s[^;]*?from\s+'([^']+)'/gm)]
         .map((match) => match[1]);
@@ -1415,8 +1426,48 @@ describe('modelProbeRunService', () => {
         }
       }
 
-      // modelService is reachable, but only lazily.
+      // The sync path is written lazily. Note this is a code-shape property, not
+      // an isolation one: by the time `syncUnsupportedToRouting` runs, the module
+      // has almost always been loaded already via the chain above, so the dynamic
+      // import resolves from a warm module cache. It keeps this file's own import
+      // list clean; it does not keep `modelService` out of the process.
       expect(code).toMatch(/await import\('\.\/modelService\.js'\)/);
+    });
+
+    /**
+     * The property that genuinely underwrites `PROXY_ROUTING_ENABLED=false`:
+     * importing the probe modules must not *do* anything. Whatever the import
+     * closure happens to contain, nothing routing-related executes until a caller
+     * calls something.
+     */
+    it('executes nothing at import time, here or in the routing modules it can reach', async () => {
+      const topLevelStatement = /^(?:setInterval|setTimeout|queueMicrotask|process\.|void |await |db\.)/m;
+
+      const probeModules = [
+        'modelProbeRunService.ts',
+        'modelProbeDiscoveryService.ts',
+        'modelProbeConfigService.ts',
+        'runtimeModelProbe.ts',
+      ];
+      // The transitively reachable routing modules named in the chain above. If a
+      // future edit gives one of these a top-level statement, the commitment breaks
+      // and this test is where it surfaces.
+      const reachableRoutingModules = [
+        'tokenRouter.ts',
+        'modelService.ts',
+        'routeRefreshWorkflow.ts',
+        'oauth/service.ts',
+      ];
+
+      for (const file of [...probeModules, ...reachableRoutingModules]) {
+        const source = await readFile(new URL(`./${file}`, import.meta.url), 'utf8');
+        expect(source.length).toBeGreaterThan(0);
+        expect(source).not.toMatch(topLevelStatement);
+      }
+
+      // Positive control: the pattern does detect a top-level statement, so the
+      // assertions above cannot be passing because the regex matches nothing.
+      expect('await bootstrap();\n').toMatch(topLevelStatement);
     });
   });
 });

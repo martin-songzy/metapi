@@ -1272,7 +1272,16 @@ describe('model probe API routes', () => {
       expect(run.json()).toMatchObject({ taskId: 'task-no-routing' });
     });
 
-    it('keeps the routing stack out of the route and presenter import graphs', () => {
+    /**
+     * Per-file, by design. The test above is the one that establishes something
+     * about behaviour (every endpoint answers 200 with routing disabled); this one
+     * only says the route file and the presenter do not name routing modules
+     * themselves.
+     *
+     * It is not evidence about the transitive closure, which does reach routing via
+     * runtimeModelProbe -> oauth/service -> modelService -> tokenRouter.
+     */
+    it('names no routing module in the route or presenter import lists', () => {
       const here = fileURLToPath(new URL('.', import.meta.url));
       const sources = [
         readFileSync(join(here, 'modelProbe.ts'), 'utf8'),

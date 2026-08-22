@@ -33,9 +33,10 @@ import {
  *
  * No protocol conversion, no retry, no verdict logic, and no direct database
  * access live here — those belong to `services/modelProbeApiService.ts` and the
- * probe services it calls. The routing stack is deliberately absent from this
- * file's import graph so every endpoint keeps working with
- * `PROXY_ROUTING_ENABLED=false`.
+ * probe services it calls. This file's own import list names no routing module,
+ * and every endpoint keeps working with `PROXY_ROUTING_ENABLED=false` — because
+ * nothing on these paths calls into routing, not because the transitive import
+ * closure excludes it (it does not; see `modelProbeRunService.ts` for the chain).
  */
 
 function sendBadRequest(reply: FastifyReply, message: string) {

@@ -25,8 +25,10 @@ import { maskCredentialInText } from './modelProbeSecrets.js';
  * `runWithSiteApiEndpointPool()`: the pool helper records endpoint
  * success/failure cooldown state, which is a write.
  *
- * It also imports nothing from the routing layer (`tokenRouter` and friends), so
- * it stays fully usable when `PROXY_ROUTING_ENABLED=false`.
+ * Its own import list also names nothing from the routing layer (`tokenRouter` and
+ * friends), and it calls nothing there, so it stays fully usable when
+ * `PROXY_ROUTING_ENABLED=false`. That is a per-file property; the transitive import
+ * closure does reach routing (see `modelProbeRunService.ts`).
  */
 
 type SiteRow = typeof schema.sites.$inferSelect;

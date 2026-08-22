@@ -229,11 +229,14 @@ export function normalizeModelProbeConfig(input: unknown): ModelProbeConfig {
 }
 
 /**
- * Reads the single JSON settings row. This module deliberately imports nothing
- * from the routing stack (tokenRouter, route refresh/decision/cooldown, the
- * `token_routes` / `route_channels` tables) so probe configuration stays fully
- * usable when `PROXY_ROUTING_ENABLED=false`. A test asserts that import-graph
- * property over this file's source.
+ * Reads the single JSON settings row. Probe configuration stays fully usable when
+ * `PROXY_ROUTING_ENABLED=false`: nothing here touches the routing stack
+ * (tokenRouter, route refresh/decision/cooldown, the `token_routes` /
+ * `route_channels` tables).
+ *
+ * A test asserts that over this file's own import list. That is a per-file check,
+ * not a transitive-closure one — see `modelProbeRunService.ts` for why the closure
+ * claim would be false.
  */
 export async function loadModelProbeConfig(): Promise<ModelProbeConfig> {
   const row = await db.select()

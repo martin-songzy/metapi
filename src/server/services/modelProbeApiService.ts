@@ -41,10 +41,15 @@ import {
  * persistence, and boundary redaction — lives in this module so the route file
  * owns no logic.
  *
- * This module deliberately imports nothing from the routing stack (tokenRouter,
- * route refresh/decision/cooldown, modelService), so the whole API surface keeps
- * working with `PROXY_ROUTING_ENABLED=false`. A test in
+ * This module names nothing from the routing stack (tokenRouter, route
+ * refresh/decision/cooldown, modelService) in its own import list, and a test in
  * `routes/api/modelProbe.test.ts` asserts that over this file's source.
+ *
+ * Read that narrowly: it is a statement about this file, not about the transitive
+ * closure, which does reach routing via runtimeModelProbe -> oauth/service ->
+ * modelService. The API surface keeps working with `PROXY_ROUTING_ENABLED=false`
+ * because nothing routing-related executes at import time and no path here calls
+ * into routing — not because the import graph excludes it.
  */
 
 export const MODEL_PROBE_REDACTED_MASK = '[redacted]';

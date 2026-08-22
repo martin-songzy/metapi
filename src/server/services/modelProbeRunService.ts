@@ -46,9 +46,21 @@ import type { UpstreamEndpoint } from './upstreamEndpointRuntime.js';
  *    partial results, reports `cancelled: true`, and is never presented as a
  *    completed one.
  *
- * The routing stack is reached only through a dynamic import inside the sync
- * branch, so this module's static import graph stays free of `tokenRouter` and
- * friends and every entry point keeps working with `PROXY_ROUTING_ENABLED=false`.
+ * Every entry point here keeps working with `PROXY_ROUTING_ENABLED=false`. What
+ * makes that true is that nothing routing-related *executes* unless a caller asks
+ * for it: this module's own import list names no routing module, and none of the
+ * modules involved runs anything at import time.
+ *
+ * It is specifically NOT true that the routing stack is absent from the transitive
+ * import closure. `runtimeModelProbe` imports `oauth/service.js`, which imports
+ * `modelService.js`, which imports `tokenRouter.js` — an edge that predates this
+ * feature. So `await import('./modelService.js')` in `syncUnsupportedToRouting`
+ * keeps this file's import list clean, but it is not isolation: it resolves from an
+ * already-warm module cache and must not be read as proof the module was excluded.
+ *
+ * The commitment that matters is behavioural, and it is pinned behaviourally —
+ * `modelProbe.e2e.test.ts` runs a real sweep against a real server with
+ * `PROXY_ROUTING_ENABLED=false` and asserts no routing state is written.
  */
 
 export const ACTIVE_MODEL_PROBE_TASK_TYPE = 'active-model-probe';
@@ -889,10 +901,14 @@ async function syncUnsupportedToRouting(
 
   if (disabled === 0) return { disabled: 0, routingSynced: false };
 
-  // Imported dynamically so `modelService` (and through it the whole routing
-  // stack) stays out of this module's static import graph. Preview, run and
-  // results must all work with PROXY_ROUTING_ENABLED=false, and this branch is
-  // the only place routing is ever touched.
+  // Imported dynamically to keep `modelService` out of *this file's* import list.
+  // That is a code-shape choice, not isolation: `modelService` is already reachable
+  // through runtimeModelProbe -> oauth/service -> modelService, so by the time this
+  // line runs it almost always resolves from a warm module cache.
+  //
+  // What makes preview, run and results safe under PROXY_ROUTING_ENABLED=false is
+  // that this branch is the only place routing is ever *called*, and it is gated
+  // above on both the env flag and the operator's `syncToRouting` setting.
   try {
     const { rebuildTokenRoutesFromAvailability } = await import('./modelService.js');
     await rebuildTokenRoutesFromAvailability();
