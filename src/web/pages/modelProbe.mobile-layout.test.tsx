@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
@@ -12,6 +12,18 @@ const { apiMock } = vi.hoisted(() => ({
     saveModelProbeConfig: vi.fn(),
     getModelProbeSites: vi.fn(),
     saveModelProbeSiteConfig: vi.fn(),
+    /**
+     * The run and results panels mount with the rest of the page. Leaving them out
+     * of this mock does not skip them — it makes them call `undefined`, so the
+     * results panel lands in its error branch and renders zero mobile rows while
+     * this file's "renders mobile cards" assertion still passes off the sites panel.
+     * Every api method the page can reach has to be here.
+     */
+    getModelProbeResults: vi.fn(),
+    getModelProbeTasks: vi.fn(),
+    getModelProbeTask: vi.fn(),
+    previewModelProbe: vi.fn(),
+    runModelProbe: vi.fn(),
   },
 }));
 
@@ -38,14 +50,38 @@ async function flushMicrotasks() {
   });
 }
 
+const PANEL_DIR = 'src/web/pages/modelProbe';
+
+/**
+ * Derived from the filesystem, not hand-listed. A previous version of this file
+ * enumerated the panels by hand and silently stopped covering the run and results
+ * panels when they were added — the rules below only bind files someone remembered
+ * to type. Reading the directory means a new panel is covered the moment it lands.
+ */
 const SOURCES = [
   'src/web/pages/ModelProbe.tsx',
-  'src/web/pages/modelProbe/ModelProbeConfigPanel.tsx',
-  'src/web/pages/modelProbe/ModelProbeSitesPanel.tsx',
-  'src/web/pages/modelProbe/modelProbeTypes.ts',
+  ...readdirSync(resolve(process.cwd(), PANEL_DIR))
+    .filter((name) => /\.tsx?$/.test(name))
+    .sort()
+    .map((name) => `${PANEL_DIR}/${name}`),
 ];
 
 describe('ModelProbe mobile architecture', () => {
+  it('derives its file list from the panel directory so a new panel cannot be missed', () => {
+    // Guards the derivation itself: a broken glob would leave every rule below
+    // asserting over an empty list and passing for the wrong reason.
+    expect(SOURCES.length).toBeGreaterThanOrEqual(5);
+    for (const known of [
+      'src/web/pages/ModelProbe.tsx',
+      `${PANEL_DIR}/ModelProbeConfigPanel.tsx`,
+      `${PANEL_DIR}/ModelProbeSitesPanel.tsx`,
+      `${PANEL_DIR}/ModelProbeRunPanel.tsx`,
+      `${PANEL_DIR}/ModelProbeResultsPanel.tsx`,
+    ]) {
+      expect(SOURCES, known).toContain(known);
+    }
+  });
+
   it('reuses the shared mobile primitives instead of hand-rolled breakpoints', () => {
     const shell = readFileSync(resolve(process.cwd(), 'src/web/pages/ModelProbe.tsx'), 'utf8').replace(/\r\n/g, '\n');
     const sitesPanel = readFileSync(
@@ -123,6 +159,32 @@ describe('ModelProbe mobile rendering', () => {
         },
       ],
     });
+    apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
+    apiMock.getModelProbeResults.mockResolvedValue({
+      success: true,
+      total: 1,
+      query: { sortBy: 'checkedAt', order: 'desc', limit: 50, offset: 0 },
+      items: [
+        {
+          id: 31,
+          siteId: 4,
+          siteName: '站点甲',
+          accountId: 21,
+          accountUsername: 'ops@example.com',
+          balance: 12.5,
+          modelName: 'gpt-4o',
+          status: 'supported',
+          latencyMs: 843,
+          httpStatus: 200,
+          failureKind: null,
+          reason: null,
+          endpointUsed: '/v1/chat/completions',
+          promptUsed: 'hi',
+          userAgentUsed: 'claude-cli/2.1.63',
+          checkedAt: '2026-08-21T02:30:00.000Z',
+        },
+      ],
+    });
   });
 
   afterEach(() => {
@@ -150,6 +212,33 @@ describe('ModelProbe mobile rendering', () => {
       )).length).toBeGreaterThan(0);
       expect(collectText(root.root)).toContain('站点甲');
       expect(collectText(root.root)).toContain('筛选');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('renders result rows as mobile cards, with the results panel out of its error branch', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/model-probe']}>
+            <ToastProvider>
+              <ModelProbe />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      // Without this the panel's error branch renders no rows at all, and the
+      // sites panel's cards alone would satisfy a "has mobile cards" assertion.
+      expect(root.root.findAll((node) => node.props?.['data-testid'] === 'model-probe-results-error')).toHaveLength(0);
+      expect(root.root.findAll((node) => node.props?.['data-testid'] === 'model-probe-results-empty')).toHaveLength(0);
+      expect(root.root.findAll((node) => node.props?.['data-testid'] === 'model-probe-result-row-31')).toHaveLength(1);
+      expect(root.root.findAll((node) => node.props?.['data-testid'] === 'model-probe-results-table')).toHaveLength(0);
+      expect(collectText(root.root)).toContain('gpt-4o');
+      expect(apiMock.getModelProbeResults).toHaveBeenCalled();
     } finally {
       root?.unmount();
     }

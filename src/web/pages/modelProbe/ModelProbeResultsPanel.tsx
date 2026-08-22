@@ -243,6 +243,23 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
     </div>
   );
 
+  /**
+   * The arrow alone conveys direction visually only. `aria-sort` is not valid on a
+   * button (it belongs on `columnheader` / `rowheader` / `gridcell`), so direction
+   * lives in the accessible name here and on the table headers as `aria-sort`.
+   */
+  const ariaSortFor = (field: ModelProbeResultSortBy): 'ascending' | 'descending' | 'none' => {
+    if (query.sortBy !== field) return 'none';
+    return query.order === 'asc' ? 'ascending' : 'descending';
+  };
+
+  const sortButtonLabel = (field: ModelProbeResultSortBy, active: boolean) => {
+    if (!active) return `按${SORT_LABELS[field]}排序`;
+    const current = query.order === 'asc' ? '升序' : '降序';
+    const next = query.order === 'asc' ? '降序' : '升序';
+    return `按${SORT_LABELS[field]}排序，当前${current}，点击改为${next}`;
+  };
+
   const sortButtons = (
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
       {(Object.keys(SORT_LABELS) as ModelProbeResultSortBy[]).map((field) => {
@@ -252,6 +269,8 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
             key={field}
             type="button"
             data-testid={`model-probe-sort-${field}`}
+            aria-label={sortButtonLabel(field, active)}
+            aria-pressed={active}
             className="btn btn-ghost"
             style={{
               border: `1px solid ${active ? 'var(--color-primary)' : 'var(--color-border)'}`,
@@ -326,10 +345,15 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
             <th>站点 / 账号</th>
             <th>模型</th>
             <th>状态</th>
-            <th>响应</th>
-            <th>余额</th>
+            {/*
+              `aria-sort` goes on the column headers, the only ARIA-valid surface
+              for it. Only the three sortable columns carry it, and only the active
+              one reports a direction — marking every column 'none' would be noise.
+            */}
+            <th aria-sort={ariaSortFor('latency')}>响应</th>
+            <th aria-sort={ariaSortFor('balance')}>余额</th>
             <th style={{ minWidth: 170 }}>接口</th>
-            <th style={{ minWidth: 150 }}>探测时间</th>
+            <th style={{ minWidth: 150 }} aria-sort={ariaSortFor('checkedAt')}>探测时间</th>
             <th style={{ minWidth: 220 }}>原因</th>
           </tr>
         </thead>

@@ -13,6 +13,14 @@ const { apiMock } = vi.hoisted(() => ({
     saveModelProbeConfig: vi.fn(),
     getModelProbeSites: vi.fn(),
     saveModelProbeSiteConfig: vi.fn(),
+    // The run and results panels mount with the page; omitting these makes them
+    // call `undefined` and sit in their error branches while this file's
+    // assertions still pass off the config panel.
+    getModelProbeResults: vi.fn(),
+    getModelProbeTasks: vi.fn(),
+    getModelProbeTask: vi.fn(),
+    previewModelProbe: vi.fn(),
+    runModelProbe: vi.fn(),
   },
 }));
 
@@ -46,30 +54,55 @@ function buildConfig(overrides: Record<string, unknown> = {}) {
     ],
     defaultUserAgentId: 'claude-code',
     errorKeywords: ['no available channel'],
-    concurrency: 1,
+    concurrency: 3,
     timeoutMs: 15_000,
     syncToRouting: false,
     ...overrides,
   };
 }
 
-// Deliberately not the production values (50 / 300): the page must render whatever
-// the server reports instead of a hard-coded copy.
+/**
+ * Every value here differs from the production default, so hard-coding any one
+ * of them in the panel fails a test. The earlier fixture reused production
+ * values for six of the ten, which let `clampDraftInteger`'s bounds and the
+ * prompt / keyword / concurrency / timeout hints be hard-coded silently.
+ */
+const PRODUCTION_LIMITS = {
+  minConcurrency: 1,
+  maxConcurrency: 8,
+  minTimeoutMs: 3_000,
+  maxTimeoutMs: 60_000,
+  maxInterestPatterns: 50,
+  maxInterestPatternLength: 200,
+  maxPrompts: 50,
+  maxErrorKeywords: 50,
+  confirmTargetThreshold: 50,
+  maxRunTargets: 300,
+};
+
 function buildLimits(overrides: Record<string, unknown> = {}) {
   return {
-    minConcurrency: 1,
-    maxConcurrency: 8,
-    minTimeoutMs: 3_000,
-    maxTimeoutMs: 60_000,
-    maxInterestPatterns: 7,
+    minConcurrency: 2,
+    maxConcurrency: 6,
+    minTimeoutMs: 4_000,
+    maxTimeoutMs: 41_000,
+    maxInterestPatterns: 3,
     maxInterestPatternLength: 40,
-    maxPrompts: 50,
-    maxErrorKeywords: 50,
+    maxPrompts: 9,
+    maxErrorKeywords: 13,
     confirmTargetThreshold: 11,
     maxRunTargets: 123,
     ...overrides,
   };
 }
+
+it('uses a fixture that shares no value with the production limits', () => {
+  const fixture = buildLimits() as Record<string, number>;
+  for (const [key, production] of Object.entries(PRODUCTION_LIMITS)) {
+    expect(fixture[key], key).not.toBe(production);
+  }
+  expect(Object.keys(fixture).sort()).toEqual(Object.keys(PRODUCTION_LIMITS).sort());
+});
 
 const SITES = [
   {
@@ -158,6 +191,13 @@ describe('ModelProbe global configuration panel', () => {
       success: true,
       site: { ...SITES.find((site) => site.id === siteId), ...patch },
     }));
+    apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
+    apiMock.getModelProbeResults.mockResolvedValue({
+      success: true,
+      items: [],
+      total: 0,
+      query: { sortBy: 'checkedAt', order: 'desc', limit: 50, offset: 0 },
+    });
   });
 
   afterEach(() => {
@@ -254,7 +294,7 @@ describe('ModelProbe global configuration panel', () => {
         userAgents: buildConfig().userAgents,
         defaultUserAgentId: 'claude-code',
         errorKeywords: ['no available channel'],
-        concurrency: 1,
+        concurrency: 3,
         timeoutMs: 15_000,
         syncToRouting: false,
       });
@@ -276,6 +316,104 @@ describe('ModelProbe global configuration panel', () => {
       );
       expect(pageSource).not.toMatch(/confirmTargetThreshold\s*[:=]\s*\d/);
       expect(pageSource).not.toMatch(/maxRunTargets\s*[:=]\s*\d/);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  async function saveWith(root: ReactTestInstance, testId: string, value: string) {
+    const input = findByTestId(root, testId);
+    await act(async () => {
+      input.props.onChange({ target: { value } });
+    });
+    await act(async () => {
+      findSaveConfigButton(root).props.onClick();
+    });
+    await flushMicrotasks();
+    const calls = apiMock.saveModelProbeConfig.mock.calls;
+    return calls[calls.length - 1][0] as Record<string, number>;
+  }
+
+  it('clamps concurrency to the server-reported bounds, not to hard-coded ones', async () => {
+    const root = await renderPage();
+    try {
+      // Hard-coding 1..8 would clamp these to 8 and 1 instead, saving a value
+      // the operator never chose and never saw.
+      expect((await saveWith(root.root, 'model-probe-concurrency', '9')).concurrency).toBe(6);
+      expect((await saveWith(root.root, 'model-probe-concurrency', '1')).concurrency).toBe(2);
+      // Blank falls back to the reported minimum, matching the server's floor.
+      expect((await saveWith(root.root, 'model-probe-concurrency', '')).concurrency).toBe(2);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('clamps the timeout to the server-reported bounds, not to hard-coded ones', async () => {
+    const root = await renderPage();
+    try {
+      expect((await saveWith(root.root, 'model-probe-timeout', '999999')).timeoutMs).toBe(41_000);
+      expect((await saveWith(root.root, 'model-probe-timeout', '100')).timeoutMs).toBe(4_000);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('flags patterns beyond the server-reported count cap', async () => {
+    const root = await renderPage();
+    try {
+      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
+      await act(async () => {
+        textarea.props.onChange({ target: { value: 'one\ntwo\nthree\nfour' } });
+      });
+
+      const issues = collectText(findByTestId(root.root, 'model-probe-pattern-issues'));
+      expect(issues).toContain('four');
+      expect(issues).toContain('3');
+      expect(issues).not.toContain('50');
+      // The first three are within the cap and must not be flagged.
+      expect(issues).not.toContain('one');
+
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+      expect(apiMock.saveModelProbeConfig).not.toHaveBeenCalled();
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('shows the prompt, keyword, concurrency and timeout caps the server reported', async () => {
+    const root = await renderPage();
+    try {
+      const panel = collectText(findByTestId(root.root, 'model-probe-config-panel'));
+      for (const shown of ['9', '13', '2', '6', '4000', '41000']) {
+        expect(panel, shown).toContain(shown);
+      }
+      // The production values must appear nowhere on the panel.
+      for (const hardCoded of ['3000', '60000']) {
+        expect(panel, hardCoded).not.toContain(hardCoded);
+      }
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('marks the pattern field invalid for assistive technology, not only in prose', async () => {
+    const root = await renderPage();
+    try {
+      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
+      expect(textarea.props['aria-invalid']).toBe(false);
+
+      await act(async () => {
+        textarea.props.onChange({ target: { value: '(unclosed' } });
+      });
+
+      // Removing this left 15/15 green while a screen-reader user lost the
+      // field-level invalid signal entirely.
+      const marked = findByTestId(root.root, 'model-probe-interest-patterns');
+      expect(marked.props['aria-invalid']).toBe(true);
+      expect(marked.props.style?.borderColor).toBe('var(--color-danger)');
     } finally {
       root.unmount();
     }
@@ -479,6 +617,193 @@ describe('ModelProbe per-site configuration panel', () => {
         probeEndpointType: 'chat',
         probeUserAgent: '',
       });
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+describe('ModelProbe disabled site visibility', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig(),
+      limits: buildLimits(),
+    });
+    apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
+    apiMock.getModelProbeResults.mockResolvedValue({
+      success: true,
+      items: [],
+      total: 0,
+      query: { sortBy: 'checkedAt', order: 'desc', limit: 50, offset: 0 },
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('marks a non-active site as one the sweep will skip', async () => {
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [SITES[0], { ...SITES[1], status: 'disabled' }],
+    });
+    const root = await renderPage();
+    try {
+      // `modelProbeRunService` skips any site whose status is not 'active'. Fetching
+      // that status and never showing it lets an operator tune settings for a site
+      // that will never be probed.
+      const badge = findByTestId(root.root, 'model-probe-site-inactive-9');
+      expect(collectText(badge)).toContain('已停用');
+      expect(collectText(badge)).toContain('跳过');
+      expect(root.root.findAll((node) => node.props['data-testid'] === 'model-probe-site-inactive-4')).toHaveLength(0);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('treats a missing status as active rather than as disabled', async () => {
+    const { status: _status, ...withoutStatus } = SITES[1] as Record<string, unknown>;
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [SITES[0], withoutStatus],
+    });
+    const root = await renderPage();
+    try {
+      // Matches the server's own `(row.status || 'active')` default; warning here
+      // would train the operator to ignore the badge.
+      expect(root.root.findAll((node) => (
+        typeof node.props['data-testid'] === 'string'
+        && node.props['data-testid'].startsWith('model-probe-site-inactive-')
+      ))).toHaveLength(0);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('still lets a disabled site be configured, so it is ready when re-enabled', async () => {
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [{ ...SITES[1], status: 'disabled' }],
+    });
+    apiMock.saveModelProbeSiteConfig.mockResolvedValue({
+      success: true,
+      site: { ...SITES[1], status: 'disabled' },
+    });
+    const root = await renderPage();
+    try {
+      const findSave = () => root.root.find((node) => (
+        node.type === 'button'
+        && node.props['data-testid'] === 'model-probe-site-save-9'
+      ));
+      // Pristine drafts are disabled for every site, active or not — that is the
+      // panel's normal behaviour, not a consequence of the status.
+      expect(findSave().props.disabled).toBe(true);
+
+      const input = findByTestId(root.root, 'model-probe-site-user-agent-custom-9');
+      await act(async () => {
+        input.props.onChange({ target: { value: 'changed-agent/2.0' } });
+      });
+      await flushMicrotasks();
+
+      // A disabled site is still configurable, so its settings are ready the
+      // moment someone re-enables it in 站点管理.
+      expect(findSave().props.disabled).toBe(false);
+      await act(async () => {
+        findSave().props.onClick();
+      });
+      await flushMicrotasks();
+      expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(9, expect.objectContaining({
+        probeUserAgent: 'changed-agent/2.0',
+      }));
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+describe('ModelProbe refresh failure handling', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig(),
+      limits: buildLimits(),
+    });
+    apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
+    apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
+    apiMock.getModelProbeResults.mockResolvedValue({
+      success: true,
+      items: [],
+      total: 0,
+      query: { sortBy: 'checkedAt', order: 'desc', limit: 50, offset: 0 },
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function findRefreshButton(root: ReactTestInstance): ReactTestInstance {
+    return root.find((node) => (
+      node.type === 'button'
+      && typeof node.props.onClick === 'function'
+      && collectText(node).trim() === '刷新'
+    ));
+  }
+
+  it('keeps the last good page when a background refresh fails', async () => {
+    const root = await renderPage();
+    try {
+      // Sanity: the good view is on screen before the failing refresh.
+      expect(collectText(root.root)).toContain('站点甲');
+
+      apiMock.getModelProbeSites.mockRejectedValueOnce(new Error('网络错误'));
+      await act(async () => {
+        findRefreshButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      // Blanking the page here would discard an unsaved scope selection and hide
+      // results from a sweep the operator already paid for.
+      expect(collectText(root.root)).toContain('站点甲');
+      expect(root.root.findAll((node) => node.props['data-testid'] === 'model-probe-refresh-error')).toHaveLength(1);
+      expect(collectText(findByTestId(root.root, 'model-probe-refresh-error'))).toContain('网络错误');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('clears the refresh notice once a later refresh succeeds', async () => {
+    const root = await renderPage();
+    try {
+      apiMock.getModelProbeSites.mockRejectedValueOnce(new Error('网络错误'));
+      await act(async () => {
+        findRefreshButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+      expect(root.root.findAll((node) => node.props['data-testid'] === 'model-probe-refresh-error')).toHaveLength(1);
+
+      await act(async () => {
+        findRefreshButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(root.root.findAll((node) => node.props['data-testid'] === 'model-probe-refresh-error')).toHaveLength(0);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('still blanks the page when the first load fails, since there is no good view to keep', async () => {
+    apiMock.getModelProbeConfig.mockRejectedValueOnce(new Error('首次加载失败'));
+    const root = await renderPage();
+    try {
+      const text = collectText(root.root);
+      expect(text).toContain('首次加载失败');
+      expect(text).not.toContain('站点甲');
+      expect(root.root.findAll((node) => node.props['data-testid'] === 'model-probe-refresh-error')).toHaveLength(0);
     } finally {
       root.unmount();
     }

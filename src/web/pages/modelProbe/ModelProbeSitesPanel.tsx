@@ -125,6 +125,26 @@ export default function ModelProbeSitesPanel({
     </div>
   );
 
+  /**
+   * A non-active site is silently skipped by the run service, so leaving its
+   * status off this table lets an operator carefully tune probe settings for a
+   * site that will never be probed. The settings are still editable — a site can
+   * be re-enabled from 站点管理 — but the row has to say the sweep will pass it by.
+   */
+  const renderStatusBadge = (site: ModelProbeSite) => {
+    const status = site.status || 'active';
+    if (status === 'active') return null;
+    return (
+      <span
+        className="badge badge-warning"
+        data-testid={`model-probe-site-inactive-${site.id}`}
+        title="站点已停用，批量探测会跳过它，不消耗配额"
+      >
+        已停用 · 探测会跳过
+      </span>
+    );
+  };
+
   const renderEndpointSelect = (site: ModelProbeSite, draft: ModelProbeSiteDraft) => (
     <ModernSelect
       data-testid={`model-probe-site-endpoint-${site.id}`}
@@ -224,6 +244,7 @@ export default function ModelProbeSitesPanel({
                 key={site.id}
                 title={site.name}
                 subtitle={site.url}
+                headerActions={renderStatusBadge(site)}
                 footerActions={renderSaveButton(site, draft)}
               >
                 <MobileField label="平台" value={<span className="badge badge-muted">{site.platform}</span>} />
@@ -252,7 +273,10 @@ export default function ModelProbeSitesPanel({
                 return (
                   <tr key={site.id}>
                     <td>
-                      <div style={{ fontWeight: 600 }}>{site.name}</div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600 }}>{site.name}</span>
+                        {renderStatusBadge(site)}
+                      </div>
                       <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{site.url}</div>
                     </td>
                     <td><span className="badge badge-muted">{site.platform}</span></td>

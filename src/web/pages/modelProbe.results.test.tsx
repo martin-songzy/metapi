@@ -299,6 +299,95 @@ describe('ModelProbe results filtering', () => {
   });
 });
 
+describe('ModelProbe results pagination', () => {
+  it('hides both page buttons when everything fits on one page', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW, SKIPPED_ROW], undefined, 2));
+    const root = await renderPage();
+    try {
+      expect(root.root.findAll((node) => node.props?.['data-testid'] === 'model-probe-results-next')).toHaveLength(0);
+      expect(root.root.findAll((node) => node.props?.['data-testid'] === 'model-probe-results-prev')).toHaveLength(0);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('pages forward by the same page size it asked the server for', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW], undefined, 140));
+    const root = await renderPage();
+    try {
+      // The first request's own limit is the page size; hard-coding 50 here would
+      // keep passing if the panel and the server ever disagreed about it.
+      const pageSize = Number(lastResultsQuery().limit);
+      expect(pageSize).toBe(50);
+      expect(lastResultsQuery()).toMatchObject({ offset: 0 });
+      expect(findByTestId(root.root, 'model-probe-results-prev').props.disabled).toBe(true);
+
+      await click(findByTestId(root.root, 'model-probe-results-next'));
+      expect(lastResultsQuery()).toMatchObject({ limit: pageSize, offset: pageSize });
+
+      await click(findByTestId(root.root, 'model-probe-results-next'));
+      expect(lastResultsQuery()).toMatchObject({ offset: pageSize * 2 });
+
+      await click(findByTestId(root.root, 'model-probe-results-prev'));
+      expect(lastResultsQuery()).toMatchObject({ offset: pageSize });
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('stops paging forward on the last page and never asks for a negative offset', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW], undefined, 60));
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-results-next'));
+      // offset 50 of 60 is the last page: 50 + 50 >= 60.
+      expect(findByTestId(root.root, 'model-probe-results-next').props.disabled).toBe(true);
+
+      await click(findByTestId(root.root, 'model-probe-results-prev'));
+      expect(lastResultsQuery()).toMatchObject({ offset: 0 });
+      await click(findByTestId(root.root, 'model-probe-results-prev'));
+      expect(Number(lastResultsQuery().offset)).toBe(0);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('returns to the first page when a filter changes', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW], undefined, 140));
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-results-next'));
+      expect(Number(lastResultsQuery().offset)).toBeGreaterThan(0);
+
+      const input = findByTestId(root.root, 'model-probe-results-model');
+      await act(async () => {
+        input.props.onChange({ target: { value: 'gpt-4o' } });
+      });
+      await click(findByTestId(root.root, 'model-probe-results-apply'));
+
+      // Page 2 of the previous filter is meaningless, and silently keeping the
+      // offset shows an empty table that reads as "no matches".
+      expect(lastResultsQuery()).toMatchObject({ model: 'gpt-4o', offset: 0 });
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('returns to the first page when the sort changes', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW], undefined, 140));
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-results-next'));
+      expect(Number(lastResultsQuery().offset)).toBeGreaterThan(0);
+
+      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      expect(lastResultsQuery()).toMatchObject({ sortBy: 'latency', offset: 0 });
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
 describe('ModelProbe results sorting', () => {
   it('sorts by response speed', async () => {
     const root = await renderPage();
@@ -444,6 +533,76 @@ describe('ModelProbe results staleness', () => {
 
       expect(collectText(root.root)).not.toContain('STALE-MODEL');
       expect(collectText(findByTestId(root.root, 'model-probe-results-error'))).toContain('结果查询失败');
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+describe('ModelProbe results sort accessibility', () => {
+  function headerWithText(root: ReactTestInstance, text: string): ReactTestInstance {
+    return root.find((node) => node.type === 'th' && collectText(node).trim() === text);
+  }
+
+  it('reports the active sort direction as aria-sort on the column header', async () => {
+    const root = await renderPage();
+    try {
+      // Default is 探测时间 descending.
+      expect(headerWithText(root.root, '探测时间').props['aria-sort']).toBe('descending');
+      expect(headerWithText(root.root, '响应').props['aria-sort']).toBe('none');
+      expect(headerWithText(root.root, '余额').props['aria-sort']).toBe('none');
+
+      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      // 响应速度 starts ascending — fastest first.
+      expect(headerWithText(root.root, '响应').props['aria-sort']).toBe('ascending');
+      expect(headerWithText(root.root, '探测时间').props['aria-sort']).toBe('none');
+
+      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      expect(headerWithText(root.root, '响应').props['aria-sort']).toBe('descending');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('leaves aria-sort off columns that cannot be sorted', async () => {
+    const root = await renderPage();
+    try {
+      // aria-sort on a non-sortable header would promise an interaction that
+      // does not exist.
+      for (const text of ['站点 / 账号', '模型', '状态', '接口', '原因']) {
+        expect(headerWithText(root.root, text).props['aria-sort'], text).toBeUndefined();
+      }
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('states the direction in the sort button name, not only in the arrow glyph', async () => {
+    const root = await renderPage();
+    try {
+      const active = findByTestId(root.root, 'model-probe-sort-checkedAt');
+      // The ↑ / ↓ glyph is visual-only; the accessible name has to carry it.
+      expect(active.props['aria-label']).toContain('降序');
+      expect(active.props['aria-pressed']).toBe(true);
+
+      const inactive = findByTestId(root.root, 'model-probe-sort-balance');
+      expect(inactive.props['aria-pressed']).toBe(false);
+      expect(inactive.props['aria-label']).not.toContain('当前');
+
+      await click(findByTestId(root.root, 'model-probe-sort-checkedAt'));
+      expect(findByTestId(root.root, 'model-probe-sort-checkedAt').props['aria-label']).toContain('升序');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps aria-sort off the buttons, where it would be invalid ARIA', async () => {
+    const root = await renderPage();
+    try {
+      // aria-sort is only valid on columnheader / rowheader / gridcell.
+      for (const field of ['latency', 'balance', 'checkedAt']) {
+        expect(findByTestId(root.root, `model-probe-sort-${field}`).props['aria-sort'], field).toBeUndefined();
+      }
     } finally {
       root.unmount();
     }

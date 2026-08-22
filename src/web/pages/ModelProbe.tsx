@@ -30,7 +30,10 @@ export default function ModelProbe() {
   const [sites, setSites] = useState<ModelProbeSite[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  /** Only a first (blocking) load may blank the page. */
   const [loadError, setLoadError] = useState('');
+  /** A failed background refresh: surfaced next to the refresh button, non-destructively. */
+  const [refreshError, setRefreshError] = useState('');
   /**
    * Bumped when a sweep reaches a terminal state. The results table owns its own
    * query, so the shell only tells it "something changed" rather than reaching
@@ -50,10 +53,23 @@ export default function ModelProbe() {
       setLimits(configResponse.limits);
       setSites(Array.isArray(sitesResponse.sites) ? sitesResponse.sites : []);
       setLoadError('');
+      setRefreshError('');
     } catch (error: any) {
       const message = error?.message || '加载模型可用性配置失败';
-      setLoadError(message);
-      if (silent) toast.error(message);
+      if (silent) {
+        /**
+         * A background refresh that fails must not throw away a page that still
+         * works. Replacing the panels with an error card would drop the operator's
+         * unsaved scope selection and half-typed config, and it would hide the
+         * results of a sweep they just paid for — over a refresh they did not
+         * depend on. The toast plus the inline notice say what happened; the last
+         * good view stays put.
+         */
+        setRefreshError(message);
+        toast.error(message);
+      } else {
+        setLoadError(message);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -110,6 +126,15 @@ export default function ModelProbe() {
         </div>
       ) : (
         <>
+          {refreshError && (
+            <div
+              className="alert alert-warning"
+              data-testid="model-probe-refresh-error"
+              style={{ marginBottom: 12 }}
+            >
+              刷新失败：{refreshError}。下面显示的是上一次成功加载的数据，可能已经过时。
+            </div>
+          )}
           <ModelProbeConfigPanel
             config={config}
             limits={limits}
@@ -136,3 +161,4 @@ export default function ModelProbe() {
     </div>
   );
 }
+

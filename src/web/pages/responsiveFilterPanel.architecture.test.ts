@@ -11,6 +11,8 @@ const pages = [
   'src/web/pages/ProxyLogs.tsx',
   'src/web/pages/Sites.tsx',
   'src/web/pages/TokenRoutes.tsx',
+  'src/web/pages/modelProbe/ModelProbeResultsPanel.tsx',
+  'src/web/pages/modelProbe/ModelProbeSitesPanel.tsx',
   'src/web/pages/tokens/TokensPanel.tsx',
 ];
 
