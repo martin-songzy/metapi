@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, sql, type Column, type SQL } from 'drizzle-orm';
 
 import { config } from '../config.js';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
@@ -1031,6 +1031,52 @@ function normalizeResultStatus(value: unknown): RuntimeModelProbeStatus {
   return RESULT_STATUSES.find((candidate) => candidate === value) ?? 'inconclusive';
 }
 
+/**
+ * The full ORDER BY for a results page: NULL placement, then the sort column,
+ * then `id`.
+ *
+ * **Why NULL placement is explicit.** `latencyMs` is null for every skipped and
+ * every timed-out probe and `balance` is null whenever it is unknown, so null
+ * rows are the common case on both sortable columns rather than an edge. The
+ * dialects disagree about where they go: SQLite and MySQL sort NULLs FIRST on
+ * `asc`, while Postgres sorts them LAST on `asc` and FIRST on `desc`. Left to the
+ * dialect default, the operator's Supabase deployment therefore orders these rows
+ * differently from every test in this SQLite-only suite, and on SQLite the
+ * results panel's own default — 「最快优先」 — opens on a page of `—` placeholders
+ * ahead of the fastest real measurement.
+ *
+ * **Why a CASE expression and not `NULLS LAST`.** That clause does not exist in
+ * MySQL at all, so the ANSI form would emit SQL that works on two dialects out of
+ * three; the portable form is also the one that needs no `runtimeDbDialect`
+ * branch. A test renders this through all three dialects and asserts they match.
+ *
+ * **Why last in BOTH directions**, rather than mirroring Postgres: a row with no
+ * measurement is not a fast time and not a slow one either, so it belongs after
+ * everything that was actually measured no matter which way the operator sorts.
+ * That is a deliberate deviation from every dialect default.
+ *
+ * Cost, stated because it is real: a computed leading ORDER BY term means the
+ * per-column indexes on this table can no longer satisfy the ordering, so a page
+ * is a scan plus a sort. `model_probe_results` holds one row per site×model and a
+ * single run is capped at `MAX_ACTIVE_PROBE_RUN_TARGETS`, so the table stays
+ * small. Declaring matching `NULLS`-aware indexes would be the alternative, and
+ * it is not expressible portably either.
+ *
+ * `id` last breaks ties so paging cannot repeat or drop a row when the sort
+ * column holds duplicates.
+ *
+ * Exported for the cross-dialect rendering test: a SQLite-only suite cannot
+ * otherwise see whether this is even legal SQL on the database production runs on.
+ */
+export function buildModelProbeResultOrdering(sortColumn: Column, order: 'asc' | 'desc'): SQL[] {
+  const direction = order === 'asc' ? asc : desc;
+  return [
+    asc(sql`case when ${sortColumn} is null then 1 else 0 end`),
+    direction(sortColumn),
+    direction(schema.modelProbeResults.id),
+  ];
+}
+
 export async function listActiveModelProbeResults(query: ModelProbeResultsQuery): Promise<{
   items: ModelProbeResultView[];
   total: number;
@@ -1052,7 +1098,6 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
     ? undefined
     : (conditions.length === 1 ? conditions[0] : and(...conditions));
 
-  const direction = query.order === 'asc' ? asc : desc;
   const sortColumn = query.sortBy === 'latency'
     ? schema.modelProbeResults.latencyMs
     : (query.sortBy === 'balance' ? schema.accounts.balance : schema.modelProbeResults.checkedAt);
@@ -1075,9 +1120,7 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
   if (where) listQuery = listQuery.where(where) as typeof listQuery;
 
   const rows = await listQuery
-    // `id` breaks ties so paging cannot repeat or drop a row when the sort column
-    // holds duplicates.
-    .orderBy(direction(sortColumn), direction(schema.modelProbeResults.id))
+    .orderBy(...buildModelProbeResultOrdering(sortColumn, query.order === 'asc' ? 'asc' : 'desc'))
     .limit(limit)
     .offset(offset)
     .all();

@@ -1343,6 +1343,100 @@ describe('modelProbeRunService', () => {
       expect(second.items.map((item) => item.latencyMs)).toEqual([300]);
     });
 
+    /**
+     * Null rows are the COMMON case on both sortable columns, not an edge: every
+     * timed-out or skipped probe stores a null `latencyMs`, and `balance` is null
+     * whenever the probe account was deleted or its balance is unknown.
+     *
+     * The dialects disagree on where those rows land. SQLite and MySQL sort NULLs
+     * FIRST on `asc`; Postgres sorts them LAST on `asc` and FIRST on `desc`. Every
+     * test here runs on SQLite while production runs on Supabase, so without an
+     * explicit placement the requirement "sortable by response speed and by
+     * balance" behaves in production unlike in any test — and 「最快优先」 opens on a
+     * page of 「—」 placeholders.
+     */
+    async function seedResultsWithNulls() {
+      const measured = await seedSite({ name: 'measured-site' });
+      const unmeasured = await seedSite({ name: 'unmeasured-site' });
+      await db.update(schema.accounts).set({ balance: 7 })
+        .where(eq(schema.accounts.id, measured.account.id)).run();
+      await db.update(schema.accounts).set({ balance: null })
+        .where(eq(schema.accounts.id, unmeasured.account.id)).run();
+
+      await db.insert(schema.modelProbeResults).values([
+        {
+          siteId: measured.site.id,
+          accountId: measured.account.id,
+          modelName: 'fast-model',
+          status: 'supported',
+          latencyMs: 120,
+          checkedAt: '2026-08-01T00:00:00.000Z',
+        },
+        {
+          siteId: measured.site.id,
+          accountId: measured.account.id,
+          modelName: 'slow-model',
+          status: 'supported',
+          latencyMs: 900,
+          checkedAt: '2026-08-02T00:00:00.000Z',
+        },
+        {
+          // A timeout: recorded, but with no measurement to sort by.
+          siteId: unmeasured.site.id,
+          accountId: unmeasured.account.id,
+          modelName: 'timed-out-model',
+          status: 'inconclusive',
+          latencyMs: null,
+          checkedAt: '2026-08-03T00:00:00.000Z',
+        },
+      ]).run();
+
+      return { measured, unmeasured };
+    }
+
+    it('sorts unmeasured latency rows last in BOTH directions, not by dialect default', async () => {
+      await seedResultsWithNulls();
+
+      const asc = await service.listActiveModelProbeResults({ sortBy: 'latency', order: 'asc' });
+      expect(asc.items.map((item) => item.latencyMs)).toEqual([120, 900, null]);
+
+      const desc = await service.listActiveModelProbeResults({ sortBy: 'latency', order: 'desc' });
+      expect(desc.items.map((item) => item.latencyMs)).toEqual([900, 120, null]);
+
+      // The measured rows must still reverse, so the assertion above cannot pass
+      // by ignoring `order` altogether.
+      expect(asc.items[0]?.modelName).toBe('fast-model');
+      expect(desc.items[0]?.modelName).toBe('slow-model');
+    });
+
+    it('sorts unknown balances last in BOTH directions', async () => {
+      await seedResultsWithNulls();
+
+      const asc = await service.listActiveModelProbeResults({ sortBy: 'balance', order: 'asc' });
+      expect(asc.items.map((item) => item.balance)).toEqual([7, 7, null]);
+      expect(asc.items.at(-1)?.siteName).toBe('unmeasured-site');
+
+      const desc = await service.listActiveModelProbeResults({ sortBy: 'balance', order: 'desc' });
+      expect(desc.items.map((item) => item.balance)).toEqual([7, 7, null]);
+      expect(desc.items.at(-1)?.siteName).toBe('unmeasured-site');
+    });
+
+    it('keeps unmeasured rows off the first page rather than filling it', async () => {
+      await seedResultsWithNulls();
+
+      // The operator's own default is 「最快优先」. A first page of placeholders is
+      // what the dialect default produces on SQLite, and it hides every real
+      // measurement behind a page boundary.
+      const page = await service.listActiveModelProbeResults({
+        sortBy: 'latency',
+        order: 'asc',
+        limit: 2,
+        offset: 0,
+      });
+      expect(page.items.map((item) => item.latencyMs)).toEqual([120, 900]);
+      expect(page.total).toBe(3);
+    });
+
     it('joins the site name and account balance onto every row', async () => {
       const { alpha } = await seedResults();
 
@@ -1379,6 +1473,73 @@ describe('modelProbeRunService', () => {
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/\/\/.*$/gm, '');
     }
+
+    /**
+     * The behavioural sort tests above can only run on SQLite, so they cannot see
+     * whether the ordering is even expressible on the operator's Postgres or on
+     * MySQL. This renders the ordering through all three dialects instead.
+     *
+     * The load-bearing assertion is the MySQL one: `NULLS LAST` / `NULLS FIRST` is
+     * ANSI SQL that Postgres and SQLite accept and MySQL rejects outright, so the
+     * obvious fix for null placement would emit SQL that works on two dialects out
+     * of three — and no test in this SQLite-only suite would notice.
+     */
+    it('renders identical NULL-last ordering on sqlite, postgres and mysql', async () => {
+      const { PgDialect } = await import('drizzle-orm/pg-core');
+      const { MySqlDialect } = await import('drizzle-orm/mysql-core');
+      const { SQLiteSyncDialect } = await import('drizzle-orm/sqlite-core');
+
+      const dialects = {
+        postgres: new PgDialect(),
+        mysql: new MySqlDialect(),
+        sqlite: new SQLiteSyncDialect(),
+      };
+
+      for (const order of ['asc', 'desc'] as const) {
+        const ordering = service.buildModelProbeResultOrdering(
+          schema.modelProbeResults.latencyMs,
+          order,
+        );
+        // Null placement, then the column, then `id` as the paging tie-break.
+        expect(ordering).toHaveLength(3);
+
+        const rendered = Object.fromEntries(
+          Object.entries(dialects).map(([name, dialect]) => [
+            name,
+            ordering.map((part) => dialect.sqlToQuery(part.getSQL()).sql).join(', '),
+          ]),
+        );
+
+        for (const [name, sqlText] of Object.entries(rendered)) {
+          // MySQL has no NULLS clause at all; emitting one would throw at runtime
+          // on the one dialect this suite cannot execute.
+          expect(sqlText.toLowerCase(), name).not.toContain('nulls last');
+          expect(sqlText.toLowerCase(), name).not.toContain('nulls first');
+          // Positive control, so the two assertions above cannot pass by rendering
+          // nothing at all.
+          expect(sqlText.toLowerCase(), name).toContain('case when');
+          expect(sqlText.toLowerCase(), name).toContain('is null');
+          expect(sqlText.toLowerCase(), name).toContain(order);
+        }
+
+        // Identical modulo each dialect's identifier quoting, which is the only
+        // thing that may legitimately differ.
+        const normalized = Object.fromEntries(
+          Object.entries(rendered).map(([name, sqlText]) => [name, sqlText.replace(/[`"]/g, '')]),
+        );
+        expect(normalized.mysql).toBe(normalized.postgres);
+        expect(normalized.sqlite).toBe(normalized.postgres);
+      }
+    });
+
+    it('applies that one ordering helper rather than ordering inline', async () => {
+      const code = await readServiceCode();
+
+      // Two ordering expressions would drift, and the cross-dialect test above
+      // only covers the helper.
+      expect(code).toContain('buildModelProbeResultOrdering(');
+      expect(code).not.toMatch(/\.orderBy\(\s*direction\(/);
+    });
 
     it('masks credentials through the shared module instead of a private copy', async () => {
       const code = await readServiceCode();

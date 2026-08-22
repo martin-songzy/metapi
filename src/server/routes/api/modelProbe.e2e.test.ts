@@ -218,13 +218,18 @@ describe('active model probe end to end', () => {
     return inserted.id;
   }
 
-  async function insertAccount(siteId: number, input?: { balance?: number; username?: string }): Promise<number> {
+  async function insertAccount(
+    siteId: number,
+    // `balance` is nullable in the schema and null is a real production state (an
+    // unknown balance), so the null case has to be expressible here.
+    input?: { balance?: number | null; username?: string },
+  ): Promise<number> {
     const inserted = await server.db.insert(server.schema.accounts).values({
       siteId,
       username: input?.username ?? 'probe-account',
       accessToken: '',
       apiToken: PROBE_CREDENTIAL,
-      balance: input?.balance ?? 0,
+      balance: input?.balance === undefined ? 0 : input.balance,
       status: 'active',
     }).returning({ id: server.schema.accounts.id }).get();
     return inserted.id;
@@ -567,6 +572,61 @@ describe('active model probe end to end', () => {
     // Balance order is the reverse of latency order, so neither assertion could
     // be passing on one shared default ordering.
     expect(balanceAsc.map((item) => item.siteName)).not.toEqual(latencyAsc.map((item) => item.siteName));
+  }, 60_000);
+
+  /**
+   * Property 6, null half. The test above uses only measured latencies and known
+   * balances, which is exactly why it could not see NULL placement — and NULL is
+   * the common case on both columns: every skipped or timed-out probe stores a
+   * null `latencyMs`, and `balance` is null whenever it is unknown.
+   *
+   * It matters here rather than only in the service test because the dialects
+   * disagree: SQLite (this suite) and MySQL put NULLs first on `asc`, Postgres
+   * (the operator's Supabase) puts them last on `asc` and first on `desc`. Without
+   * an explicit placement this endpoint would answer differently in production
+   * than in any test.
+   *
+   * The null rows are genuinely produced by a run rather than inserted as
+   * fixtures: an `embedding` model is skipped before any request is made, which is
+   * how a real sweep gets a row with no measurement.
+   */
+  it('sorts rows with no measurement last, not first, in both directions', async () => {
+    const knownSiteId = await insertSite({ slug: 'known', name: 'Known Balance', probeEndpointType: 'chat' });
+    const unknownSiteId = await insertSite({ slug: 'unknown', name: 'Unknown Balance', probeEndpointType: 'chat' });
+    await insertAccount(knownSiteId, { balance: 5, username: 'known-account' });
+    await insertAccount(unknownSiteId, { balance: null, username: 'unknown-account' });
+    // `^probe-` matches both, so each site yields one measured row and one skipped
+    // row.
+    await putConfig({ interestPatterns: ['^probe-'], concurrency: 2 });
+
+    upstreamModels = ['probe-model', 'probe-embedding'];
+    probeResponder = () => chatOk();
+
+    await runProbe();
+    // The embedding models were skipped without a request: 2 sites, not 4 models.
+    expect(probePosts()).toHaveLength(2);
+
+    for (const order of ['asc', 'desc'] as const) {
+      const byLatency = await listResults(`?sortBy=latency&order=${order}`);
+      expect(byLatency).toHaveLength(4);
+      const latencies = byLatency.map((item) => item.latencyMs);
+      // Two measured rows first, then the two unmeasured ones — in BOTH
+      // directions, because "never got a number" is neither fast nor slow.
+      expect(latencies.slice(0, 2).every((value) => typeof value === 'number')).toBe(true);
+      expect(latencies.slice(2)).toEqual([null, null]);
+      expect(byLatency.slice(2).map((item) => item.modelName)).toEqual(['probe-embedding', 'probe-embedding']);
+
+      const byBalance = await listResults(`?sortBy=balance&order=${order}`);
+      expect(byBalance).toHaveLength(4);
+      expect(byBalance.slice(0, 2).map((item) => item.balance)).toEqual([5, 5]);
+      expect(byBalance.slice(2).map((item) => item.balance)).toEqual([null, null]);
+      expect(byBalance.slice(2).map((item) => item.siteName)).toEqual(['Unknown Balance', 'Unknown Balance']);
+    }
+
+    // Page 1 of 「最快优先」 must carry measurements, which is the operator-visible
+    // symptom: on SQLite's default the first page was all 「—」 placeholders.
+    const firstPage = await listResults('?sortBy=latency&order=asc&limit=2&offset=0');
+    expect(firstPage.map((item) => item.latencyMs).every((value) => typeof value === 'number')).toBe(true);
   }, 60_000);
 
   /**
