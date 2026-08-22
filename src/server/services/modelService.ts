@@ -35,6 +35,18 @@ import {
   validateGeminiCliOauthConnection,
 } from './platformDiscoveryRegistry.js';
 import { probeRuntimeModel, type RuntimeModelProbeStatus } from './runtimeModelProbe.js';
+import type { ModelProbeFailureKind } from './modelProbeResponseClassifier.js';
+import type { UpstreamEndpoint } from './upstreamEndpointRuntime.js';
+import {
+  ModelProbeDiscoveryError,
+  discoverModelsForActiveProbe,
+  type ModelProbeDiscoverySource,
+  type ModelProbeDiscoveryTarget,
+} from './modelProbeDiscoveryService.js';
+import { loadModelProbeConfig, resolveModelProbeUserAgent } from './modelProbeConfigService.js';
+import { compileInterestPatterns, matchesInterest } from './modelInterestFilter.js';
+import { chooseModelProbePrompt } from './modelProbePrompts.js';
+import { normalizeModelProbeEndpointType } from '../../shared/modelProbeEndpointTypes.js';
 
 const API_TOKEN_DISCOVERY_TIMEOUT_MS = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
@@ -106,6 +118,8 @@ export type ModelRefreshSuccessResult = {
     scope: 'single' | 'all';
     probed: number;
     unsupported: number;
+    /** Reported separately so a transient failure is never read as "unsupported". */
+    inconclusive: number;
     details: Array<{
       modelName: string;
       status: RuntimeModelProbeStatus;
@@ -381,109 +395,302 @@ async function retryOauthModelDiscoveryWithRefresh<T>(input: {
   }
 }
 
+export type ProbeSiteModelDetail = {
+  modelName: string;
+  status: RuntimeModelProbeStatus;
+  latencyMs: number | null;
+  reason?: string;
+  httpStatus: number | null;
+  failureKind: ModelProbeFailureKind | null;
+  endpointUsed: UpstreamEndpoint | null;
+  latencyExceeded?: true;
+};
+
 export type ProbeSiteModelsResult = {
   success: boolean;
   error?: string;
   scope: 'single' | 'all';
   probed: number;
+  supported: number;
+  /** Verdicts that positively proved the model is absent. Only these can disable. */
   unsupported: number;
-  details: Array<{ modelName: string; status: RuntimeModelProbeStatus; latencyMs: number | null; reason?: string }>;
+  /**
+   * Timeouts, rate limits, auth blips, transport errors. Counted separately from
+   * `unsupported` because they prove nothing about the model and must never
+   * disable it.
+   */
+  inconclusive: number;
+  skipped: number;
+  /** How many models this run actually wrote a disable record for. */
+  disabled: number;
+  /** True only when routing writes were both permitted and performed. */
+  routingSynced: boolean;
+  discoverySource: ModelProbeDiscoverySource;
+  /** False when the model list came from cache, i.e. the credential is unproven. */
+  credentialVerified: boolean;
+  notes?: string[];
+  details: ProbeSiteModelDetail[];
 };
 
 export type ProbeSiteModelsProgress =
-  | { type: 'start'; scope: 'single' | 'all'; modelsCount: number; modelsToProbe: string[] }
-  | { type: 'model'; modelName: string; status: RuntimeModelProbeStatus; latencyMs: number | null; latencyExceeded?: true; reason?: string }
-  | { type: 'action'; modelName: string; action: 'disabled' };
+  | {
+    type: 'start';
+    scope: 'single' | 'all';
+    modelsCount: number;
+    modelsToProbe: string[];
+    discoverySource: ModelProbeDiscoverySource;
+    credentialVerified: boolean;
+    discoveredCount: number;
+    notes?: string[];
+  }
+  | {
+    type: 'model';
+    modelName: string;
+    status: RuntimeModelProbeStatus;
+    latencyMs: number | null;
+    latencyExceeded?: true;
+    reason?: string;
+    httpStatus: number | null;
+    failureKind: ModelProbeFailureKind | null;
+    endpointUsed: UpstreamEndpoint | null;
+  }
+  | { type: 'action'; modelName: string; action: 'disabled' | 'kept_manual' | 'sync_disabled' };
 
+/**
+ * Runs an active probe against one site.
+ *
+ * Two properties matter more than anything else here, and both used to be
+ * violated:
+ *
+ * 1. An `inconclusive` verdict never disables a model. A timeout, a 429, an auth
+ *    blip or a dropped connection says nothing about whether the model exists, so
+ *    folding it into `unsupported` (as this function once did) let a single
+ *    network hiccup permanently disable a working model.
+ * 2. Nothing routing-related is written unless `PROXY_ROUTING_ENABLED` **and** the
+ *    probe config's `syncToRouting` are both on. Both default off, so by default
+ *    this is a pure read-plus-HTTP diagnostic that reports and stores nothing.
+ *
+ * The model list comes from live discovery rather than `model_availability`, so a
+ * probe reflects what the upstream serves right now instead of a stale snapshot.
+ */
 export async function probeSiteModels(
   siteId: number,
   options?: { scope?: 'single' | 'all'; modelName?: string; concurrency?: number; latencyThresholdMs?: number; signal?: AbortSignal },
   onProgress?: (event: ProbeSiteModelsProgress) => void,
 ): Promise<ProbeSiteModelsResult> {
-  const empty = (scope: 'single' | 'all', error: string): ProbeSiteModelsResult =>
-    ({ success: false, error, scope, probed: 0, unsupported: 0, details: [] });
+  const failure = (scope: 'single' | 'all', error: string): ProbeSiteModelsResult => ({
+    success: false,
+    error,
+    scope,
+    probed: 0,
+    supported: 0,
+    unsupported: 0,
+    inconclusive: 0,
+    skipped: 0,
+    disabled: 0,
+    routingSynced: false,
+    discoverySource: 'live',
+    credentialVerified: false,
+    details: [],
+  });
 
-  const site = await db.select().from(schema.sites).where(eq(schema.sites.id, siteId)).get();
-  if (!site) return empty('single', '站点不存在');
+  const probeConfig = await loadModelProbeConfig();
 
-  const account = await db.select().from(schema.accounts)
-    .where(and(eq(schema.accounts.siteId, siteId), eq(schema.accounts.status, 'active')))
-    .get();
-  if (!account) return empty('single', '该站点没有可用的活跃账号');
-
-  const modelRows = await db.select({ modelName: schema.modelAvailability.modelName })
-    .from(schema.modelAvailability)
-    .where(and(
-      eq(schema.modelAvailability.accountId, account.id),
-      eq(schema.modelAvailability.available, true),
-    ))
-    .all();
-
-  const scope = (options?.scope ?? (site.postRefreshProbeScope === 'all' ? 'all' : 'single')) as 'single' | 'all';
-  const availableModels = modelRows.map((r) => r.modelName.trim()).filter((m) => m.length > 0);
-  if (availableModels.length === 0) {
-    return empty(scope, '该站点暂无已发现模型，请先刷新模型列表');
+  let discovery: ModelProbeDiscoveryTarget;
+  try {
+    discovery = await discoverModelsForActiveProbe({
+      siteId,
+      timeoutMs: probeConfig.timeoutMs,
+    });
+  } catch (error) {
+    const message = error instanceof ModelProbeDiscoveryError
+      ? error.message
+      : (error instanceof Error ? error.message : '模型发现失败');
+    return failure(options?.scope === 'all' ? 'all' : 'single', message);
   }
 
+  const { site, account, credential, models: discoveredModels } = discovery;
+  const credentialVerified = discovery.source === 'live';
+  const scope = (options?.scope ?? (site.postRefreshProbeScope === 'all' ? 'all' : 'single')) as 'single' | 'all';
+
+  const { patterns: interestPatterns } = compileInterestPatterns(probeConfig.interestPatterns);
+  const interestMatched = discoveredModels.filter((modelName) => matchesInterest(modelName, interestPatterns));
+
+  // scope 'all' means every interest-matched live model — not every discovered
+  // model. Probing an unfiltered list would spend real upstream quota on models
+  // nobody asked about.
   let modelsToProbe: string[];
   if (scope === 'all') {
-    modelsToProbe = availableModels;
+    if (interestMatched.length === 0) {
+      return failure(
+        scope,
+        probeConfig.interestPatterns.length === 0
+          ? '未配置模型兴趣正则：请先在模型探测设置中添加正则，否则不会探测任何模型'
+          : `实时发现的 ${discoveredModels.length} 个模型均未匹配模型兴趣正则，未执行探测`,
+      );
+    }
+    modelsToProbe = interestMatched;
   } else {
-    const configModel = ((options?.modelName ?? site.postRefreshProbeModel) || '').trim().toLowerCase();
-    const found = configModel
-      ? (availableModels.find((m) => m.toLowerCase() === configModel) ?? availableModels[0])
-      : availableModels[0];
-    modelsToProbe = [found];
+    const requested = ((options?.modelName ?? site.postRefreshProbeModel) || '').trim();
+    if (requested) {
+      // An explicitly named model is a direct instruction, so the interest filter
+      // does not apply to it. It must still actually exist upstream: silently
+      // probing some other model (the old behaviour) reported a verdict for a
+      // model the caller never asked about.
+      const found = discoveredModels.find((m) => m.toLowerCase() === requested.toLowerCase());
+      if (!found) {
+        return failure(scope, `实时模型列表中不存在模型 ${requested}，未执行探测`);
+      }
+      modelsToProbe = [found];
+    } else {
+      const fallback = interestMatched[0] ?? discoveredModels[0];
+      if (!fallback) return failure(scope, '实时发现的模型列表为空，未执行探测');
+      modelsToProbe = [fallback];
+    }
   }
 
-  onProgress?.({ type: 'start', scope, modelsCount: modelsToProbe.length, modelsToProbe });
+  onProgress?.({
+    type: 'start',
+    scope,
+    modelsCount: modelsToProbe.length,
+    modelsToProbe,
+    discoverySource: discovery.source,
+    credentialVerified,
+    discoveredCount: discoveredModels.length,
+    ...(discovery.notes?.length ? { notes: discovery.notes } : {}),
+  });
 
-  // Probe models concurrently, limited by modelAvailabilityProbeConcurrency
-  const concurrency = Math.max(1, options?.concurrency ?? 10);
-  const detailsMap = new Map<string, { modelName: string; status: RuntimeModelProbeStatus; latencyMs: number | null; reason?: string }>();
+  const userAgent = resolveModelProbeUserAgent(probeConfig, site.probeUserAgent);
+  const endpointType = normalizeModelProbeEndpointType(site.probeEndpointType);
+  // 'auto' keeps the pre-existing automatic derivation (with cross-protocol
+  // fallback); anything else pins a single endpoint and forbids fallback, so the
+  // verdict describes the endpoint the operator chose.
+  const forcedEndpoint = endpointType === 'auto' ? undefined : endpointType as UpstreamEndpoint;
+
+  const concurrency = Math.max(1, options?.concurrency ?? probeConfig.concurrency);
+  const threshold = options?.latencyThresholdMs ?? 0;
+  const detailsMap = new Map<string, ProbeSiteModelDetail>();
 
   let cursor = 0;
   async function worker() {
     while (cursor < modelsToProbe.length) {
       if (options?.signal?.aborted) break;
-      const modelName = modelsToProbe[cursor++];
+      const modelName = modelsToProbe[cursor++]!;
+      let detail: ProbeSiteModelDetail;
       try {
         const result = await probeRuntimeModel({
-          site, account, modelName, timeoutMs: config.modelAvailabilityProbeTimeoutMs,
+          site,
+          account,
+          modelName,
+          timeoutMs: probeConfig.timeoutMs,
+          tokenValue: credential,
+          prompt: chooseModelProbePrompt(probeConfig.prompts),
+          errorKeywords: probeConfig.errorKeywords,
+          ...(userAgent ? { userAgent } : {}),
+          ...(forcedEndpoint ? { forcedEndpoint } : {}),
         });
-        const threshold = options?.latencyThresholdMs ?? 0;
+        // A slow-but-working model is a deliberate operator policy call, not an
+        // inconclusive result, so it keeps mapping to `unsupported`.
         const latencyExceeded = (
           result.status === 'supported'
           && threshold > 0
           && result.latencyMs != null
           && result.latencyMs > threshold
         );
-        const effectiveStatus: RuntimeModelProbeStatus = latencyExceeded ? 'unsupported' : result.status;
-        const effectiveReason = latencyExceeded
-          ? `响应延迟 ${result.latencyMs}ms 超过阈值 ${threshold}ms`
-          : result.reason;
-        detailsMap.set(modelName, { modelName, status: effectiveStatus, latencyMs: result.latencyMs, reason: effectiveReason });
-        onProgress?.(latencyExceeded
-          ? { type: 'model', modelName, status: effectiveStatus, latencyMs: result.latencyMs, latencyExceeded: true, reason: effectiveReason }
-          : { type: 'model', modelName, status: effectiveStatus, latencyMs: result.latencyMs, reason: effectiveReason },
-        );
+        detail = {
+          modelName,
+          status: latencyExceeded ? 'unsupported' : result.status,
+          latencyMs: result.latencyMs,
+          reason: latencyExceeded
+            ? `响应延迟 ${result.latencyMs}ms 超过阈值 ${threshold}ms`
+            : result.reason,
+          httpStatus: result.httpStatus,
+          failureKind: result.failureKind,
+          endpointUsed: result.endpointUsed,
+          ...(latencyExceeded ? { latencyExceeded: true as const } : {}),
+        };
       } catch (err) {
+        // probeRuntimeModel already converts failures into verdicts, so this is
+        // only a guard against an unexpected throw. It stays `inconclusive`,
+        // which by design cannot disable anything.
         const errReason = err instanceof Error ? err.message : '探测异常';
         console.warn(`[probe-site-now] probe failed for site ${siteId} model ${modelName}`, err);
-        detailsMap.set(modelName, { modelName, status: 'inconclusive', latencyMs: null, reason: errReason });
-        onProgress?.({ type: 'model', modelName, status: 'inconclusive', latencyMs: null, reason: errReason });
+        detail = {
+          modelName,
+          status: 'inconclusive',
+          latencyMs: null,
+          reason: errReason,
+          httpStatus: null,
+          failureKind: 'network',
+          endpointUsed: null,
+        };
       }
+      detailsMap.set(modelName, detail);
+      onProgress?.({ type: 'model', ...detail });
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, modelsToProbe.length) }, worker));
 
-  // Restore original model order for the final details list
-  const details = modelsToProbe.map((m) => detailsMap.get(m)!);
+  // Restore the requested order, dropping models an abort never reached.
+  const details = modelsToProbe
+    .map((modelName) => detailsMap.get(modelName))
+    .filter((detail): detail is ProbeSiteModelDetail => detail !== undefined);
 
-  const unsupportedModels = details.filter((d) => d.status === 'unsupported' || d.status === 'inconclusive').map((d) => d.modelName);
-  if (unsupportedModels.length > 0) {
-    const checkedAt = new Date().toISOString();
+  const counts = {
+    supported: details.filter((detail) => detail.status === 'supported').length,
+    unsupported: details.filter((detail) => detail.status === 'unsupported').length,
+    inconclusive: details.filter((detail) => detail.status === 'inconclusive').length,
+    skipped: details.filter((detail) => detail.status === 'skipped').length,
+  };
+
+  const baseResult: ProbeSiteModelsResult = {
+    success: true,
+    scope,
+    probed: details.length,
+    ...counts,
+    disabled: 0,
+    routingSynced: false,
+    discoverySource: discovery.source,
+    credentialVerified,
+    ...(discovery.notes?.length ? { notes: discovery.notes } : {}),
+    details,
+  };
+
+  // ONLY `unsupported` reaches the write path. `inconclusive` is excluded by
+  // construction rather than by a later check, so no future edit can leak it in.
+  const unsupportedModels = details
+    .filter((detail) => detail.status === 'unsupported')
+    .map((detail) => detail.modelName);
+  if (unsupportedModels.length === 0) return baseResult;
+
+  const syncAllowed = config.proxyRoutingEnabled === true && probeConfig.syncToRouting === true;
+  if (!syncAllowed) {
     for (const modelName of unsupportedModels) {
+      onProgress?.({ type: 'action', modelName, action: 'sync_disabled' });
+    }
+    return baseResult;
+  }
+
+  const checkedAt = new Date().toISOString();
+  const disabledModels: string[] = [];
+  for (const modelName of unsupportedModels) {
+    const existing = await db.select({ isManual: schema.modelAvailability.isManual })
+      .from(schema.modelAvailability)
+      .where(and(
+        eq(schema.modelAvailability.accountId, account.id),
+        eq(schema.modelAvailability.modelName, modelName),
+      ))
+      .get();
+
+    // A manual model is a human assertion that it should be routable. It is a
+    // legitimate probe target, but an automated verdict must never overrule the
+    // person who added it.
+    if (existing?.isManual === true) {
+      onProgress?.({ type: 'action', modelName, action: 'kept_manual' });
+      continue;
+    }
+
+    if (existing) {
       await db.update(schema.modelAvailability)
         .set({ available: false, checkedAt })
         .where(and(
@@ -491,22 +698,33 @@ export async function probeSiteModels(
           eq(schema.modelAvailability.modelName, modelName),
         ))
         .run();
-      await db.insert(schema.siteDisabledModels)
-        .values({ siteId, modelName })
-        .onConflictDoNothing()
-        .run();
-      onProgress?.({ type: 'action', modelName, action: 'disabled' });
     }
-    const reason = unsupportedModels.length === 1
-      ? `手动探测失败：模型 ${unsupportedModels[0]} 不可用`
-      : `手动探测失败：${unsupportedModels.length} 个模型不可用（${unsupportedModels.slice(0, 3).join('、')}${unsupportedModels.length > 3 ? '…' : ''}）`;
-    await setAccountRuntimeHealth(account.id, { state: 'unhealthy', reason, source: 'manual-probe', checkedAt });
-    rebuildTokenRoutesFromAvailability().catch((err) => {
-      console.warn('[probe-site-now] route rebuild failed', err);
-    });
+    await db.insert(schema.siteDisabledModels)
+      .values({ siteId, modelName })
+      .onConflictDoNothing()
+      .run();
+    disabledModels.push(modelName);
+    onProgress?.({ type: 'action', modelName, action: 'disabled' });
   }
 
-  return { success: true, scope, probed: details.length, unsupported: unsupportedModels.length, details };
+  if (disabledModels.length === 0) {
+    return baseResult;
+  }
+
+  const reason = disabledModels.length === 1
+    ? `主动探测：模型 ${disabledModels[0]} 不可用`
+    : `主动探测：${disabledModels.length} 个模型不可用（${disabledModels.slice(0, 3).join('、')}${disabledModels.length > 3 ? '…' : ''}）`;
+  await setAccountRuntimeHealth(account.id, { state: 'unhealthy', reason, source: 'manual-probe', checkedAt });
+
+  // Awaited, not fire-and-forget: the SSE `complete` event is what makes the UI
+  // refetch its model lists, so routing has to be consistent before it fires.
+  try {
+    await rebuildTokenRoutesFromAvailability();
+  } catch (err) {
+    console.warn('[probe-site-now] route rebuild failed', err);
+  }
+
+  return { ...baseResult, disabled: disabledModels.length, routingSynced: true };
 }
 
 async function runPostRefreshProbeIfEnabled(params: {
@@ -557,45 +775,71 @@ async function runPostRefreshProbeIfEnabled(params: {
     }
   }
 
-  // Handle unsupported models
-  const unsupportedModels = details.filter((d) => d.status === 'unsupported' || d.status === 'inconclusive').map((d) => d.modelName);
+  // Only `unsupported` may disable. `inconclusive` (timeout / 429 / auth blip /
+  // transport error) proves nothing about the model, and this path runs
+  // unattended on every successful model refresh, so treating it as a failure
+  // verdict is exactly how a transient upstream wobble used to permanently
+  // disable working models.
+  const unsupportedModels = details.filter((d) => d.status === 'unsupported').map((d) => d.modelName);
+  const inconclusiveCount = details.filter((d) => d.status === 'inconclusive').length;
+  const disabledModels: string[] = [];
   if (unsupportedModels.length > 0) {
     const checkedAt = new Date().toISOString();
     for (const modelName of unsupportedModels) {
-      // Mark model as unavailable
-      await db.update(schema.modelAvailability)
-        .set({ available: false, checkedAt })
+      const existing = await db.select({ isManual: schema.modelAvailability.isManual })
+        .from(schema.modelAvailability)
         .where(and(
           eq(schema.modelAvailability.accountId, params.account.id),
           eq(schema.modelAvailability.modelName, modelName),
         ))
-        .run();
+        .get();
+      // A manually added model is a human assertion; an automated verdict must
+      // not overrule it.
+      if (existing?.isManual === true) continue;
+
+      if (existing) {
+        await db.update(schema.modelAvailability)
+          .set({ available: false, checkedAt })
+          .where(and(
+            eq(schema.modelAvailability.accountId, params.account.id),
+            eq(schema.modelAvailability.modelName, modelName),
+          ))
+          .run();
+      }
       // Add to site-level disabled models
       await db.insert(schema.siteDisabledModels)
         .values({ siteId: params.site.id, modelName })
         .onConflictDoNothing()
         .run();
+      disabledModels.push(modelName);
     }
+  }
+
+  if (disabledModels.length > 0) {
+    const checkedAt = new Date().toISOString();
     // Update account health
-    const reason = unsupportedModels.length === 1
-      ? `刷新后探测失败：模型 ${unsupportedModels[0]} 不可用`
-      : `刷新后探测失败：${unsupportedModels.length} 个模型不可用（${unsupportedModels.slice(0, 3).join('、')}${unsupportedModels.length > 3 ? '…' : ''}）`;
+    const reason = disabledModels.length === 1
+      ? `刷新后探测失败：模型 ${disabledModels[0]} 不可用`
+      : `刷新后探测失败：${disabledModels.length} 个模型不可用（${disabledModels.slice(0, 3).join('、')}${disabledModels.length > 3 ? '…' : ''}）`;
     await setAccountRuntimeHealth(params.account.id, {
       state: 'unhealthy',
       reason,
       source: 'post-refresh-probe',
       checkedAt,
     });
-    // Single route rebuild for all changes
-    rebuildTokenRoutesFromAvailability().catch((err) => {
-      console.warn('[post-refresh-probe] route rebuild failed', err);
-    });
+    // Single route rebuild for all changes, and only when routing is on at all.
+    if (config.proxyRoutingEnabled) {
+      rebuildTokenRoutesFromAvailability().catch((err) => {
+        console.warn('[post-refresh-probe] route rebuild failed', err);
+      });
+    }
   }
 
   return {
     scope,
     probed: details.length,
     unsupported: unsupportedModels.length,
+    inconclusive: inconclusiveCount,
     details,
   };
 }

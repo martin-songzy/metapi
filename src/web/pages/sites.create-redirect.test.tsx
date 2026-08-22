@@ -640,7 +640,10 @@ describe('Sites create redirect', () => {
       });
       await flushMicrotasks();
 
-      const platformSelect = root.root.findAllByType(ModernSelect).at(-1);
+      // Located by test id, not by position: the edit view renders further
+      // selects (the model probe request profile) after this one.
+      const platformSelect = root.root.findAllByType(ModernSelect)
+        .find((node) => node.props['data-testid'] === 'site-platform-select');
       const presetAlert = root.root.find((node) => (
         typeof node.props.className === 'string'
         && node.props.className.includes('alert alert-info')

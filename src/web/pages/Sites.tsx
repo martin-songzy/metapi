@@ -42,6 +42,11 @@ import {
   listSiteInitializationPresets,
 } from '../../shared/siteInitializationPresets.js';
 import { analyzePrimarySiteUrl } from '../../shared/sitePrimaryUrl.js';
+import {
+  MODEL_PROBE_ENDPOINT_TYPES,
+  normalizeModelProbeEndpointType,
+  type ModelProbeEndpointType,
+} from '../../shared/modelProbeEndpointTypes.js';
 
 type SiteSubscriptionSummary = {
   activeCount: number;
@@ -73,6 +78,8 @@ type SiteRow = {
   postRefreshProbeModel?: string | null;
   postRefreshProbeScope?: string | null;
   postRefreshProbeLatencyThresholdMs?: number | null;
+  probeEndpointType?: string | null;
+  probeUserAgent?: string | null;
   apiEndpoints?: Array<{
     id?: number;
     url: string;
@@ -320,6 +327,10 @@ export default function Sites() {
   const [probeScope, setProbeScope] = useState<'single' | 'all'>('single');
   const [probeSaving, setProbeSaving] = useState(false);
   const [probeLatencyThreshold, setProbeLatencyThreshold] = useState('0');
+  // Per-site request profile for the active probe. Held next to the other probe
+  // fields so the one card owns everything it saves.
+  const [probeEndpointType, setProbeEndpointType] = useState<ModelProbeEndpointType>('auto');
+  const [probeUserAgent, setProbeUserAgent] = useState('');
   const [probing, setProbing] = useState(false);
   type ProbeLogEntry = { time: string; text: string; color?: string };
   const [probeLog, setProbeLog] = useState<ProbeLogEntry[]>([]);
@@ -521,6 +532,8 @@ export default function Sites() {
     setProbeModel(typeof site.postRefreshProbeModel === 'string' ? site.postRefreshProbeModel : '');
     setProbeScope(site.postRefreshProbeScope === 'all' ? 'all' : 'single');
     setProbeLatencyThreshold(String(site.postRefreshProbeLatencyThresholdMs ?? 0));
+    setProbeEndpointType(normalizeModelProbeEndpointType(site.probeEndpointType));
+    setProbeUserAgent(typeof site.probeUserAgent === 'string' ? site.probeUserAgent : '');
     setProbeLog([]);
     setProbeCompleted(false);
     probeAbortRef.current?.abort();
@@ -588,17 +601,17 @@ export default function Sites() {
     if (!editor || editor.mode !== 'edit') return;
     setProbeSaving(true);
     try {
-      await api.updateSite(editor.editingSiteId, {
+      const patch = {
         postRefreshProbeEnabled: probeEnabled,
         postRefreshProbeModel: probeModel.trim(),
         postRefreshProbeScope: probeScope,
         postRefreshProbeLatencyThresholdMs: Math.max(0, parseInt(probeLatencyThreshold, 10) || 0),
-      });
-      setSites((prev) => prev.map((s) => s.id === editor.editingSiteId
-        ? { ...s, postRefreshProbeEnabled: probeEnabled, postRefreshProbeModel: probeModel.trim(), postRefreshProbeScope: probeScope, postRefreshProbeLatencyThresholdMs: Math.max(0, parseInt(probeLatencyThreshold, 10) || 0) }
-        : s,
-      ));
-      toast.success('刷新后探测设置已保存');
+        probeEndpointType,
+        probeUserAgent: probeUserAgent.trim(),
+      };
+      await api.updateSite(editor.editingSiteId, patch);
+      setSites((prev) => prev.map((s) => s.id === editor.editingSiteId ? { ...s, ...patch } : s));
+      toast.success('模型主动探测设置已保存');
     } catch (e: any) {
       toast.error(e.message || '保存失败');
     } finally {
@@ -648,41 +661,81 @@ export default function Sites() {
         try {
           const d = JSON.parse(rawData);
           if (type === 'start') {
-            addLog(`开始探测，范围：${d.scope === 'all' ? '全部模型' : '指定模型'}，共 ${d.modelsCount} 个`);
+            const sourceText = d.discoverySource === 'cached' ? '缓存模型列表（未验证凭据）' : '实时模型列表';
+            addLog(`开始探测，范围：${d.scope === 'all' ? '兴趣正则匹配的全部模型' : '指定模型'}，共 ${d.modelsCount} 个（来源：${sourceText}${
+              typeof d.discoveredCount === 'number' ? `，发现 ${d.discoveredCount} 个` : ''
+            }）`);
+            if (Array.isArray(d.notes)) {
+              for (const note of d.notes) addLog(`  ↳ ${note}`, 'var(--color-text-muted)');
+            }
           } else if (type === 'model') {
+            // 'inconclusive' is reported as 未确定, never as 不可用: it proves
+            // nothing about the model and never disables it.
             const s = d.status === 'supported' ? '✓ 可用'
               : d.status === 'unsupported'
                 ? (d.latencyExceeded ? `✗ 延迟超限 (${d.latencyMs}ms)` : '✗ 不可用')
               : d.status === 'skipped' ? '— 已跳过'
-              : '✗ 不可用';
+              : '? 未确定';
             const lat = d.latencyMs != null && d.status !== 'skipped' ? ` (${d.latencyMs}ms)` : '';
             const c = d.status === 'supported' ? 'var(--color-success, #22c55e)'
               : d.status === 'skipped' ? 'var(--color-text-muted)'
+              : d.status === 'inconclusive' ? 'var(--color-warning, #f59e0b)'
               : 'var(--color-error, #ef4444)';
+            const failureKindText = ({
+              timeout: '超时',
+              auth: '鉴权失败',
+              rate_limit: '触发频率限制',
+              model_missing: '模型不存在',
+              upstream: '上游错误',
+              network: '网络异常',
+              error_body: '返回错误内容',
+              empty_content: '返回空内容',
+            } as Record<string, string>)[String(d.failureKind || '')] || '';
             const reasonText = (() => {
               if (!d.reason || d.status === 'supported' || d.status === 'skipped') return '';
               const r = d.reason;
-              if (/timeout/i.test(r)) return '超时';
+              if (/响应延迟/.test(r)) return r;
+              if (failureKindText) return failureKindText;
               if (/missing credential|no.*token/i.test(r)) return '无 Token';
               if (/no compatible.*endpoint|no.*endpoint candidate/i.test(r)) return '无可用端点';
-              if (/no such model|unknown model/i.test(r)) return '模型不存在';
-              if (/not found/i.test(r)) return '未找到';
-              if (/access denied|forbidden|permission/i.test(r)) return '无权限';
-              if (/rate.?limit|too many request/i.test(r)) return '触发频率限制';
-              if (/响应延迟/.test(r)) return r;
               return r.length > 60 ? r.slice(0, 57) + '…' : r;
             })();
-            addLog(`${s}${lat}  ${d.modelName}${reasonText ? `  —  ${reasonText}` : ''}`, c);
+            const meta = [
+              d.endpointUsed ? `端点 ${d.endpointUsed}` : '',
+              d.httpStatus ? `HTTP ${d.httpStatus}` : '',
+            ].filter(Boolean).join(' · ');
+            addLog(
+              `${s}${lat}  ${d.modelName}${reasonText ? `  —  ${reasonText}` : ''}${meta ? `  [${meta}]` : ''}`,
+              c,
+            );
             setTimeout(() => probeLogEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
           } else if (type === 'action') {
-            if (d.action === 'disabled') addLog(`  ↳ 已加入站点禁用列表: ${d.modelName}`, 'var(--color-text-muted)');
+            if (d.action === 'disabled') {
+              addLog(`  ↳ 已加入站点禁用列表: ${d.modelName}`, 'var(--color-text-muted)');
+            } else if (d.action === 'kept_manual') {
+              addLog(`  ↳ 手动添加的模型不会被自动禁用: ${d.modelName}`, 'var(--color-text-muted)');
+            } else if (d.action === 'sync_disabled') {
+              addLog(`  ↳ 未同步到路由（探测结果不写库）: ${d.modelName}`, 'var(--color-text-muted)');
+            }
           } else if (type === 'complete') {
-            if (d.unsupported > 0) {
-              addLog(`完成：${d.probed} 个模型已探测，${d.unsupported} 个不可用已自动加入禁用列表`, 'var(--color-error, #ef4444)');
-              toast.error(`${d.unsupported} 个模型不可用，已自动加入站点禁用列表`);
+            const summary = [
+              `可用 ${d.supported ?? 0}`,
+              `不可用 ${d.unsupported ?? 0}`,
+              `未确定 ${d.inconclusive ?? 0}`,
+              `跳过 ${d.skipped ?? 0}`,
+            ].join('，');
+            const syncText = d.routingSynced
+              ? `，已禁用 ${d.disabled ?? 0} 个并重建路由`
+              : '，未同步到路由';
+            if ((d.unsupported ?? 0) > 0) {
+              addLog(`完成：${d.probed} 个模型已探测（${summary}）${syncText}`, 'var(--color-error, #ef4444)');
+              toast.error(`探测完成：${d.unsupported} 个模型不可用${d.routingSynced ? '，已加入站点禁用列表' : ''}`);
+            } else if ((d.inconclusive ?? 0) > 0) {
+              addLog(`完成：${d.probed} 个模型已探测（${summary}），未确定的模型不会被禁用`, 'var(--color-warning, #f59e0b)');
+              toast.info(`探测完成：${d.inconclusive} 个模型结果未确定，未做任何禁用`);
             } else {
-              addLog(`完成：${d.probed} 个模型均可用`, 'var(--color-success, #22c55e)');
-              toast.success(`探测完成：${d.probed} 个模型均可用`);
+              addLog(`完成：${d.probed} 个模型已探测（${summary}）`, 'var(--color-success, #22c55e)');
+              toast.success(`探测完成：${d.supported ?? d.probed} 个模型可用`);
             }
             setTimeout(() => probeLogEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
             // Refresh model lists to reflect probe results
@@ -1730,9 +1783,42 @@ export default function Sites() {
 
           {isEditing && (
             <div style={{ marginTop: 16, padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>刷新后自动测试请求</div>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>模型主动探测</div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
-                开启后，每次自动获取模型列表成功后，会对指定模型发送一次真实测试请求。若判定不可用，自动加入站点禁用列表并重建路由。
+                对模型发送一次真实请求来判定可用性。探测范围取「模型探测设置」里的兴趣正则；只有明确判定「不可用」的模型才可能被禁用，超时 / 限流 / 鉴权失败等「未确定」结果不会禁用任何模型。是否写回禁用列表与重建路由，取决于全局的「同步到路由」开关。
+              </div>
+              <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', minWidth: 64 }}>请求端点</span>
+                  <div style={{ minWidth: 160 }}>
+                    <ModernSelect
+                      value={probeEndpointType}
+                      onChange={(value) => setProbeEndpointType(normalizeModelProbeEndpointType(value))}
+                      options={MODEL_PROBE_ENDPOINT_TYPES.map((value) => ({
+                        value,
+                        label: value === 'auto' ? '自动推导' : value,
+                      }))}
+                    />
+                  </div>
+                  <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                    自动推导会跨协议回退；指定端点则只试该端点
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, color: 'var(--color-text-secondary)', minWidth: 64 }}>User-Agent</span>
+                  <input
+                    type="text"
+                    placeholder="留空则使用全局探测 User-Agent"
+                    value={probeUserAgent}
+                    onChange={(e) => setProbeUserAgent(e.target.value)}
+                    style={{
+                      flex: '1 1 220px', minWidth: 180, padding: '6px 10px',
+                      border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)',
+                      fontSize: 12, outline: 'none', background: 'var(--color-bg)',
+                      color: 'var(--color-text-primary)', fontFamily: 'var(--font-mono)',
+                    }}
+                  />
+                </div>
               </div>
               <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10, cursor: 'pointer' }}>
                 <input
@@ -1741,15 +1827,22 @@ export default function Sites() {
                   onChange={(e) => setProbeEnabled(e.target.checked)}
                   style={{ width: 15, height: 15, marginTop: 2, flexShrink: 0 }}
                 />
-                <span style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>开启刷新后自动探测</span>
+                <span style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>
+                  刷新模型列表后自动探测（默认关闭；关闭时仍可手动点「立即探测」）
+                </span>
               </label>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap', opacity: probeEnabled ? 1 : 0.5 }}>
-                {([['single', '指定模型'] , ['all', '全部模型']] as const).map(([val, label]) => (
+              {/*
+                Scope and model feed BOTH the manual "立即探测" button and the
+                automatic post-refresh run, so they stay editable regardless of
+                the automatic toggle.
+              */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+                {([['single', '指定模型'] , ['all', '兴趣正则匹配的全部模型']] as const).map(([val, label]) => (
                   <label
                     key={val}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 6,
-                      cursor: probeEnabled ? 'pointer' : 'default',
+                      cursor: 'pointer',
                       padding: '5px 12px', borderRadius: 'var(--radius-sm)', fontSize: 12,
                       border: `1px solid ${probeScope === val ? 'var(--color-primary)' : 'var(--color-border-light)'}`,
                       background: probeScope === val ? 'color-mix(in srgb, var(--color-primary) 8%, transparent)' : 'transparent',
@@ -1762,7 +1855,6 @@ export default function Sites() {
                       value={val}
                       checked={probeScope === val}
                       onChange={() => setProbeScope(val)}
-                      disabled={!probeEnabled}
                       style={{ accentColor: 'var(--color-primary)', width: 13, height: 13 }}
                     />
                     {label}
@@ -1772,15 +1864,14 @@ export default function Sites() {
               {probeScope === 'single' && (
                 <input
                   type="text"
-                  placeholder="探测模型名（留空则自动取第一个发现的模型）"
+                  placeholder="探测模型名（留空则自动取第一个匹配兴趣正则的模型）"
                   value={probeModel}
                   onChange={(e) => setProbeModel(e.target.value)}
-                  disabled={!probeEnabled}
                   style={{
                     width: '100%', padding: '6px 10px', border: '1px solid var(--color-border)',
                     borderRadius: 'var(--radius-sm)', fontSize: 12, outline: 'none',
                     background: 'var(--color-bg)', color: 'var(--color-text-primary)',
-                    marginBottom: 10, opacity: probeEnabled ? 1 : 0.5,
+                    marginBottom: 10,
                     fontFamily: 'var(--font-mono)',
                   }}
                 />
@@ -1800,7 +1891,7 @@ export default function Sites() {
                     background: 'var(--color-bg)', color: 'var(--color-text-primary)',
                   }}
                 />
-                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>ms（响应超过该时间则自动禁用，0=不限）</span>
+                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>ms（响应超过该时间即判定不可用，0=不限）</span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <button
@@ -1829,7 +1920,7 @@ export default function Sites() {
                   </button>
                 )}
                 <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
-                  {probeEnabled ? '实际探测超时复用「批量测活超时」设置' : '当前已关闭'}
+                  {probeEnabled ? '刷新后自动探测：已开启' : '刷新后自动探测：已关闭（手动探测不受影响）'}
                 </span>
               </div>
               {probeLog.length > 0 && (
