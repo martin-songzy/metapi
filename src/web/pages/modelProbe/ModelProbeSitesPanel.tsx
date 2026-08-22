@@ -5,7 +5,7 @@ import ModernSelect from '../../components/ModernSelect.js';
 import ResponsiveFilterPanel from '../../components/ResponsiveFilterPanel.js';
 import { MobileCard, MobileField } from '../../components/MobileCard.js';
 import {
-  MODEL_PROBE_UA_CUSTOM,
+  MODEL_PROBE_UA_SITE_CUSTOM,
   modelProbeEndpointOptions,
   normalizeModelProbeEndpointType,
   siteConfigPayloadFromDraft,
@@ -166,7 +166,7 @@ export default function ModelProbeSitesPanel({
         onChange={(value) => updateDraft(site.id, { userAgentChoice: value })}
         options={userAgentOptions}
       />
-      {draft.userAgentChoice === MODEL_PROBE_UA_CUSTOM && (
+      {draft.userAgentChoice === MODEL_PROBE_UA_SITE_CUSTOM && (
         <>
           <input
             type="text"

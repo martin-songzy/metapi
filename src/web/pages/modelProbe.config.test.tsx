@@ -5,6 +5,12 @@ import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import { MODEL_PROBE_ENDPOINT_TYPES } from '../../shared/modelProbeEndpointTypes.js';
+import {
+  MODEL_PROBE_CUSTOM_UA_PRESET_ID,
+  MODEL_PROBE_UA_SITE_CUSTOM,
+  modelProbeUserAgentPresetChoice,
+  siteUserAgentOptions,
+} from './modelProbe/modelProbeTypes.js';
 import ModelProbe from './ModelProbe.js';
 
 const { apiMock } = vi.hoisted(() => ({
@@ -773,6 +779,230 @@ describe('ModelProbe per-site configuration panel', () => {
         probeEndpointType: 'chat',
         probeUserAgent: '',
       });
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+/**
+ * The state the global custom-UA field exists to create, and the one no test
+ * covered: the `custom` preset carrying a VALUE.
+ *
+ * Its blank shipped value was the only thing keeping it out of the per-site
+ * select (`selectableUserAgentPresets` drops blank-valued presets), and that
+ * accident was the only thing keeping the preset id from colliding with the
+ * per-site UI sentinel. Every assertion here is about that collision.
+ */
+describe('ModelProbe per-site User-Agent with a non-blank global custom preset', () => {
+  const GLOBAL_CUSTOM_UA = 'operator-agent/9.9';
+  const BUILT_IN_LABELS = ['继承全局', 'Claude Code', 'Codex CLI', '自定义'];
+
+  function configWithCustomValue() {
+    return buildConfig({
+      userAgents: [
+        { id: 'claude-code', label: 'Claude Code', value: 'claude-cli/2.1.63 (external, cli)' },
+        { id: 'codex-cli', label: 'Codex CLI', value: 'codex_cli_rs/0.20.0' },
+        { id: 'custom', label: '自定义 / 不发送', value: GLOBAL_CUSTOM_UA },
+      ],
+    });
+  }
+
+  /**
+   * Found by exclusion rather than by its exact wording: the point of the test is
+   * that selecting the global custom preset sends the global custom VALUE, and
+   * pinning the label here would make the test fail for a wording change instead.
+   */
+  function findGlobalCustomPresetOption(select: ReactTestInstance): ReactTestInstance {
+    const option = select.findAll((node) => (
+      node.type === 'button'
+      && node.props.className?.startsWith?.('modern-select-option')
+      && !BUILT_IN_LABELS.includes(
+        collectText(node.find((child) => child.props.className === 'modern-select-option-label')).trim(),
+      )
+    ));
+    expect(option, 'exactly one option beyond the four built-ins').toHaveLength(1);
+    return option[0]!;
+  }
+
+  function findSiteSave(root: ReactTestInstance, siteId: number): ReactTestInstance {
+    return root.find((node) => (
+      node.type === 'button'
+      && node.props['data-testid'] === `model-probe-site-save-${siteId}`
+    ));
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: configWithCustomValue(),
+      limits: buildLimits(),
+    });
+    apiMock.getModelProbeTasks.mockResolvedValue({ tasks: [] });
+    apiMock.getModelProbeResults.mockResolvedValue({
+      success: true,
+      items: [],
+      total: 0,
+      query: { sortBy: 'checkedAt', order: 'desc', limit: 50, offset: 0 },
+    });
+    apiMock.saveModelProbeSiteConfig.mockImplementation(async (siteId: number, patch: Record<string, unknown>) => ({
+      success: true,
+      site: { ...SITES.find((site) => site.id === siteId), ...patch },
+    }));
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('gives every per-site option a distinct value, so no two mean different things', () => {
+    const options = siteUserAgentOptions(configWithCustomValue().userAgents);
+
+    // Five now: inherit, two built-in presets, the newly non-blank custom preset,
+    // and the per-site custom sentinel.
+    expect(options).toHaveLength(5);
+    const values = options.map((option) => option.value);
+    expect(new Set(values).size, `duplicate option values: ${values.join(', ')}`).toBe(values.length);
+    // Paired positive control: the uniqueness assertion must not be passing
+    // because an option was dropped. Both the global custom PRESET and the
+    // per-site custom SENTINEL have to be present.
+    expect(values).toContain(MODEL_PROBE_UA_SITE_CUSTOM);
+    expect(values).toContain(modelProbeUserAgentPresetChoice(MODEL_PROBE_CUSTOM_UA_PRESET_ID));
+
+    // Distinct VALUES are not enough on their own: the operator picks by label,
+    // and the preset ships labelled 自定义 / 不发送, which sits next to the
+    // per-site 自定义 sentinel and is false here anyway — a site can only inherit
+    // or send something, never suppress the header.
+    const labels = options.map((option) => option.label);
+    expect(new Set(labels).size, `duplicate option labels: ${labels.join(', ')}`).toBe(labels.length);
+    const globalCustom = options.find((option) => (
+      option.value === modelProbeUserAgentPresetChoice(MODEL_PROBE_CUSTOM_UA_PRESET_ID)
+    ))!;
+    expect(globalCustom.label).not.toContain('不发送');
+    // Its label no longer names a value, so the select has to show which UA it sends.
+    expect(globalCustom.description).toBe(GLOBAL_CUSTOM_UA);
+  });
+
+  it('highlights exactly one option when a site uses the global custom preset', async () => {
+    // The rendered consequence of a duplicate value: `ModernSelect` marks every
+    // option whose value equals the current one, so a collision lights up two
+    // entries at once and which of them the operator is looking at is undefined.
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [{ ...SITES[0], probeUserAgent: GLOBAL_CUSTOM_UA }],
+    });
+    const root = await renderPage();
+    try {
+      const select = findByTestId(root.root, 'model-probe-site-user-agent-4');
+      const active = select.findAll((node) => (
+        node.type === 'button'
+        && typeof node.props.className === 'string'
+        && node.props.className.startsWith('modern-select-option')
+        && node.props.className.includes('is-active')
+      ));
+
+      expect(active).toHaveLength(1);
+      // Positive control on the same render: the select really does offer five
+      // options, so "one active" is not one out of a list that lost an entry.
+      expect(selectOptionLabels(select)).toHaveLength(5);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('sends the global custom value when a site picks the global custom preset', async () => {
+    apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
+    const root = await renderPage();
+    try {
+      const select = findByTestId(root.root, 'model-probe-site-user-agent-4');
+      await act(async () => {
+        findGlobalCustomPresetOption(select).props.onClick();
+      });
+
+      await act(async () => {
+        findSiteSave(root.root, 4).props.onClick();
+      });
+      await flushMicrotasks();
+
+      // Saving `''` here would mean "inherit the global default", which is
+      // `claude-code` in this fixture — a different UA than the one selected.
+      expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(4, {
+        probeEndpointType: 'auto',
+        probeUserAgent: GLOBAL_CUSTOM_UA,
+      });
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps a stored UA that equals the global custom value across an unrelated edit', async () => {
+    // The destructive half: this site HAS an override, and it happens to equal the
+    // global custom preset's value.
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [{ ...SITES[0], probeUserAgent: GLOBAL_CUSTOM_UA }],
+    });
+    const root = await renderPage();
+    try {
+      // No empty custom box: the row is not a blank custom entry, it is a site
+      // whose override matches a preset.
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-user-agent-custom-4'
+      ))).toHaveLength(0);
+
+      // An unrelated edit on the same row, which is what makes the save button live.
+      const endpointSelect = findByTestId(root.root, 'model-probe-site-endpoint-4');
+      await act(async () => {
+        endpointSelect.find((node) => (
+          node.type === 'button'
+          && collectText(node).trim() === 'messages'
+        )).props.onClick();
+      });
+
+      await act(async () => {
+        findSiteSave(root.root, 4).props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(4, {
+        probeEndpointType: 'messages',
+        probeUserAgent: GLOBAL_CUSTOM_UA,
+      });
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('still cannot express "send no User-Agent" for one site', async () => {
+    // Accepted ledger limitation, asserted so a future edit cannot turn the
+    // now-working custom preset into a per-site header suppressor by accident:
+    // blank stays "inherit the global default".
+    apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
+    const root = await renderPage();
+    try {
+      const select = findByTestId(root.root, 'model-probe-site-user-agent-9');
+      await act(async () => {
+        select.find((node) => (
+          node.type === 'button'
+          && node.props.className?.startsWith?.('modern-select-option')
+          && collectText(node.find((child) => (
+            child.props.className === 'modern-select-option-label'
+          ))).trim() === '自定义'
+        )).props.onClick();
+      });
+
+      const input = findByTestId(root.root, 'model-probe-site-user-agent-custom-9');
+      await act(async () => {
+        input.props.onChange({ target: { value: '  ' } });
+      });
+      await act(async () => {
+        findSiteSave(root.root, 9).props.onClick();
+      });
+      await flushMicrotasks();
+
+      const payload = apiMock.saveModelProbeSiteConfig.mock.calls.at(-1)?.[1] as Record<string, unknown>;
+      expect(payload.probeUserAgent).toBe('');
     } finally {
       root.unmount();
     }

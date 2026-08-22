@@ -79,10 +79,12 @@ export type ModelProbeConfigDraft = {
  * would make 「Claude Code」 mean something other than Claude Code.
  *
  * The literal duplicates the server's preset id because web code may not import
- * from `src/server`; a test asserts both still match. Distinct from
- * `MODEL_PROBE_UA_CUSTOM` below despite the identical string: that one is a
- * UI-only sentinel in the per-SITE select and is never stored, while this is a
- * real preset id that round-trips through the config.
+ * from `src/server`; a test asserts both still match.
+ *
+ * It is a PRESET ID, which is a different namespace from the per-site select's
+ * option values — see `MODEL_PROBE_UA_PRESET_PREFIX`. The two used to be the same
+ * string (`'custom'`) in the same namespace, which is what let the per-site
+ * sentinel shadow this preset the moment it gained a value.
  */
 export const MODEL_PROBE_CUSTOM_UA_PRESET_ID = 'custom';
 
@@ -244,14 +246,54 @@ export function findInvalidInterestPatterns(
 }
 
 /**
- * `'inherit'` and `'custom'` are UI-only selections, not stored values. The site
- * column holds one plain string: empty means "use the global preset", anything
- * else is the literal User-Agent to send.
+ * What the per-site select holds. UI-only — never stored. The site column holds
+ * one plain string: empty means "use the global preset", anything else is the
+ * literal User-Agent to send.
+ *
+ * Three disjoint forms, and the disjointness is the point:
+ *
+ * - `MODEL_PROBE_UA_INHERIT` — send whatever the global default resolves to
+ * - `MODEL_PROBE_UA_SITE_CUSTOM` — send the literal typed into this row's box
+ * - `MODEL_PROBE_UA_PRESET_PREFIX + presetId` — send that preset's value
+ *
+ * Preset choices are PREFIXED rather than being the bare preset id, so a preset
+ * can never collide with a sentinel no matter what id the server ships or an
+ * operator adds. It previously could and did: the built-in `custom` preset's id
+ * equalled the sentinel `'custom'`, and while that preset shipped with a blank
+ * value `selectableUserAgentPresets` filtered it out of this select, so nothing
+ * noticed. Giving the preset a value put two options with the same value in one
+ * select — one of them unreachable, and a stored UA matching that preset
+ * resolving back to `''`, i.e. silently dropping the site's override.
  */
-export type ModelProbeSiteUserAgentChoice = 'inherit' | 'custom' | string;
+export type ModelProbeSiteUserAgentChoice = string;
 
 export const MODEL_PROBE_UA_INHERIT = 'inherit';
-export const MODEL_PROBE_UA_CUSTOM = 'custom';
+
+/**
+ * Deliberately NOT `'custom'`. The server owns preset ids and one of them is
+ * `custom`; a sentinel sharing a string with a preset id is exactly the trap
+ * above, and the prefix alone would have been enough only for as long as nobody
+ * read the two constants as interchangeable. Safe to change freely because this
+ * value never leaves the browser.
+ */
+export const MODEL_PROBE_UA_SITE_CUSTOM = 'site-custom';
+
+/**
+ * Namespaces preset ids inside the per-site select's value space. A preset id
+ * containing this prefix still cannot collide with a sentinel, because the
+ * sentinels do not carry it.
+ */
+export const MODEL_PROBE_UA_PRESET_PREFIX = 'preset:';
+
+export function modelProbeUserAgentPresetChoice(presetId: string): string {
+  return `${MODEL_PROBE_UA_PRESET_PREFIX}${presetId}`;
+}
+
+export function modelProbeUserAgentPresetIdFromChoice(choice: string): string | null {
+  return choice.startsWith(MODEL_PROBE_UA_PRESET_PREFIX)
+    ? choice.slice(MODEL_PROBE_UA_PRESET_PREFIX.length)
+    : null;
+}
 
 export type ModelProbeSiteDraft = {
   probeEndpointType: ModelProbeEndpointType;
@@ -272,16 +314,30 @@ export function selectableUserAgentPresets(
   return presets.filter((preset) => preset.value.trim().length > 0);
 }
 
+/**
+ * The custom preset's own label reads 自定义 / 不发送, which is true at GLOBAL level
+ * (a blank value there means "send no User-Agent") and false here: a site can only
+ * inherit or send something, so picking this option sends the preset's value. It
+ * would also read as a near-duplicate of the per-site 自定义 sentinel sitting next
+ * to it. Relabelled for this select only; the preset itself is untouched.
+ */
+function siteUserAgentPresetLabel(preset: ModelProbeUserAgentPreset): string {
+  return preset.id === MODEL_PROBE_CUSTOM_UA_PRESET_ID ? '全局自定义 UA' : preset.label;
+}
+
 export function siteUserAgentOptions(
   presets: readonly ModelProbeUserAgentPreset[],
-): Array<{ value: string; label: string }> {
+): Array<{ value: string; label: string; description?: string }> {
   return [
     { value: MODEL_PROBE_UA_INHERIT, label: '继承全局' },
     ...selectableUserAgentPresets(presets).map((preset) => ({
-      value: preset.id,
-      label: preset.label,
+      value: modelProbeUserAgentPresetChoice(preset.id),
+      label: siteUserAgentPresetLabel(preset),
+      // Only for the relabelled entry, whose own label no longer names the value
+      // it sends. The built-in presets' labels already do.
+      ...(preset.id === MODEL_PROBE_CUSTOM_UA_PRESET_ID ? { description: preset.value } : {}),
     })),
-    { value: MODEL_PROBE_UA_CUSTOM, label: '自定义' },
+    { value: MODEL_PROBE_UA_SITE_CUSTOM, label: '自定义' },
   ];
 }
 
@@ -301,7 +357,9 @@ export function siteDraftFromSite(
   const preset = selectableUserAgentPresets(presets).find((entry) => entry.value.trim() === stored);
   return {
     probeEndpointType: normalizeModelProbeEndpointType(site.probeEndpointType),
-    userAgentChoice: preset ? preset.id : MODEL_PROBE_UA_CUSTOM,
+    userAgentChoice: preset
+      ? modelProbeUserAgentPresetChoice(preset.id)
+      : MODEL_PROBE_UA_SITE_CUSTOM,
     // A stored value that matches no preset stays visible and editable rather
     // than being dropped into an empty custom field.
     customUserAgent: preset ? '' : stored,
@@ -318,13 +376,24 @@ export function siteConfigPayloadFromDraft(
   };
 }
 
+/**
+ * Exhaustive over the three forms of `ModelProbeSiteUserAgentChoice`, and order
+ * carries no meaning now that the three are disjoint by construction. It used to:
+ * the sentinel test ran first and shadowed the preset lookup for the id `custom`.
+ */
 function resolveDraftUserAgent(
   draft: ModelProbeSiteDraft,
   presets: readonly ModelProbeUserAgentPreset[],
 ): string {
   if (draft.userAgentChoice === MODEL_PROBE_UA_INHERIT) return '';
-  if (draft.userAgentChoice === MODEL_PROBE_UA_CUSTOM) return draft.customUserAgent.trim();
-  const preset = presets.find((entry) => entry.id === draft.userAgentChoice);
+  if (draft.userAgentChoice === MODEL_PROBE_UA_SITE_CUSTOM) return draft.customUserAgent.trim();
+
+  const presetId = modelProbeUserAgentPresetIdFromChoice(draft.userAgentChoice);
+  // Neither a sentinel nor a preset choice: nothing the select can produce, so
+  // inherit rather than invent a literal.
+  if (presetId === null) return '';
+
+  const preset = presets.find((entry) => entry.id === presetId);
   // A preset that disappeared from the config falls back to inherit rather than
   // writing a stale literal nobody can see in the select.
   return preset?.value.trim() ?? '';
