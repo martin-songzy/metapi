@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
@@ -66,7 +66,12 @@ function sseStream(frames: Array<{ event: string; data: unknown }>): ReadableStr
 }
 
 describe('Sites probe stream result handling', () => {
-  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  // Bare `typeof vi.spyOn` falls back to its generic defaults
+  // (`(...args: unknown[]) => unknown`), which cannot hold fetch's overloaded
+  // signature. Spelling out the spied function's own type fixes that; note
+  // `typeof globalThis.fetch` does not work here, because this tsconfig's lib set
+  // does not carry `fetch` as a key of the global object type.
+  let fetchSpy: MockInstance<typeof fetch>;
   let addedLocalStorage = false;
 
   beforeEach(() => {
