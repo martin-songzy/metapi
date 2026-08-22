@@ -8,6 +8,8 @@ import {
 import { useToast } from '../components/Toast.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import ModelProbeConfigPanel from './modelProbe/ModelProbeConfigPanel.js';
+import ModelProbeResultsPanel from './modelProbe/ModelProbeResultsPanel.js';
+import ModelProbeRunPanel from './modelProbe/ModelProbeRunPanel.js';
 import ModelProbeSitesPanel from './modelProbe/ModelProbeSitesPanel.js';
 
 /**
@@ -29,6 +31,12 @@ export default function ModelProbe() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
+  /**
+   * Bumped when a sweep reaches a terminal state. The results table owns its own
+   * query, so the shell only tells it "something changed" rather than reaching
+   * into its filters.
+   */
+  const [resultsRefreshToken, setResultsRefreshToken] = useState(0);
 
   const load = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -59,6 +67,11 @@ export default function ModelProbe() {
   const handleSiteSaved = (saved: ModelProbeSite) => {
     setSites((prev) => prev.map((site) => (site.id === saved.id ? saved : site)));
   };
+
+  // Stable across renders so it never re-triggers the run panel's poll effect.
+  const handleRunFinished = useCallback(() => {
+    setResultsRefreshToken((prev) => prev + 1);
+  }, []);
 
   return (
     <div className="animate-fade-in">
@@ -107,6 +120,16 @@ export default function ModelProbe() {
             userAgents={config.userAgents}
             isMobile={isMobile}
             onSaved={handleSiteSaved}
+          />
+          <ModelProbeRunPanel
+            sites={sites}
+            isMobile={isMobile}
+            onRunFinished={handleRunFinished}
+          />
+          <ModelProbeResultsPanel
+            sites={sites}
+            isMobile={isMobile}
+            refreshToken={resultsRefreshToken}
           />
         </>
       )}
