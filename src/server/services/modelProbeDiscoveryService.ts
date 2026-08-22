@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, isNull, or } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { requireSiteApiBaseUrl } from './siteApiEndpointService.js';
 import { getAdapter } from './platforms/index.js';
@@ -15,11 +15,17 @@ import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
  * Read-only model discovery for the active model probe preview/run flows.
  *
  * This module is deliberately side-effect free: it only ever issues `db.select`
- * queries. The write-path refresh helpers in `modelService` are off limits here
- * because they rewrite availability rows, mutate account health, trigger
- * follow-up probes and rebuild the routing tables — all unacceptable for a
- * "preview" button. It also never touches the routing layer, so it stays fully
- * usable when background routing maintenance is switched off.
+ * queries. It must never call `refreshModelsForAccount()` from `modelService`,
+ * because that helper deletes and rewrites `model_availability`, mutates account
+ * health, kicks off post-refresh probes and rebuilds `token_routes` /
+ * `route_channels` — all unacceptable behind a "preview" button.
+ *
+ * For the same reason it calls `requireSiteApiBaseUrl()` rather than
+ * `runWithSiteApiEndpointPool()`: the pool helper records endpoint
+ * success/failure cooldown state, which is a write.
+ *
+ * It also imports nothing from the routing layer (`tokenRouter` and friends), so
+ * it stays fully usable when `PROXY_ROUTING_ENABLED=false`.
  */
 
 type SiteRow = typeof schema.sites.$inferSelect;
@@ -30,6 +36,16 @@ export type ModelProbeDiscoverySource = 'live' | 'cached';
 
 export type ModelProbeCredentialKind = 'api_token' | 'access_token' | 'managed_token';
 
+/**
+ * Machine-readable description of a failed live fetch, so a caller can decide
+ * whether cached models are safe to act on instead of parsing prose.
+ */
+export type ModelProbeLiveFailure = {
+  kind: 'auth' | 'timeout' | 'transport';
+  status: number | null;
+  message: string;
+};
+
 export type ModelProbeDiscoveryTarget = {
   site: SiteRow;
   account: AccountRow;
@@ -38,29 +54,63 @@ export type ModelProbeDiscoveryTarget = {
   source: ModelProbeDiscoverySource;
   credentialKind: ModelProbeCredentialKind;
   notes?: string[];
+  /** Present only when `source === 'cached'` — why the live fetch did not supply models. */
+  liveFailure?: ModelProbeLiveFailure;
 };
 
 export type ModelProbeDiscoveryErrorCode =
   | 'site_not_found'
   | 'adapter_unavailable'
   | 'no_credential'
+  | 'credential_invalid'
   | 'base_url_unavailable'
   | 'no_models';
 
 export class ModelProbeDiscoveryError extends Error {
   readonly code: ModelProbeDiscoveryErrorCode;
   readonly oauthProvider: string | null;
+  readonly liveFailure: ModelProbeLiveFailure | null;
 
   constructor(
     code: ModelProbeDiscoveryErrorCode,
     message: string,
-    options?: { oauthProvider?: string | null; cause?: unknown },
+    options?: {
+      oauthProvider?: string | null;
+      liveFailure?: ModelProbeLiveFailure | null;
+      cause?: unknown;
+    },
   ) {
     super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = 'ModelProbeDiscoveryError';
     this.code = code;
     this.oauthProvider = options?.oauthProvider ?? null;
+    this.liveFailure = options?.liveFailure ?? null;
   }
+}
+
+/** Sentinel so timeout detection never depends on matching message text. */
+class DiscoveryTimeoutError extends Error {}
+
+/**
+ * A revoked or rejected credential is not the same as "upstream was flaky".
+ * Serving cached models under a dead credential would make preview look
+ * successful while every probe in the run phase is doomed, so 401/403 has to be
+ * distinguishable by the caller.
+ */
+function classifyLiveFailure(error: unknown): ModelProbeLiveFailure {
+  const message = (error as { message?: string })?.message || String(error || '模型发现失败');
+  if (error instanceof DiscoveryTimeoutError) {
+    return { kind: 'timeout', status: null, message };
+  }
+
+  const matched = message.match(/\bHTTP\s+(\d{3})\b/i);
+  const status = matched ? Number.parseInt(matched[1] || '', 10) : null;
+  const normalizedStatus = Number.isFinite(status) ? status : null;
+  if (normalizedStatus === 401 || normalizedStatus === 403) {
+    return { kind: 'auth', status: normalizedStatus, message };
+  }
+
+  return { kind: 'transport', status: normalizedStatus, message };
 }
 
 /**
@@ -134,11 +184,18 @@ type SelectedCredential = {
  * `accessToken`, then a managed ready `account_tokens` row.
  */
 async function selectProbeCredential(siteId: number): Promise<SelectedCredential | null> {
+  // `status` is nullable (schema.ts), and the rest of the repo reads a null
+  // status as active via `(status || 'active') === 'active'`. Excluding NULL in
+  // SQL would leave a legacy account unpreviewable behind a misleading
+  // "no credential" error, so match the same semantics here.
   const accounts: AccountRow[] = await db.select()
     .from(schema.accounts)
     .where(and(
       eq(schema.accounts.siteId, siteId),
-      eq(schema.accounts.status, 'active'),
+      or(
+        isNull(schema.accounts.status),
+        eq(schema.accounts.status, 'active'),
+      ),
     ))
     .orderBy(
       desc(schema.accounts.isPinned),
@@ -183,7 +240,7 @@ async function runWithTimeout<T>(fn: () => Promise<T>, timeoutMs: number, messag
     return await Promise.race([
       fn(),
       new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), Math.max(1, timeoutMs));
+        timer = setTimeout(() => reject(new DiscoveryTimeoutError(message)), Math.max(1, timeoutMs));
       }),
     ]);
   } finally {
@@ -237,7 +294,7 @@ export async function discoverModelsForActiveProbe(input: {
   const proxyUrl = resolveChannelProxyUrl(site, account.extraConfig);
 
   let liveModels: string[] = [];
-  let liveError: string | null = null;
+  let liveFailure: ModelProbeLiveFailure | null = null;
   try {
     liveModels = normalizeModelNames(await runWithTimeout(
       () => withAccountProxyOverride(
@@ -248,11 +305,23 @@ export async function discoverModelsForActiveProbe(input: {
       `模型发现超时（${Math.max(1, Math.round(input.timeoutMs))}ms）`,
     ));
   } catch (error) {
-    liveError = (error as { message?: string })?.message || String(error || '模型发现失败');
+    liveFailure = classifyLiveFailure(error);
   }
 
   if (liveModels.length > 0) {
     return { site, account, credential, models: liveModels, source: 'live', credentialKind };
+  }
+
+  // The brief only asks for a cached fallback when the live result is *empty*.
+  // An auth rejection is different in kind: the credential we would hand back is
+  // provably dead, so cached models would make preview read as success while the
+  // run phase fails on every single probe. Refuse instead.
+  if (liveFailure?.kind === 'auth') {
+    throw new ModelProbeDiscoveryError(
+      'credential_invalid',
+      `账号凭据已失效（HTTP ${liveFailure.status}），请更新 API Key 或访问令牌后重试`,
+      { oauthProvider, liveFailure },
+    );
   }
 
   // OAuth-only accounts (Codex / Claude / Gemini CLI / Antigravity) need cloud
@@ -260,7 +329,7 @@ export async function discoverModelsForActiveProbe(input: {
   // adapters can legitimately come back empty. Say so rather than implying the
   // account simply has no models.
   const notes: string[] = [];
-  if (liveError) notes.push(`实时模型发现失败：${liveError}`);
+  if (liveFailure) notes.push(`实时模型发现失败：${liveFailure.message}`);
   if (oauthProvider) {
     notes.push(`未执行 ${oauthProvider} OAuth 云端模型发现（本版本不支持），仅使用上述来源`);
   }
@@ -275,6 +344,7 @@ export async function discoverModelsForActiveProbe(input: {
       source: 'cached',
       credentialKind,
       notes,
+      ...(liveFailure ? { liveFailure } : {}),
     };
   }
 
@@ -282,6 +352,6 @@ export async function discoverModelsForActiveProbe(input: {
   throw new ModelProbeDiscoveryError(
     'no_models',
     `未获取到可探测的模型：实时发现与缓存记录均为空${reasons}`,
-    { oauthProvider },
+    { oauthProvider, liveFailure },
   );
 }
