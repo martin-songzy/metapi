@@ -66,6 +66,37 @@ export const MAX_ACTIVE_PROBE_RUN_TARGETS = 300;
  */
 const DISCOVERY_MIN_CONCURRENCY = 4;
 
+/**
+ * Storage bound for the persisted `reason` column.
+ *
+ * KNOWN LIMITATION, reviewed and accepted — do not "fix" this by raising the
+ * number. `reason` is cut to this length before the API boundary's redactor ever
+ * sees it, and on the classifier-authored path it is cut twice: once at
+ * construction (`modelProbeResponseClassifier.capReason`, same 1000) and again
+ * here on the way into the column. The boundary
+ * (`modelProbeApiService.redactUpstreamProbeText`) serves at that same length and
+ * relies on an overlap window to keep a secret from straddling its own final cut.
+ *
+ * Consequence, stated plainly: for the PERSISTED path that window cannot help.
+ * A *foreign* JWT straddling this cut is already bisected in the database, and a
+ * bisected JWT never matches the JWT pattern — the surviving header/payload
+ * segments are base64url JSON, i.e. readable claims. The window still protects the
+ * unpersisted fields (`notes`, `liveFailure.message`, `skipped[].message`), which
+ * are never truncated before the boundary.
+ *
+ * Why this is accepted rather than fixed:
+ *
+ * - The probe's OWN credential is not exposed by it. That one is masked by value
+ *   (`maskCredentialInText`) before either cut, which is the stronger control and
+ *   is independent of length.
+ * - What remains is shape-based redaction of THIRD-PARTY secrets appearing in
+ *   upstream error text, disclosed to the admin who already owns the keys for
+ *   these sites. No privilege boundary is crossed.
+ * - Both fixes are worse. Raising this bound repurposes a column-size limit as a
+ *   security parameter; moving shape-redaction into this service reopens a
+ *   reviewed design boundary that deliberately keeps redaction at the HTTP edge
+ *   and leaves server-side operators the original upstream wording.
+ */
 const MAX_PERSISTED_REASON_LENGTH = 1_000;
 const DEFAULT_RESULTS_LIMIT = 100;
 const MAX_RESULTS_LIMIT = 500;
