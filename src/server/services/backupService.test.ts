@@ -503,6 +503,42 @@ describe('backupService', () => {
     });
   });
 
+  it('lets the last verdict win when a backup repeats a probe result key', async () => {
+    const now = new Date().toISOString();
+    // A hand-edited file can carry (siteId, modelName) twice. The unique key must
+    // not turn that into a failed restore of everything else in the file.
+    const result = await backupService.importBackup({
+      version: '2.0',
+      timestamp: Date.now(),
+      type: 'accounts',
+      accounts: {
+        sites: [{
+          id: 701,
+          name: 'duplicate-probe-site',
+          url: 'https://duplicate-probe.example.com',
+          platform: 'new-api',
+          status: 'active',
+          createdAt: now,
+          updatedAt: now,
+        }],
+        accounts: [],
+        accountTokens: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        modelProbeResults: [
+          { siteId: 701, accountId: null, modelName: 'gpt-dup', status: 'supported', checkedAt: now },
+          { siteId: 701, accountId: null, modelName: 'gpt-dup', status: 'unsupported', httpStatus: 404, checkedAt: now },
+        ],
+      },
+    } as Record<string, unknown>);
+
+    expect(result.sections.accounts).toBe(true);
+    const restored = await db.select().from(schema.modelProbeResults).all();
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({ modelName: 'gpt-dup', status: 'unsupported', httpStatus: 404 });
+  });
+
   it('restores a backup that predates the probe result table as empty', async () => {
     const now = new Date().toISOString();
     const site = await db.insert(schema.sites).values({

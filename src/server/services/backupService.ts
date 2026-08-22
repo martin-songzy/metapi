@@ -1753,9 +1753,10 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     const importedAccountIds = new Set(section.accounts.map((row) => row.id));
     for (const row of section.modelProbeResults || []) {
       if (!importedSiteIds.has(row.siteId)) continue;
-      await tx.insert(schema.modelProbeResults).values({
+      const accountId = row.accountId != null && importedAccountIds.has(row.accountId) ? row.accountId : null;
+      const values = {
         siteId: row.siteId,
-        accountId: row.accountId != null && importedAccountIds.has(row.accountId) ? row.accountId : null,
+        accountId,
         modelName: row.modelName,
         status: row.status,
         latencyMs: row.latencyMs ?? null,
@@ -1766,6 +1767,24 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         promptUsed: row.promptUsed ?? null,
         userAgentUsed: row.userAgentUsed ?? null,
         checkedAt: row.checkedAt,
+      };
+      // Upsert rather than insert: a hand-edited file can carry the same
+      // (siteId, modelName) twice, and the unique key would then roll back the
+      // whole restore instead of letting the later verdict win.
+      await tx.insert(schema.modelProbeResults).values(values).onConflictDoUpdate({
+        target: [schema.modelProbeResults.siteId, schema.modelProbeResults.modelName],
+        set: {
+          accountId: values.accountId,
+          status: values.status,
+          latencyMs: values.latencyMs,
+          httpStatus: values.httpStatus,
+          failureKind: values.failureKind,
+          reason: values.reason,
+          endpointUsed: values.endpointUsed,
+          promptUsed: values.promptUsed,
+          userAgentUsed: values.userAgentUsed,
+          checkedAt: values.checkedAt,
+        },
       }).run();
     }
 
