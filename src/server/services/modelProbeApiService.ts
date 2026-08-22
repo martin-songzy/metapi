@@ -61,8 +61,23 @@ export const MODEL_PROBE_CONFIRM_TARGET_THRESHOLD = 50;
  * persisted `reason` survives intact while an unpersisted message (a preview note,
  * a live-failure body) cannot relay a multi-megabyte upstream page to the browser.
  */
-const MAX_UPSTREAM_TEXT_LENGTH = 1_000;
+export const MAX_UPSTREAM_TEXT_LENGTH = 1_000;
 const TRUNCATION_SUFFIX = '…（已截断）';
+
+/**
+ * Extra characters kept past `MAX_UPSTREAM_TEXT_LENGTH` while the secret
+ * patterns run, so nothing can straddle the served boundary unmasked. See
+ * `redactUpstreamProbeText`.
+ *
+ * 4096 is chosen to comfortably exceed the longest thing `SECRET_PATTERNS` can
+ * match. The binding case is the JWT rule: a token with fat claims (scopes, an
+ * embedded identity document) runs to a couple of KB, and unlike the `sk-` and
+ * `bearer` rules a JWT prefix does not match at all, so a bisected one is not
+ * partially caught — it is missed entirely. 4096 leaves roughly double the
+ * headroom over a realistic 1-2 KB token while keeping the regex work bounded by
+ * a fixed ~5 KB window no matter how large the upstream body is.
+ */
+export const UPSTREAM_REDACTION_OVERLAP = 4_096;
 
 /**
  * Secret-shaped substrings are masked out of upstream-authored text before it
@@ -101,30 +116,54 @@ const SECRET_PATTERNS: ReadonlyArray<{ pattern: RegExp; replacement: string }> =
   },
 ];
 
-function truncateUpstreamText(value: string): string {
-  if (value.length <= MAX_UPSTREAM_TEXT_LENGTH) return value;
-  return value.slice(0, MAX_UPSTREAM_TEXT_LENGTH) + TRUNCATION_SUFFIX;
-}
-
 /**
  * The single redactor for upstream-authored text. Masks secret-shaped substrings
  * and bounds the length; keeps everything else so an operator can still diagnose
  * a verdict from the results table.
  *
- * Truncates BEFORE matching. `notes` and `liveFailure.message` are not persisted
- * and come from `HTTP ${status}: ${body}`, so they can carry a multi-megabyte error
- * page, and a preview fans that out across every site — running five regexes over
- * the whole thing first would make the response size the attacker's choice of CPU
- * cost. Cutting a secret in half at the boundary is not a leak: the remaining
- * prefix is still matched if it is long enough, and a sub-8-character fragment is
- * not a usable credential.
+ * Redacts inside an OVERLAP WINDOW: cut to `MAX + UPSTREAM_REDACTION_OVERLAP`,
+ * run the patterns over that, then cut to `MAX`. Both orderings on their own are
+ * wrong, in opposite directions:
+ *
+ * - Redact then truncate is safe but unbounded in CPU. `notes` and
+ *   `liveFailure.message` are not persisted and come from `HTTP ${status}: ${body}`,
+ *   so they can carry a multi-megabyte error page, and a preview fans that out
+ *   across every site. Five regexes over the whole body would make the response
+ *   size the attacker's choice of CPU cost.
+ * - Truncate then redact is bounded but leaks. It is tempting to argue a bisected
+ *   secret is harmless because the surviving prefix still matches — that is true
+ *   for the `sk-` and `bearer` rules (at most ~7 characters of key material
+ *   survive) and FALSE for the JWT rule, which requires all three dot-separated
+ *   segments and therefore does not match a prefix at all. A JWT straddling the
+ *   cut would be served with its header and payload intact: base64url-encoded
+ *   JSON, i.e. readable claims. The signature is cut so the token is unusable,
+ *   but the claims are the disclosure.
+ *
+ * The window keeps both properties. Regex cost is bounded by the window, not by
+ * the input; and nothing reaches the output straddling the final cut unmasked,
+ * because anything crossing it was wholly inside the wider window when the
+ * patterns ran. The residual limit is honest and narrow: a secret LONGER than
+ * `UPSTREAM_REDACTION_OVERLAP` that starts before `MAX` can still be bisected at
+ * the window edge, which is why that constant is sized well above the longest
+ * token these patterns can match.
  */
 export function redactUpstreamProbeText(value: string): string {
-  let redacted = truncateUpstreamText(String(value ?? ''));
+  const source = String(value ?? '');
+  const overflows = source.length > MAX_UPSTREAM_TEXT_LENGTH;
+
+  let redacted = overflows
+    ? source.slice(0, MAX_UPSTREAM_TEXT_LENGTH + UPSTREAM_REDACTION_OVERLAP)
+    : source;
   for (const { pattern, replacement } of SECRET_PATTERNS) {
     redacted = redacted.replace(pattern, replacement);
   }
-  return redacted;
+
+  if (!overflows) return redacted;
+  // Masking shortens text, so the window may now fit under the cap. The suffix
+  // still belongs: the source was longer than what is being served either way.
+  return redacted.length > MAX_UPSTREAM_TEXT_LENGTH
+    ? redacted.slice(0, MAX_UPSTREAM_TEXT_LENGTH) + TRUNCATION_SUFFIX
+    : redacted + TRUNCATION_SUFFIX;
 }
 
 function redactNullableUpstreamProbeText(value: string | null | undefined): string | null {
@@ -228,8 +267,8 @@ export function toModelProbeResultResponse(item: ModelProbeResultView): ModelPro
   };
 }
 
-const MAX_TASK_REDACTION_DEPTH = 6;
-const MAX_TASK_REDACTION_NODES = 5_000;
+export const MAX_TASK_REDACTION_DEPTH = 6;
+export const MAX_TASK_REDACTION_NODES = 5_000;
 
 /**
  * Redacts every string inside an arbitrary task result.

@@ -897,6 +897,238 @@ describe('model probe API routes', () => {
       expect(conflict.payload).not.toContain('"credential"');
     });
 
+    /**
+     * The truncate-vs-redact ordering, pinned at the case the old code got wrong.
+     *
+     * `redactUpstreamProbeText` used to truncate first and match afterwards. The
+     * rationale was that a bisected secret is harmless because the surviving
+     * prefix still matches — true for the `sk-` and `bearer` rules, and false for
+     * the JWT rule, which requires all three dot-separated segments and so does
+     * not match a prefix at all. A JWT straddling the cut was therefore served
+     * with header and payload intact: base64url JSON, i.e. readable claims.
+     *
+     * These tests construct exactly that straddle, so a revert to either pure
+     * ordering is caught: truncate-then-redact fails the leak assertions, and
+     * redact-then-truncate fails the bounded-window assertion below.
+     */
+    describe('overlap-window redaction', () => {
+      /** Read per test: `apiService` is only bound in `beforeAll`. */
+      const bounds = () => ({
+        MAX: apiService.MAX_UPSTREAM_TEXT_LENGTH,
+        OVERLAP: apiService.UPSTREAM_REDACTION_OVERLAP,
+      });
+
+      /** A syntactically real JWT whose segments are decodable base64url JSON. */
+      function buildJwt(payload: Record<string, unknown>, signatureLength: number) {
+        const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+        const header = encode({ alg: 'HS256', typ: 'JWT' });
+        return {
+          header,
+          payload: encode(payload),
+          token: `${header}.${encode(payload)}.${'S'.repeat(signatureLength)}`,
+        };
+      }
+
+      /**
+       * Builds text in which `secret` begins at ABSOLUTE index `MAX - surviving`,
+       * so exactly `surviving` of its characters fall before the served cut and
+       * the rest fall after it.
+       *
+       * Absolute, because positioning relative to the filler silently drifts by
+       * the length of the leading `HTTP NNN: ` — which is enough to push the whole
+       * secret past the cut, where it is masked and then dropped. That version of
+       * the test passes under both orderings and pins nothing. The returned
+       * `assertStraddles` makes the layout an assertion rather than a comment.
+       */
+      function straddlingText(input: { lead: string; secret: string; surviving: number; trail: string }) {
+        const { MAX } = bounds();
+        const fillerLength = MAX - input.surviving - input.lead.length - 1;
+        // Space before the secret: every SECRET_PATTERN anchors on `\b`, so filler
+        // running straight into the secret matches nothing under any ordering.
+        const text = `${input.lead}${'y'.repeat(fillerLength)} ${input.secret}${input.trail}`;
+        const secretStart = text.indexOf(input.secret);
+
+        return {
+          text,
+          assertStraddles() {
+            expect(fillerLength).toBeGreaterThan(0);
+            expect(secretStart).toBe(MAX - input.surviving);
+            expect(secretStart).toBeLessThan(MAX);
+            expect(secretStart + input.secret.length).toBeGreaterThan(MAX);
+          },
+        };
+      }
+
+      it('masks a JWT that straddles the served boundary instead of serving its claims', () => {
+        const { MAX } = bounds();
+        const jwt = buildJwt(
+          { sub: 'ops@example.com', tenant: 'acme-prod', scope: 'admin:all', iat: 1700000000 },
+          64,
+        );
+        // Position the token so header and payload land before the cut and only
+        // the tail of the signature lands after it. That is the shape where the
+        // JWT pattern stops matching once the text is truncated first.
+        // Header, payload and two signature characters land before the cut; the
+        // rest of the signature lands after it. That is the shape where the JWT
+        // rule stops matching once the text is truncated first, because it needs
+        // all three dot-separated segments.
+        const headOnly = `${jwt.header}.${jwt.payload}.SS`;
+        const { text, assertStraddles } = straddlingText({
+          lead: 'HTTP 401: ',
+          secret: jwt.token,
+          surviving: headOnly.length,
+          trail: ' rejected',
+        });
+        assertStraddles();
+        expect(text.slice(0, MAX)).toContain(headOnly);
+
+        const redacted = apiService.redactUpstreamProbeText(text);
+
+        expect(redacted).not.toContain(jwt.header);
+        expect(redacted).not.toContain(jwt.payload);
+        expect(redacted).not.toContain(jwt.token);
+        expect(redacted).toContain('[redacted]');
+        // Decoding what is served must not yield the claims.
+        expect(Buffer.from(redacted, 'base64url').toString()).not.toContain('acme-prod');
+      });
+
+      it('masks an sk- key and a bearer token that straddle the boundary', () => {
+        const secrets = ['sk-proj-STRADDLINGKEY0123456789abcdef', 'Bearer STRADDLINGBEARER0123456789'];
+
+        for (const secret of secrets) {
+          // Leave exactly 8 characters of the secret before the cut. Both rules
+          // need 8+ characters after their prefix (`sk-`, `Bearer `), so an
+          // 8-character survivor is too short to match on its own: truncating
+          // first served `sk-proj-` / `Bearer S` with no mask at all.
+          const surviving = 8;
+          const fragment = secret.slice(0, surviving);
+          const { text, assertStraddles } = straddlingText({
+            lead: 'HTTP 500: ',
+            secret,
+            surviving,
+            trail: ' denied',
+          });
+          assertStraddles();
+
+          // Proves the fragment really is unmatchable alone, so the assertions
+          // below are about the window and not about a lucky prefix match.
+          expect(apiService.redactUpstreamProbeText(fragment)).toBe(fragment);
+
+          const redacted = apiService.redactUpstreamProbeText(text);
+
+          // The secret is gone — that is the property. What straddles the cut now
+          // is the MASK, so only its first `surviving` characters are served
+          // (`[redacte` for the sk- rule; `Bearer [` for the bearer rule, which
+          // keeps its label). Derive that rather than hardcoding either shape.
+          const maskedWhole = apiService.redactUpstreamProbeText(secret);
+          expect(maskedWhole).not.toBe(secret);
+
+          expect(redacted).not.toContain(secret);
+          expect(redacted).not.toContain(fragment);
+          expect(redacted).toContain(maskedWhole.slice(0, surviving));
+        }
+      });
+
+      it('keeps the window wide enough for a JWT with fat claims', () => {
+        const { OVERLAP } = bounds();
+        // ~2 KB of claims: the realistic upper end for a token carrying scopes or
+        // an embedded identity document. The overlap must cover it whole, or the
+        // token is bisected at the WINDOW edge and the leak returns one layer out.
+        const jwt = buildJwt({ sub: 'ops@example.com', roles: 'r'.repeat(1_400), tenant: 'acme-prod' }, 86);
+        expect(jwt.token.length).toBeGreaterThan(1_800);
+        expect(jwt.token.length).toBeLessThan(OVERLAP);
+
+        const { text, assertStraddles } = straddlingText({
+          lead: 'HTTP 403: ',
+          secret: jwt.token,
+          surviving: 40,
+          trail: ' expired',
+        });
+        assertStraddles();
+
+        const redacted = apiService.redactUpstreamProbeText(text);
+
+        expect(redacted).not.toContain(jwt.header);
+        expect(redacted).not.toContain(jwt.payload);
+        expect(redacted).toContain('[redacted]');
+      });
+
+      /**
+       * Bounded output, whatever the input size. This does NOT discriminate the
+       * two orderings — redact-then-truncate would emit the same bytes here,
+       * because a masked far secret is cut away too. It pins the other half of
+       * the contract: the window must stay a window, so a change that dropped
+       * the final truncation (or widened it to the whole body) fails here.
+       */
+      it('serves a bounded slice of a multi-megabyte body', () => {
+        const { MAX } = bounds();
+        const farSecret = 'sk-proj-FARAWAYKEY0123456789abcdef';
+        const text = `HTTP 502: ${'q'.repeat(4_000_000)} ${farSecret}`;
+
+        const redacted = apiService.redactUpstreamProbeText(text);
+
+        expect(redacted).not.toContain(farSecret);
+        expect(redacted.length).toBeLessThanOrEqual(MAX + 16);
+      });
+
+      it('marks a body as truncated even when masking shrinks it under the cap', () => {
+        const jwt = buildJwt({ sub: 'ops', roles: 'r'.repeat(1_200) }, 64);
+        const redacted = apiService.redactUpstreamProbeText(`HTTP 401: ${jwt.token}`);
+
+        expect(redacted).toContain('[redacted]');
+        // Shorter than MAX after masking, but the source was longer than what is
+        // served, so saying "truncated" stays honest.
+        expect(redacted).toContain('（已截断）');
+      });
+
+      it('leaves text at or under the cap completely alone', () => {
+        const { MAX } = bounds();
+        const exact = 'a'.repeat(MAX);
+        expect(apiService.redactUpstreamProbeText(exact)).toBe(exact);
+        expect(apiService.redactUpstreamProbeText(exact)).not.toContain('（已截断）');
+      });
+    });
+
+    /**
+     * `redactUnknownDeep` fails CLOSED past its node budget: text it will not
+     * visit is replaced by the mask rather than passed through. Without this,
+     * "pad the summary with 5000 nodes, then put the secret after them" would be
+     * a way to skip redaction entirely — the exact opposite of what a cost limit
+     * should do.
+     */
+    it('masks task result text it runs out of budget to visit', async () => {
+      const budget = apiService.MAX_TASK_REDACTION_NODES;
+      const started = tasks.startBackgroundTask(
+        {
+          type: runService.ACTIVE_MODEL_PROBE_TASK_TYPE,
+          title: '主动模型测活（全部站点）',
+          notifyOnSuccess: false,
+          notifyOnFailure: false,
+        },
+        async () => ({
+          // Burns the budget, then a plain string and a nested object well past it.
+          padding: Array.from({ length: budget + 200 }, (_unused, index) => `pad-${index}`),
+          tail: `upstream refused key ${CREDENTIAL}`,
+          nested: { message: `also refused ${CREDENTIAL}` },
+          probed: 7,
+        }),
+      );
+      await tasks.waitForBackgroundTaskCompletion(started.task.id);
+
+      const response = await app.inject({ method: 'GET', url: `/api/tasks/${started.task.id}` });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.payload).not.toContain(CREDENTIAL);
+      const body = response.json() as {
+        task: { result: { tail: unknown; nested: unknown; probed: unknown } };
+      };
+      // Whole-value masks, not per-pattern redaction: these were never visited.
+      expect(body.task.result.tail).toBe('[redacted]');
+      expect(body.task.result.nested).toBe('[redacted]');
+      // Counters carry no text, so a truncated summary stays readable.
+      expect(body.task.result.probed).toBe(7);
+    });
+
     it('truncates an enormous upstream body instead of relaying it whole', async () => {
       listActiveModelProbeResultsMock.mockResolvedValue({
         items: [{

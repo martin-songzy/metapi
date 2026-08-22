@@ -306,6 +306,18 @@ export async function discoverModelsForActiveProbe(input: {
   // `liveFailure.message`, `notes[]` and `ModelProbeDiscoveryError.message`, and
   // the run service copies the last of those into `skipped[].message` — all served
   // to the browser.
+  //
+  // Where the protection actually lives, measured rather than assumed: only TWO
+  // call sites carry load. `classifyLiveFailure` (the upstream body) and
+  // `base_url_unavailable` (endpoint-resolution text) each fail a test when their
+  // mask is removed. The `mask()` calls on `notes[0]`, on `no_models` and on
+  // `credential_invalid` are defence in depth, not independent controls: the first
+  // two wrap text `classifyLiveFailure` already masked, and the
+  // `credential_invalid` template is local prose plus a parsed integer, so masking
+  // it is a no-op by construction. They are kept so the invariant stays "every
+  // message built here is masked" rather than a per-line judgement call — but if
+  // `classifyLiveFailure` ever regresses, only `notes[0]` and `no_models` are
+  // still standing behind it.
   const mask = (text: string) => maskCredentialInText(text, credential);
 
   let baseUrl: string;

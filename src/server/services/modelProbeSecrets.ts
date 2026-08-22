@@ -1,13 +1,23 @@
 /**
  * Value-based credential masking for the active model probe.
  *
- * This is the "we know the secret" half of probe redaction, and it is the
- * stronger half: `modelProbeApiService.redactUpstreamProbeText` can only match
- * secret *shapes*, so it cannot catch a bare `ghp_...`, a credential embedded in a
- * URL path segment (`/v1/<32-hex>/models`), or an opaque session cookie like
- * `session=MTcwMDAw...` — the shape a Veloera / AnyRouter relay actually issues.
- * Wherever the credential value is in scope, masking by value closes that gap
- * outright and must be preferred.
+ * This is the "we know the secret" half of probe redaction, and where it applies
+ * it is the stronger half: `modelProbeApiService.redactUpstreamProbeText` can
+ * only match secret *shapes*, so it cannot catch a bare `ghp_...`, a credential
+ * embedded in a URL path segment (`/v1/<32-hex>/models`), or an opaque session
+ * cookie like `session=MTcwMDAw...` — the shape a Veloera / AnyRouter relay
+ * actually issues. Wherever the credential value is in scope, masking by value
+ * closes that gap outright and must be preferred.
+ *
+ * Its limitation, stated plainly so nothing is built on a guarantee that is not
+ * here: matching is BYTE-EXACT. Verified to handle regex metacharacters, empty
+ * and short credentials, repeated and overlapping occurrences, and
+ * null/undefined. It does NOT handle a credential a relay reformatted before
+ * echoing it — case-variant, URL-encoded (`%2F`), or JSON-escaped (`\/`) forms
+ * all pass through unmasked. That is an accepted limitation: relays echo the
+ * bytes they received, and normalizing every encoding a body could apply would
+ * be guesswork with its own false-positive cost. Boundary shape-matching is the
+ * backstop for anything reformatted.
  *
  * Deliberately dependency-free (no db, no config, no platform adapters) so every
  * layer that holds a credential can import it: the discovery service builds its
