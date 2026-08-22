@@ -198,6 +198,13 @@ async function advanceMs(ms: number) {
   await flushMicrotasks();
 }
 
+function spinnerCount(root: ReactTestInstance): number {
+  return root.findAll((node) => (
+    typeof node.props.className === 'string'
+    && node.props.className.split(' ').includes('spinner')
+  )).length;
+}
+
 function toastTypes(root: ReactTestInstance): string[] {
   return root
     .findAll((node) => typeof node.props.className === 'string'
@@ -477,6 +484,9 @@ describe('ModelProbe task progress', () => {
       await click(findByTestId(root.root, 'model-probe-run-button'));
       const afterQueue = apiMock.getModelProbeTask.mock.calls.length;
       expect(afterQueue).toBeGreaterThan(0);
+      // Motion while polling is genuinely alive — the counterpart to the
+      // stopped-poll case, which must show none.
+      expect(spinnerCount(findByTestId(root.root, 'model-probe-run-panel'))).toBeGreaterThan(0);
 
       await advanceMs(1_000);
       await advanceMs(1_000);
@@ -822,6 +832,11 @@ describe('ModelProbe run lifecycle', () => {
       expect(apiMock.runModelProbe).toHaveBeenCalledTimes(1);
       expect(collectText(findByTestId(root.root, 'model-probe-task-poll-stopped'))).toContain('任务查询失败');
       expect(collectText(root.root)).not.toContain('等待任务状态');
+      // Status is unknown once polling has given up, not pending.
+      expect(collectText(root.root)).toContain('状态未知');
+      // A spinner next to a stopped poll animates forever over nothing. The
+      // progress section must show no motion at all here.
+      expect(spinnerCount(findByTestId(root.root, 'model-probe-run-panel'))).toBe(0);
     } finally {
       root.unmount();
     }
@@ -974,6 +989,47 @@ describe('ModelProbe run reattach', () => {
       const hint = collectText(findByTestId(root.root, 'model-probe-run-dedupe-hint'));
       expect(hint).toContain('不会');
       expect(hint).toContain('跟随');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('never lets a slow task-list lookup steal the sweep the operator just started', async () => {
+    // The mount-time lookup is in flight while the operator presses 发起探测.
+    let resolveTasks!: (value: unknown) => void;
+    apiMock.getModelProbeTasks.mockReturnValue(new Promise((resolve) => { resolveTasks = resolve; }));
+    apiMock.runModelProbe.mockResolvedValue({
+      status: 'ok' as const,
+      data: { success: true, taskId: 'task-fresh', reused: false, preview: buildPreview() },
+    });
+    apiMock.getModelProbeTask.mockImplementation(async (id: string) => ({
+      success: true,
+      task: buildTask({ id, status: 'running', message: '正在探测' }),
+    }));
+
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-run-button').props.onClick();
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('task-fresh');
+
+      // Now the stale lookup lands, reporting a different sweep.
+      await act(async () => {
+        resolveTasks({
+          tasks: [{ id: 'task-stale', type: PROBE_TASK_TYPE, status: 'running', createdAt: '2026-08-21T01:00:00.000Z' }],
+        });
+      });
+      await flushMicrotasks();
+
+      // Adopting it would silently redirect the panel to a different task, so the
+      // operator would watch progress for a sweep they did not start while their
+      // own keeps burning quota unobserved.
+      expect(collectText(root.root)).toContain('task-fresh');
+      expect(collectText(root.root)).not.toContain('task-stale');
+      expect(apiMock.getModelProbeTask).not.toHaveBeenCalledWith('task-stale');
+      expect(queryByTestId(root.root, 'model-probe-task-reattached')).toBeNull();
     } finally {
       root.unmount();
     }
