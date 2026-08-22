@@ -59,6 +59,7 @@ describe('model probe API routes', () => {
   let runService: RunServiceModule;
   let tasks: BackgroundTaskModule;
   let apiService: ApiServiceModule;
+  let updateCenterRoutes: (app: FastifyInstance) => Promise<void>;
   let dataDir = '';
   let siteId = 0;
   let previousRoutingEnabled = false;
@@ -73,6 +74,7 @@ describe('model probe API routes', () => {
     const modelProbeRoutesModule = await import('./modelProbe.js');
     const taskRoutesModule = await import('./tasks.js');
     const updateCenterRoutesModule = await import('./updateCenter.js');
+    updateCenterRoutes = updateCenterRoutesModule.updateCenterRoutes;
     runService = await import('../../services/modelProbeRunService.js');
     tasks = await import('../../services/backgroundTaskService.js');
     apiService = await import('../../services/modelProbeApiService.js');
@@ -741,9 +743,11 @@ describe('model probe API routes', () => {
       }
     });
 
-    it('redacts a probe log served through the generic task log stream', async () => {
+    it('redacts the backfilled logs of a finished probe sweep on the generic stream', async () => {
       // `/api/update-center/tasks/:id/stream` resolves ANY task id, so it is a
-      // second exit for the same log lines.
+      // second exit for the same log lines. This covers the backfill branch only —
+      // the task is already finished, so the route returns before subscribing. The
+      // live-tail branch has its own test below.
       const taskId = await probeTaskWithUpstreamText();
 
       const response = await app.inject({
@@ -754,6 +758,77 @@ describe('model probe API routes', () => {
       expect(response.payload).not.toContain(CREDENTIAL);
       expect(response.payload).toContain('[redacted]');
     });
+
+    /**
+     * The branch an operator actually watches: logs pushed while the sweep is still
+     * running, through `subscribeToBackgroundTaskLogs`. `app.inject` cannot reach it
+     * (it buffers until the response ends, and the route only subscribes for a task
+     * that is still pending/running), so this drives a real listening server and
+     * reads the stream incrementally.
+     */
+    it('redacts a probe log pushed live while the sweep is still running', async () => {
+      let releaseTask: () => void = () => {};
+      const taskGate = new Promise<void>((resolve) => { releaseTask = resolve; });
+
+      const started = tasks.startBackgroundTask(
+        {
+          type: runService.ACTIVE_MODEL_PROBE_TASK_TYPE,
+          title: '主动模型测活（全部站点）',
+          notifyOnSuccess: false,
+          notifyOnFailure: false,
+        },
+        async () => {
+          await taskGate;
+          return { probed: 0 };
+        },
+      );
+      const taskId = started.task.id;
+
+      // A line that exists before the request, so its arrival marks the point where
+      // the route has drained the backfill and subscribed. Anything appended after
+      // it can only reach the client through the live subscriber.
+      tasks.appendBackgroundTaskLog(taskId, 'BACKFILL_SENTINEL');
+
+      // A dedicated listening instance: the shared `app` is inject-only.
+      const streamApp = Fastify();
+      await streamApp.register(updateCenterRoutes);
+      const address = await streamApp.listen({ port: 0, host: '127.0.0.1' });
+      let received = '';
+      try {
+        const response = await fetch(`${address}/api/update-center/tasks/${taskId}/stream`, {
+          headers: { Accept: 'text/event-stream' },
+        });
+        expect(response.status).toBe(200);
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+
+        const readUntil = async (marker: string) => {
+          const deadline = Date.now() + 10_000;
+          while (!received.includes(marker)) {
+            if (Date.now() > deadline) throw new Error(`stream never delivered ${marker}: ${received}`);
+            const { done, value } = await reader.read();
+            if (done) throw new Error(`stream closed before ${marker}: ${received}`);
+            received += decoder.decode(value, { stream: true });
+          }
+        };
+
+        await readUntil('BACKFILL_SENTINEL');
+        tasks.appendBackgroundTaskLog(
+          taskId,
+          `跳过站点 主站（discovery_failed）：upstream refused key ${CREDENTIAL}`,
+        );
+        await readUntil('discovery_failed');
+        await reader.cancel();
+      } finally {
+        releaseTask();
+        await tasks.waitForBackgroundTaskCompletion(taskId);
+        await streamApp.close();
+      }
+
+      expect(received).toContain('discovery_failed');
+      expect(received).not.toContain(CREDENTIAL);
+      expect(received).toContain('[redacted]');
+    }, 30_000);
 
     it('keeps serving the logs of tasks that are not probe sweeps', async () => {
       const started = tasks.startBackgroundTask(

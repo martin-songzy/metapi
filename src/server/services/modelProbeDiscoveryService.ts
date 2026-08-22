@@ -10,6 +10,7 @@ import {
   isUsableAccountToken,
 } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
+import { maskCredentialInText } from './modelProbeSecrets.js';
 
 /**
  * Read-only model discovery for the active model probe preview/run flows.
@@ -109,9 +110,17 @@ class DiscoveryTimeoutError extends Error {}
  * Serving cached models under a dead credential would make preview look
  * successful while every probe in the run phase is doomed, so 401/403 has to be
  * distinguishable by the caller.
+ *
+ * `credential` is threaded in purely to mask it. The message here is the upstream
+ * response body verbatim (`platforms/base.ts` throws `HTTP ${status}: ${body}`),
+ * and a relay that echoes the rejected key in that body would otherwise put it
+ * into `liveFailure.message` → `notes[0]` → the `no_models` error, all of which
+ * are served to the browser. Shape-based redaction at the HTTP boundary cannot be
+ * relied on for this: an opaque session token has no recognizable shape.
  */
-function classifyLiveFailure(error: unknown): ModelProbeLiveFailure {
-  const message = (error as { message?: string })?.message || String(error || '模型发现失败');
+function classifyLiveFailure(error: unknown, credential: string): ModelProbeLiveFailure {
+  const raw = (error as { message?: string })?.message || String(error || '模型发现失败');
+  const message = maskCredentialInText(raw, credential);
   if (error instanceof DiscoveryTimeoutError) {
     return { kind: 'timeout', status: null, message };
   }
@@ -292,13 +301,20 @@ export async function discoverModelsForActiveProbe(input: {
   const { account, credential, credentialKind } = selected;
   const oauthProvider = getOauthInfoFromAccount(account)?.provider || null;
 
+  // From here down the credential is in scope, so every message this function
+  // builds is masked by value before it escapes. These messages become
+  // `liveFailure.message`, `notes[]` and `ModelProbeDiscoveryError.message`, and
+  // the run service copies the last of those into `skipped[].message` — all served
+  // to the browser.
+  const mask = (text: string) => maskCredentialInText(text, credential);
+
   let baseUrl: string;
   try {
     baseUrl = await requireSiteApiBaseUrl(site);
   } catch (error) {
     throw new ModelProbeDiscoveryError(
       'base_url_unavailable',
-      (error as { message?: string })?.message || '当前站点的 API 请求地址均不可用',
+      mask((error as { message?: string })?.message || '当前站点的 API 请求地址均不可用'),
       { oauthProvider, cause: error },
     );
   }
@@ -318,7 +334,7 @@ export async function discoverModelsForActiveProbe(input: {
       `模型发现超时（${Math.max(1, Math.round(input.timeoutMs))}ms）`,
     ));
   } catch (error) {
-    liveFailure = classifyLiveFailure(error);
+    liveFailure = classifyLiveFailure(error, credential);
   }
 
   if (liveModels.length > 0) {
@@ -332,7 +348,7 @@ export async function discoverModelsForActiveProbe(input: {
   if (liveFailure?.kind === 'auth') {
     throw new ModelProbeDiscoveryError(
       'credential_invalid',
-      `账号凭据已失效（HTTP ${liveFailure.status}），请更新 API Key 或访问令牌后重试`,
+      mask(`账号凭据已失效（HTTP ${liveFailure.status}），请更新 API Key 或访问令牌后重试`),
       { oauthProvider, liveFailure },
     );
   }
@@ -360,14 +376,16 @@ export async function discoverModelsForActiveProbe(input: {
   // discovery that this read-only v1 intentionally does not perform, so their
   // adapters can legitimately come back empty. Say so rather than implying the
   // account simply has no models.
-  const notes: string[] = [`获取模型列表失败：${effectiveLiveFailure.message}`];
+  const notes: string[] = [mask(`获取模型列表失败：${effectiveLiveFailure.message}`)];
   if (oauthProvider) {
-    notes.push(`未执行 ${oauthProvider} OAuth 云端模型发现（本版本不支持），仅使用上述来源`);
+    notes.push(mask(`未执行 ${oauthProvider} OAuth 云端模型发现（本版本不支持），仅使用上述来源`));
   }
 
   const cachedModels = await readCachedModelNames(account.id);
   if (cachedModels.length > 0) {
-    notes.push('以下模型来自缓存，本次未验证凭据是否仍然有效');
+    // Locally authored, but pushed through `mask` anyway so the invariant is
+    // "every entry in `notes` is masked" rather than a per-line judgement call.
+    notes.push(mask('以下模型来自缓存，本次未验证凭据是否仍然有效'));
     return {
       site,
       account,
@@ -382,7 +400,7 @@ export async function discoverModelsForActiveProbe(input: {
 
   throw new ModelProbeDiscoveryError(
     'no_models',
-    `没有可探测的模型：实时获取和历史缓存都是空的。${notes.join('；')}`,
+    mask(`没有可探测的模型：实时获取和历史缓存都是空的。${notes.join('；')}`),
     { oauthProvider, liveFailure: effectiveLiveFailure },
   );
 }

@@ -433,6 +433,121 @@ describe('discoverModelsForActiveProbe', () => {
     }
   });
 
+  /**
+   * Value-based credential masking.
+   *
+   * `platforms/base.ts` surfaces a failed management call as
+   * `HTTP ${status}: ${body}` — the upstream response body verbatim — so a relay
+   * that echoes the rejected key in a 401/500 body puts it straight into the text
+   * this module builds. Shape-based redaction at the HTTP boundary cannot save us
+   * here: the credential below is a Veloera/AnyRouter-style opaque session value
+   * with no recognizable prefix, no delimiter and no label, which is exactly the
+   * shape those relays issue. Masking by value is the only thing that catches it,
+   * and every message this module produces is served to the browser.
+   */
+  describe('credential masking in discovery-authored text', () => {
+    const OPAQUE_CREDENTIAL = 'MTcwMDAwMDAwMHxEdi1CQkFFQ180SUFBUkFC';
+
+    it('masks the credential echoed back in a live failure message and notes', async () => {
+      primeTables({
+        accounts: [account({ id: 1, apiToken: OPAQUE_CREDENTIAL })],
+        modelAvailability: [{ modelName: 'cached-model' }],
+      });
+      getModelsMock.mockRejectedValue(
+        new Error(`HTTP 500: {"error":"session ${OPAQUE_CREDENTIAL} rejected"}`),
+      );
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(result.source).toBe('cached');
+      const serialized = JSON.stringify({ liveFailure: result.liveFailure, notes: result.notes });
+      expect(serialized).not.toContain(OPAQUE_CREDENTIAL);
+      expect(result.liveFailure!.message).toContain('[redacted-credential]');
+      expect(result.notes?.join(' ')).toContain('[redacted-credential]');
+      // The surrounding upstream wording survives, so the message is still useful.
+      expect(result.liveFailure!.message).toContain('HTTP 500');
+      // The credential itself is still returned for the probe to use; only the
+      // human-readable text is masked.
+      expect(result.credential).toBe(OPAQUE_CREDENTIAL);
+    });
+
+    it('masks the credential in the no_models error message', async () => {
+      primeTables({
+        accounts: [account({ id: 1, apiToken: OPAQUE_CREDENTIAL })],
+        modelAvailability: [],
+      });
+      // 500, not 401/403: an auth status takes the `credential_invalid` branch
+      // instead, which the next test covers.
+      getModelsMock.mockRejectedValue(new Error(`HTTP 500: bad session=${OPAQUE_CREDENTIAL}`));
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      await expect(discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 }))
+        .rejects.toThrow(/\[redacted-credential\]/);
+
+      // Same call again to inspect the whole error rather than only the message.
+      await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 }).catch((error: unknown) => {
+        const failure = error as { message: string; liveFailure: { message: string } | null };
+        expect(failure.message).not.toContain(OPAQUE_CREDENTIAL);
+        expect(failure.liveFailure?.message).not.toContain(OPAQUE_CREDENTIAL);
+      });
+    });
+
+    it('masks the credential in the credential_invalid error raised on a 401', async () => {
+      primeTables({
+        accounts: [account({ id: 1, apiToken: OPAQUE_CREDENTIAL })],
+        modelAvailability: [{ modelName: 'cached-model' }],
+      });
+      getModelsMock.mockRejectedValue(
+        new Error(`HTTP 401: token ${OPAQUE_CREDENTIAL} is not valid`),
+      );
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 }).catch((error: unknown) => {
+        const failure = error as {
+          code: string;
+          message: string;
+          liveFailure: { message: string } | null;
+        };
+        expect(failure.code).toBe('credential_invalid');
+        expect(JSON.stringify(failure.liveFailure)).not.toContain(OPAQUE_CREDENTIAL);
+        expect(failure.message).not.toContain(OPAQUE_CREDENTIAL);
+      });
+    });
+
+    it('masks the credential in the base_url_unavailable error message', async () => {
+      primeTables({ accounts: [account({ id: 1, apiToken: OPAQUE_CREDENTIAL })] });
+      requireSiteApiBaseUrlMock.mockRejectedValue(
+        new Error(`probe https://relay/api/${OPAQUE_CREDENTIAL}/status failed`),
+      );
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 }).catch((error: unknown) => {
+        const failure = error as { code: string; message: string };
+        expect(failure.code).toBe('base_url_unavailable');
+        expect(failure.message).not.toContain(OPAQUE_CREDENTIAL);
+        expect(failure.message).toContain('[redacted-credential]');
+      });
+    });
+
+    it('leaves a short placeholder credential alone so ordinary text survives', async () => {
+      // Below the 8-character floor: blanket-replacing a 3-character "secret" would
+      // shred unrelated words out of the upstream wording.
+      primeTables({
+        accounts: [account({ id: 1, apiToken: 'abc' })],
+        modelAvailability: [{ modelName: 'cached-model' }],
+      });
+      isMaskedTokenValueMock.mockReturnValue(false);
+      getModelsMock.mockRejectedValue(new Error('HTTP 500: abcdef alphabet soup'));
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(result.liveFailure!.message).toContain('abcdef alphabet soup');
+      expect(result.liveFailure!.message).not.toContain('[redacted-credential]');
+    });
+  });
+
   it('attaches a reason to no_models even when the adapter failed silently', async () => {
     primeTables({
       accounts: [account({ id: 1, apiToken: 'sk-one' })],

@@ -110,13 +110,21 @@ function truncateUpstreamText(value: string): string {
  * The single redactor for upstream-authored text. Masks secret-shaped substrings
  * and bounds the length; keeps everything else so an operator can still diagnose
  * a verdict from the results table.
+ *
+ * Truncates BEFORE matching. `notes` and `liveFailure.message` are not persisted
+ * and come from `HTTP ${status}: ${body}`, so they can carry a multi-megabyte error
+ * page, and a preview fans that out across every site — running five regexes over
+ * the whole thing first would make the response size the attacker's choice of CPU
+ * cost. Cutting a secret in half at the boundary is not a leak: the remaining
+ * prefix is still matched if it is long enough, and a sub-8-character fragment is
+ * not a usable credential.
  */
 export function redactUpstreamProbeText(value: string): string {
-  let redacted = String(value ?? '');
+  let redacted = truncateUpstreamText(String(value ?? ''));
   for (const { pattern, replacement } of SECRET_PATTERNS) {
     redacted = redacted.replace(pattern, replacement);
   }
-  return truncateUpstreamText(redacted);
+  return redacted;
 }
 
 function redactNullableUpstreamProbeText(value: string | null | undefined): string | null {
@@ -233,7 +241,17 @@ const MAX_TASK_REDACTION_NODES = 5_000;
  * task poll into a CPU sink.
  */
 function redactUnknownDeep(value: unknown, budget: { nodes: number }, depth = 0): unknown {
-  if (budget.nodes <= 0 || depth > MAX_TASK_REDACTION_DEPTH) return value;
+  // Fails CLOSED. Past the budget or the depth ceiling, anything that could contain
+  // text — a string, or an object/array whose contents will not be visited — is
+  // replaced by the mask. Passing the subtree through would make "bury the secret at
+  // depth 7" a way to skip redaction entirely, which is precisely the wrong
+  // behaviour for a limit that exists only to bound cost. Numbers, booleans and null
+  // carry no text and pass through, so a truncated summary keeps its counters.
+  if (budget.nodes <= 0 || depth > MAX_TASK_REDACTION_DEPTH) {
+    if (typeof value === 'string') return MODEL_PROBE_REDACTED_MASK;
+    if (value !== null && typeof value === 'object') return MODEL_PROBE_REDACTED_MASK;
+    return value;
+  }
   budget.nodes -= 1;
 
   if (typeof value === 'string') return redactUpstreamProbeText(value);
