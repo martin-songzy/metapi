@@ -114,7 +114,7 @@ describe('probeRuntimeModel', () => {
     expect(result.latencyMs).not.toBeNull();
   });
 
-  it('classifies an explicit 2xx error body as unsupported', async () => {
+  it('classifies a 2xx error body naming a configured keyword as unsupported', async () => {
     resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
     dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
       error: { message: 'model unavailable' },
@@ -126,6 +126,7 @@ describe('probeRuntimeModel', () => {
       account,
       modelName: 'gpt-5.4',
       timeoutMs: 100,
+      errorKeywords: ['model unavailable'],
     });
 
     expect(result).toMatchObject({
@@ -134,6 +135,37 @@ describe('probeRuntimeModel', () => {
       httpStatus: 200,
       endpointUsed: 'chat',
     });
+  });
+
+  /**
+   * Same body, same HTTP 200, only the keyword list differs — so this pair proves
+   * the verdict is decided by the configured vocabulary rather than by the error
+   * shape alone. It previously asserted `unsupported` while passing NO keywords,
+   * which pinned the behaviour F1 identified as wrong: an out-of-balance relay
+   * would mark every probed model unavailable.
+   */
+  it('leaves a 2xx error body no keyword recognizes inconclusive', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: '余额不足，请充值' },
+    }), { status: 200 }));
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+      errorKeywords: ['model unavailable'],
+    });
+
+    expect(result).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'error_body',
+      httpStatus: 200,
+      endpointUsed: 'chat',
+    });
+    expect(result.status).not.toBe('supported');
   });
 
   it('classifies an empty or unparseable 2xx body as inconclusive', async () => {

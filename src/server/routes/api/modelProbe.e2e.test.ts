@@ -461,13 +461,17 @@ describe('active model probe end to end', () => {
     await insertAccount(siteId);
     await putConfig({ interestPatterns: ['^probe-'] });
 
-    upstreamModels = ['probe-good', 'probe-error-key', 'probe-keyword'];
+    upstreamModels = ['probe-good', 'probe-error-key', 'probe-unknown-error', 'probe-keyword'];
     probeResponder = (record) => {
       const model = record.body?.model;
       if (model === 'probe-error-key') {
-        // 200 + a top-level `error` object, and deliberately NO configured error
-        // keyword in the text, so only the shape-based branch can catch it.
-        return errorBodyWith200('upstream refused this request');
+        // 200 + a top-level `error` object whose text names a configured keyword.
+        return errorBodyWith200('no such model: probe-error-key');
+      }
+      if (model === 'probe-unknown-error') {
+        // 200 + a top-level `error` object and deliberately NO configured keyword:
+        // an account-level failure, which must read as unclear rather than absent.
+        return errorBodyWith200('余额不足，请充值');
       }
       if (model === 'probe-keyword') {
         // 200 + a protocol-shaped but contentless body whose prose matches a
@@ -485,8 +489,8 @@ describe('active model probe end to end', () => {
 
     await runProbe();
 
-    // All three were really probed at HTTP level.
-    expect(probePosts()).toHaveLength(3);
+    // All four were really probed at HTTP level.
+    expect(probePosts()).toHaveLength(4);
 
     const results = await listResults();
     const byModel = new Map(results.map((item) => [item.modelName, item]));
@@ -495,9 +499,10 @@ describe('active model probe end to end', () => {
       httpStatus: 200,
       failureKind: null,
     });
-    // The crux, twice over: HTTP 200, yet unavailable — once by body shape, once
-    // by keyword. Two independent mechanisms, so neither assertion can be passing
-    // on the other's behalf.
+    // The crux, twice over: HTTP 200, yet unavailable — once from a top-level
+    // error naming a configured keyword, once from contentless prose naming one.
+    // Two independent paths, so neither assertion can be passing on the other's
+    // behalf.
     expect(byModel.get('probe-error-key')).toMatchObject({
       status: 'unsupported',
       httpStatus: 200,
@@ -508,6 +513,16 @@ describe('active model probe end to end', () => {
       httpStatus: 200,
       failureKind: 'error_body',
     });
+    // And the fail-safe half, which is what keeps the row above honest: the SAME
+    // 200-plus-error shape, differing only in whether a configured keyword matches,
+    // must not be reported as unavailable. Otherwise an out-of-balance relay
+    // condemns every model at the site.
+    expect(byModel.get('probe-unknown-error')).toMatchObject({
+      status: 'inconclusive',
+      httpStatus: 200,
+      failureKind: 'error_body',
+    });
+    expect(byModel.get('probe-unknown-error')?.status).not.toBe('supported');
   }, 60_000);
 
   // Property 6.

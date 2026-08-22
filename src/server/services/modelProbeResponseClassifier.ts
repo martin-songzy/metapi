@@ -22,10 +22,21 @@ function unsupported(reason: string): ModelProbeResponseClassification {
   };
 }
 
-function inconclusive(reason: string): ModelProbeResponseClassification {
+/**
+ * `failureKind` is a parameter because the two ways a probe can be inconclusive
+ * are genuinely different diagnoses: nothing usable came back
+ * (`empty_content`), or an error came back that no configured keyword
+ * recognized (`error_body`). Collapsing both into `empty_content` would tell an
+ * operator reading the results table that an out-of-balance relay returned an
+ * empty answer.
+ */
+function inconclusive(
+  reason: string,
+  failureKind: ModelProbeFailureKind = 'empty_content',
+): ModelProbeResponseClassification {
   return {
     status: 'inconclusive',
-    failureKind: 'empty_content',
+    failureKind,
     reason: capReason(reason),
   };
 }
@@ -111,8 +122,29 @@ export function classifySuccessfulProbeResponse(input: {
       : inconclusive('invalid or non-JSON probe response');
   }
 
+  // A top-level `error` settles ONE thing on its own: the reply is not an answer,
+  // so it can never be `supported`. What it does NOT settle is whether the model
+  // is absent, and that distinction decides whether persistent state is written.
+  //
+  // So the keyword list is consulted here, BEFORE the verdict, and an error no
+  // keyword recognizes falls through to `inconclusive`. `{"error":{"message":
+  // "余额不足"}}` at HTTP 200 is the commonest relay error shape there is; ruling it
+  // `unsupported` marked every probed model at an out-of-balance or rate-limited
+  // site unavailable — the mirror image of the false-positive class this feature
+  // exists to remove. `unsupported` is also the only verdict that reaches
+  // `site_disabled_models`, which is keyed by SITE rather than by account and
+  // never auto-clears, so the fail-safe direction for an unrecognized error is
+  // "unclear", not "gone".
+  //
+  // Model-absence wording still lands `unsupported` through the configured
+  // keywords (`no such model`, `model_not_found`, `模型不存在`, `无可用渠道`, …),
+  // and an operator who wants any other phrasing treated as absence adds it to
+  // that list. See `modelProbeConfigService.DEFAULT_ERROR_KEYWORDS`.
   if (typeof body.error === 'string' || isJsonObject(body.error)) {
-    return unsupported('probe response contains top-level error');
+    const errorKeyword = findErrorKeyword(input.rawBody, input.errorKeywords ?? []);
+    return errorKeyword
+      ? unsupported(`probe response matched error keyword: ${errorKeyword}`)
+      : inconclusive('probe response contains an unrecognized top-level error', 'error_body');
   }
 
   const protocolShaped = isProtocolShapedResponse(input.endpoint, body);

@@ -43,14 +43,23 @@ const DEFAULT_USER_AGENT_PRESETS: readonly ModelProbeUserAgentPreset[] = [
 /**
  * Model-absence semantics ONLY.
  *
- * `classifySuccessfulProbeResponse` maps *any* keyword hit straight to
- * `unsupported`, so an account-level or transient phrase here would mark every
- * model at a rate-limited or out-of-balance site unavailable — and with
- * `syncToRouting` enabled those verdicts get written into
- * `site_disabled_models`. That is why billing/capacity/permission wording
- * (insufficient, quota, rate limit, 余额不足, 当前分组上游负载已饱和, 无权限) is
- * deliberately absent: such a response must fall through to `inconclusive`,
- * which is what the classifier does when no keyword matches.
+ * This list is the ONE thing that promotes an upstream failure to `unsupported`,
+ * and `unsupported` is the only verdict that writes persistent state — including
+ * `site_disabled_models` on the unattended post-refresh path, which is keyed by
+ * SITE rather than by account and never auto-clears. So an account-level or
+ * transient phrase here would mark every probed model at a rate-limited or
+ * out-of-balance site unavailable for every account on it. That is why
+ * billing/capacity/permission wording (insufficient, quota, rate limit, 余额不足,
+ * 当前分组上游负载已饱和, 无权限) is deliberately absent.
+ *
+ * What `classifySuccessfulProbeResponse` actually does, stated so this comment
+ * cannot drift from it again: it consults this list on EVERY failure shape it
+ * recognizes — a top-level `error`, a non-JSON body, and a protocol-shaped body
+ * with no usable content — and only a hit yields `unsupported`. An unmatched
+ * failure yields `inconclusive`, which by construction can never disable a model.
+ * An earlier revision returned `unsupported` for any top-level `error` before
+ * reaching the list at all, which made this narrowing ineffective on the
+ * commonest relay error shape; that branch is now keyword-gated.
  */
 const DEFAULT_ERROR_KEYWORDS: readonly string[] = [
   'no available channel',
