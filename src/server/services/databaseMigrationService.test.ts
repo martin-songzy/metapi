@@ -22,6 +22,7 @@ function createDbSchemaMock() {
     checkinLogs: { __table: 'checkinLogs' },
     modelAvailability: { __table: 'modelAvailability' },
     tokenModelAvailability: { __table: 'tokenModelAvailability' },
+    modelProbeResults: { __table: 'modelProbeResults' },
     tokenRoutes: { __table: 'tokenRoutes' },
     routeChannels: { __table: 'routeChannels' },
     routeGroupSources: { __table: 'routeGroupSources' },
@@ -1032,5 +1033,214 @@ describe('databaseMigrationService', () => {
     expect(migratedSettingKeys).not.toContain('db_type');
     expect(migratedSettingKeys).not.toContain('db_url');
     expect(migratedSettingKeys).not.toContain('db_ssl');
+  });
+
+  it('includes active model probe results in migration statements', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        modelProbeResults: [{
+          id: 4,
+          siteId: 12,
+          accountId: 21,
+          modelName: 'claude-opus-4-6',
+          status: 'supported',
+          latencyMs: 812,
+          httpStatus: 200,
+          failureKind: null,
+          reason: null,
+          endpointUsed: '/v1/messages',
+          promptUsed: 'ping',
+          userAgentUsed: 'claude-cli/2.1.63 (external, cli)',
+          checkedAt: '2026-03-14T02:00:00.000Z',
+        }],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: {
+        settings: [],
+      },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'model_probe_results');
+    expect(statement).toBeDefined();
+    expect(statement?.columns).toEqual([
+      'id',
+      'site_id',
+      'account_id',
+      'model_name',
+      'status',
+      'latency_ms',
+      'http_status',
+      'failure_kind',
+      'reason',
+      'endpoint_used',
+      'prompt_used',
+      'user_agent_used',
+      'checked_at',
+    ]);
+    const valueOf = (column: string) => statement?.values[statement.columns.indexOf(column)];
+    expect(valueOf('site_id')).toBe(12);
+    expect(valueOf('account_id')).toBe(21);
+    expect(valueOf('model_name')).toBe('claude-opus-4-6');
+    expect(valueOf('status')).toBe('supported');
+    expect(valueOf('latency_ms')).toBe(812);
+    expect(valueOf('http_status')).toBe(200);
+    expect(valueOf('endpoint_used')).toBe('/v1/messages');
+    expect(valueOf('user_agent_used')).toBe('claude-cli/2.1.63 (external, cli)');
+    expect(valueOf('checked_at')).toBe('2026-03-14T02:00:00.000Z');
+  });
+
+  it('keeps a null account id null instead of coercing it to zero', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        modelProbeResults: [{
+          id: 5,
+          siteId: 12,
+          accountId: null,
+          modelName: 'gpt-5-codex',
+          status: 'inconclusive',
+          latencyMs: null,
+          httpStatus: null,
+          failureKind: 'timeout',
+          reason: 'first byte timeout',
+          endpointUsed: null,
+          promptUsed: null,
+          userAgentUsed: null,
+          checkedAt: '2026-03-14T02:00:00.000Z',
+        }],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: {
+        settings: [],
+      },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'model_probe_results');
+    const valueOf = (column: string) => statement?.values[statement.columns.indexOf(column)];
+    // account_id 0 would violate the accounts foreign key on every dialect.
+    expect(valueOf('account_id')).toBeNull();
+    expect(valueOf('latency_ms')).toBeNull();
+    expect(valueOf('http_status')).toBeNull();
+    expect(valueOf('failure_kind')).toBe('timeout');
+  });
+
+  it('clears probe results and resets their postgres sequence when migrating', async () => {
+    vi.resetModules();
+
+    const rowsByTable = {
+      settings: [],
+      sites: [],
+      siteApiEndpoints: [],
+      siteAnnouncements: [],
+      siteDisabledModels: [],
+      accounts: [],
+      accountTokens: [],
+      checkinLogs: [],
+      modelAvailability: [],
+      tokenModelAvailability: [],
+      modelProbeResults: [{
+        id: 7,
+        siteId: 3,
+        accountId: null,
+        modelName: 'gpt-5-codex',
+        status: 'skipped',
+        latencyMs: null,
+        httpStatus: null,
+        failureKind: null,
+        reason: 'site disabled',
+        endpointUsed: null,
+        promptUsed: null,
+        userAgentUsed: null,
+        checkedAt: '2026-03-14T02:00:00.000Z',
+      }],
+      tokenRoutes: [],
+      routeChannels: [],
+      routeGroupSources: [],
+      proxyLogs: [],
+      proxyVideoTasks: [],
+      proxyFiles: [],
+      downstreamApiKeys: [],
+      events: [],
+    };
+
+    const executedSql: string[] = [];
+    const client = {
+      dialect: 'postgres',
+      connectionString: 'postgres://example.invalid/metapi',
+      ssl: false,
+      begin: vi.fn(async () => {}),
+      commit: vi.fn(async () => {}),
+      rollback: vi.fn(async () => {}),
+      execute: vi.fn(async (sqlText: string) => {
+        executedSql.push(sqlText);
+        return [];
+      }),
+      queryScalar: vi.fn(async () => 0),
+      close: vi.fn(async () => {}),
+    };
+
+    vi.doMock('../db/index.js', () => ({
+      db: createDbMock(rowsByTable),
+      schema: createDbSchemaMock(),
+    }));
+    vi.doMock('../db/runtimeSchemaBootstrap.js', () => ({
+      createRuntimeSchemaClient: async () => client,
+      ensureRuntimeDatabaseSchema: async () => {},
+    }));
+
+    try {
+      const { migrateCurrentDatabase } = await import('./databaseMigrationService.js');
+      const summary = await migrateCurrentDatabase({
+        dialect: 'postgres',
+        connectionString: 'postgres://example.invalid/metapi',
+        overwrite: true,
+      });
+
+      expect(summary.rows.modelProbeResults).toBe(1);
+      // Left out of the wipe, an overwrite migration hits the unique key on
+      // (site_id, model_name) the moment the same site is re-inserted.
+      expect(executedSql.some((sqlText) => /DELETE FROM "model_probe_results"/.test(sqlText))).toBe(true);
+      // Left out of the sequence reset, the first probe written after the
+      // migration reuses id 1 and collides with a copied row.
+      expect(executedSql.some((sqlText) => sqlText.includes("pg_get_serial_sequence('model_probe_results', 'id')"))).toBe(true);
+      expect(executedSql.some((sqlText) => sqlText.includes('INSERT INTO "model_probe_results"'))).toBe(true);
+    } finally {
+      vi.doUnmock('../db/index.js');
+      vi.doUnmock('../db/runtimeSchemaBootstrap.js');
+      vi.resetModules();
+    }
   });
 });

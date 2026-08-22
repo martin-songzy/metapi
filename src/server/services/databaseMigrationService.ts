@@ -37,6 +37,7 @@ type BackupSnapshot = {
     checkinLogs: Array<Record<string, unknown>>;
     modelAvailability: Array<Record<string, unknown>>;
     tokenModelAvailability: Array<Record<string, unknown>>;
+    modelProbeResults: Array<Record<string, unknown>>;
     tokenRoutes: Array<Record<string, unknown>>;
     routeChannels: Array<Record<string, unknown>>;
     routeGroupSources: Array<Record<string, unknown>>;
@@ -70,6 +71,7 @@ export interface DatabaseMigrationSummary {
     checkinLogs: number;
     modelAvailability: number;
     tokenModelAvailability: number;
+    modelProbeResults: number;
     proxyLogs: number;
     proxyVideoTasks: number;
     proxyFiles: number;
@@ -261,6 +263,7 @@ async function toBackupSnapshot(): Promise<BackupSnapshot> {
       checkinLogs: await db.select().from(schema.checkinLogs).all() as Array<Record<string, unknown>>,
       modelAvailability: await db.select().from(schema.modelAvailability).all() as Array<Record<string, unknown>>,
       tokenModelAvailability: await db.select().from(schema.tokenModelAvailability).all() as Array<Record<string, unknown>>,
+      modelProbeResults: await db.select().from(schema.modelProbeResults).all() as Array<Record<string, unknown>>,
       tokenRoutes: await db.select().from(schema.tokenRoutes).all() as Array<Record<string, unknown>>,
       routeChannels: await db.select().from(schema.routeChannels).all() as Array<Record<string, unknown>>,
       routeGroupSources: await db.select().from(schema.routeGroupSources).all() as Array<Record<string, unknown>>,
@@ -294,6 +297,7 @@ async function clearTargetData(client: SqlClient): Promise<void> {
     'route_group_sources',
     'token_model_availability',
     'model_availability',
+    'model_probe_results',
     'checkin_logs',
     'proxy_logs',
     'proxy_video_tasks',
@@ -521,6 +525,30 @@ function buildStatements(
         asNullableString(row.modelName),
         asBoolean(row.available, false),
         asNumber(row.latencyMs, null),
+        asNullableString(row.checkedAt),
+      ],
+    });
+  }
+
+  for (const row of (snapshot.accounts.modelProbeResults || [])) {
+    statements.push({
+      table: 'model_probe_results',
+      columns: ['id', 'site_id', 'account_id', 'model_name', 'status', 'latency_ms', 'http_status', 'failure_kind', 'reason', 'endpoint_used', 'prompt_used', 'user_agent_used', 'checked_at'],
+      values: [
+        asNumber(row.id, 0),
+        asNumber(row.siteId, 0),
+        // Left as null instead of defaulted to 0: a probe that never picked an
+        // account has no account, and 0 would fail the accounts foreign key.
+        asNumber(row.accountId, null),
+        asNullableString(row.modelName),
+        asNullableString(row.status) ?? 'inconclusive',
+        asNumber(row.latencyMs, null),
+        asNumber(row.httpStatus, null),
+        asNullableString(row.failureKind),
+        asNullableString(row.reason),
+        asNullableString(row.endpointUsed),
+        asNullableString(row.promptUsed),
+        asNullableString(row.userAgentUsed),
         asNullableString(row.checkedAt),
       ],
     });
@@ -754,6 +782,7 @@ async function syncPostgresSequences(client: SqlClient): Promise<void> {
     'checkin_logs',
     'model_availability',
     'token_model_availability',
+    'model_probe_results',
     'token_routes',
     'route_channels',
     'route_group_sources',
@@ -825,6 +854,7 @@ export async function migrateCurrentDatabase(input: DatabaseMigrationInput): Pro
       checkinLogs: snapshot.accounts.checkinLogs.length,
       modelAvailability: snapshot.accounts.modelAvailability.length,
       tokenModelAvailability: snapshot.accounts.tokenModelAvailability.length,
+      modelProbeResults: snapshot.accounts.modelProbeResults.length,
       proxyLogs: snapshot.accounts.proxyLogs.length,
       proxyVideoTasks: snapshot.accounts.proxyVideoTasks.length,
       proxyFiles: snapshot.accounts.proxyFiles.length,

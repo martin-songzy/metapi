@@ -105,4 +105,65 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('"client_app_id"');
     expect(postgresBootstrap).toContain('"proxy_logs_client_app_id_created_at_idx"');
   });
+
+  it('keeps the active model probe result table in the generated contract artifacts', () => {
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const mysqlBootstrap = readFileSync(resolve(generatedDir, 'mysql.bootstrap.sql'), 'utf8');
+    const postgresBootstrap = readFileSync(resolve(generatedDir, 'postgres.bootstrap.sql'), 'utf8');
+
+    expect(contract.tables.model_probe_results?.columns.site_id?.logicalType).toBe('integer');
+    expect(contract.tables.model_probe_results?.columns.account_id?.logicalType).toBe('integer');
+    expect(contract.tables.model_probe_results?.columns.status?.logicalType).toBe('text');
+    expect(contract.tables.model_probe_results?.columns.reason?.logicalType).toBe('text');
+    expect(contract.tables.model_probe_results?.columns.checked_at?.logicalType).toBe('datetime');
+
+    // The result page filters and sorts on every one of these, and this repo has
+    // already paid for an unindexed hot column once: a missing index turns each
+    // poll into a full scan and shows up on the database bill.
+    const expectedIndexes = [
+      'model_probe_results_model_name_idx',
+      'model_probe_results_site_id_idx',
+      'model_probe_results_account_id_idx',
+      'model_probe_results_status_idx',
+      'model_probe_results_checked_at_idx',
+    ];
+    for (const indexName of expectedIndexes) {
+      expect(contract.indexes.some((index) => index.name === indexName), indexName).toBe(true);
+      expect(mysqlBootstrap, indexName).toContain(`\`${indexName}\``);
+      expect(postgresBootstrap, indexName).toContain(`"${indexName}"`);
+    }
+
+    expect(contract.uniques.some((unique) => unique.name === 'model_probe_results_site_model_unique')).toBe(true);
+    expect(mysqlBootstrap).toContain('CREATE TABLE IF NOT EXISTS `model_probe_results`');
+    expect(mysqlBootstrap).toContain('`model_probe_results_site_model_unique`');
+    expect(mysqlBootstrap).toContain('ON DELETE SET NULL');
+    expect(postgresBootstrap).toContain('CREATE TABLE IF NOT EXISTS "model_probe_results"');
+    expect(postgresBootstrap).toContain('"model_probe_results_site_model_unique"');
+  });
+
+  // Task 5 shipped these two columns; this only guards that the generated
+  // artifacts still carry them, since the probe result table above is useless if
+  // the per-site request profile that produced it stops being portable.
+  it('keeps the per-site probe request profile in the generated contract artifacts', () => {
+    const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
+    const mysqlBootstrap = readFileSync(resolve(generatedDir, 'mysql.bootstrap.sql'), 'utf8');
+    const postgresBootstrap = readFileSync(resolve(generatedDir, 'postgres.bootstrap.sql'), 'utf8');
+
+    expect(contract.tables.sites?.columns.probe_endpoint_type).toMatchObject({
+      logicalType: 'text',
+      notNull: true,
+      defaultValue: "'auto'",
+    });
+    expect(contract.tables.sites?.columns.probe_user_agent).toMatchObject({
+      logicalType: 'text',
+      notNull: true,
+      defaultValue: "''",
+    });
+    expect(mysqlBootstrap).toContain('`probe_endpoint_type`');
+    // Widened past the default VARCHAR(191) so a long client user agent is not
+    // truncated on MySQL alone.
+    expect(mysqlBootstrap).toContain('`probe_user_agent` VARCHAR(512)');
+    expect(postgresBootstrap).toContain('"probe_endpoint_type"');
+    expect(postgresBootstrap).toContain('"probe_user_agent"');
+  });
 });

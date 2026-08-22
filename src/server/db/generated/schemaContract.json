@@ -720,6 +720,88 @@
         }
       }
     },
+    "model_probe_results": {
+      "columns": {
+        "id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": true
+        },
+        "site_id": {
+          "logicalType": "integer",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "account_id": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "model_name": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "status": {
+          "logicalType": "text",
+          "notNull": true,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "latency_ms": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "http_status": {
+          "logicalType": "integer",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "failure_kind": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "reason": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "endpoint_used": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "prompt_used": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "user_agent_used": {
+          "logicalType": "text",
+          "notNull": false,
+          "defaultValue": null,
+          "primaryKey": false
+        },
+        "checked_at": {
+          "logicalType": "datetime",
+          "notNull": false,
+          "defaultValue": "datetime('now')",
+          "primaryKey": false
+        }
+      }
+    },
     "oauth_route_unit_members": {
       "columns": {
         "id": {
@@ -2499,6 +2581,55 @@
       "unique": false
     },
     {
+      "name": "model_probe_results_account_id_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "account_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_probe_results_checked_at_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "checked_at"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_probe_results_model_name_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "model_name"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_probe_results_site_id_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "site_id"
+      ],
+      "unique": false
+    },
+    {
+      "name": "model_probe_results_site_model_unique",
+      "table": "model_probe_results",
+      "columns": [
+        "site_id",
+        "model_name"
+      ],
+      "unique": true
+    },
+    {
+      "name": "model_probe_results_status_idx",
+      "table": "model_probe_results",
+      "columns": [
+        "status"
+      ],
+      "unique": false
+    },
+    {
       "name": "oauth_route_unit_members_account_unique",
       "table": "oauth_route_unit_members",
       "columns": [
@@ -2997,6 +3128,14 @@
       ]
     },
     {
+      "name": "model_probe_results_site_model_unique",
+      "table": "model_probe_results",
+      "columns": [
+        "site_id",
+        "model_name"
+      ]
+    },
+    {
       "name": "oauth_route_unit_members_account_unique",
       "table": "oauth_route_unit_members",
       "columns": [
@@ -3145,6 +3284,28 @@
     },
     {
       "table": "model_day_usage",
+      "columns": [
+        "site_id"
+      ],
+      "referencedTable": "sites",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "CASCADE"
+    },
+    {
+      "table": "model_probe_results",
+      "columns": [
+        "account_id"
+      ],
+      "referencedTable": "accounts",
+      "referencedColumns": [
+        "id"
+      ],
+      "onDelete": "SET NULL"
+    },
+    {
+      "table": "model_probe_results",
       "columns": [
         "site_id"
       ],

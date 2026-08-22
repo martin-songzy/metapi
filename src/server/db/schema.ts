@@ -155,6 +155,45 @@ export const tokenModelAvailability = sqliteTable('token_model_availability', {
   availableIdx: index('token_model_availability_available_idx').on(table.available),
 }));
 
+// Latest active-probe verdict per (site, model). Deliberately not a history
+// table: the result page only ever renders the current verdict, so writers
+// upsert on the unique key below instead of appending.
+export const modelProbeResults = sqliteTable('model_probe_results', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  // The account actually used for this probe. Nullable because a skipped or
+  // inconclusive probe can precede account selection, and 'set null' because
+  // deleting an account must not erase the verdict it produced.
+  accountId: integer('account_id').references(() => accounts.id, { onDelete: 'set null' }),
+  modelName: text('model_name').notNull(),
+  // 'supported' | 'unsupported' | 'inconclusive' | 'skipped'. Plain text like
+  // the sibling probe columns on sites: the db layer must not import the
+  // contracts layer, so readers normalize rather than trust the column.
+  status: text('status').notNull(),
+  latencyMs: integer('latency_ms'),
+  httpStatus: integer('http_status'),
+  failureKind: text('failure_kind'),
+  reason: text('reason'),
+  endpointUsed: text('endpoint_used'),
+  promptUsed: text('prompt_used'),
+  userAgentUsed: text('user_agent_used'),
+  checkedAt: text('checked_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  // Keyed on (site_id, model_name) rather than including a nullable account or
+  // token column: SQLite and Postgres treat every NULL as distinct, so such a
+  // key would silently permit duplicate rows per model and turn this into an
+  // append-only log.
+  siteModelUnique: uniqueIndex('model_probe_results_site_model_unique').on(table.siteId, table.modelName),
+  // One index per column the result page filters and sorts on. An unindexed hot
+  // column here means a periodic full scan, which this repo has already paid
+  // for once in database bills.
+  modelNameIdx: index('model_probe_results_model_name_idx').on(table.modelName),
+  siteIdIdx: index('model_probe_results_site_id_idx').on(table.siteId),
+  accountIdIdx: index('model_probe_results_account_id_idx').on(table.accountId),
+  statusIdx: index('model_probe_results_status_idx').on(table.status),
+  checkedAtIdx: index('model_probe_results_checked_at_idx').on(table.checkedAt),
+}));
+
 export const tokenRoutes = sqliteTable('token_routes', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   modelPattern: text('model_pattern').notNull(),

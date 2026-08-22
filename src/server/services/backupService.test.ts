@@ -32,6 +32,7 @@ describe('backupService', () => {
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
+    await db.delete(schema.modelProbeResults).run();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
     await db.delete(schema.siteAnnouncements).run();
@@ -394,6 +395,162 @@ describe('backupService', () => {
     const restored = await db.select().from(schema.sites).where(eq(schema.sites.id, 502)).get();
     expect(restored?.probeEndpointType).toBe('auto');
     expect(restored?.probeUserAgent).toBe('');
+  });
+
+  it('roundtrips active model probe results', async () => {
+    const now = new Date().toISOString();
+    const site = await db.insert(schema.sites).values({
+      name: 'probe-site',
+      url: 'https://probe.example.com',
+      platform: 'new-api',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'probe-user',
+      accessToken: 'probe-session-token',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+
+    await db.insert(schema.modelProbeResults).values([
+      {
+        siteId: site.id,
+        accountId: account.id,
+        modelName: 'gpt-supported',
+        status: 'supported',
+        latencyMs: 321,
+        httpStatus: 200,
+        failureKind: null,
+        reason: null,
+        endpointUsed: '/v1/chat/completions',
+        promptUsed: 'ping',
+        userAgentUsed: 'codex_cli_rs/0.20.0',
+        checkedAt: now,
+      },
+      {
+        siteId: site.id,
+        // Null on purpose: an inconclusive verdict can predate account selection.
+        accountId: null,
+        modelName: 'gpt-unsupported',
+        status: 'unsupported',
+        latencyMs: null,
+        httpStatus: 404,
+        failureKind: 'model_absent',
+        reason: 'model not found',
+        endpointUsed: '/v1/messages',
+        promptUsed: 'ping',
+        userAgentUsed: null,
+        checkedAt: now,
+      },
+    ]).run();
+
+    const exported = await backupService.exportBackup('all') as any;
+    expect(exported.accounts.modelProbeResults).toEqual([
+      expect.objectContaining({
+        siteId: site.id,
+        accountId: account.id,
+        modelName: 'gpt-supported',
+        status: 'supported',
+        latencyMs: 321,
+        httpStatus: 200,
+        endpointUsed: '/v1/chat/completions',
+        promptUsed: 'ping',
+        userAgentUsed: 'codex_cli_rs/0.20.0',
+      }),
+      expect.objectContaining({
+        siteId: site.id,
+        accountId: null,
+        modelName: 'gpt-unsupported',
+        status: 'unsupported',
+        latencyMs: null,
+        httpStatus: 404,
+        failureKind: 'model_absent',
+        reason: 'model not found',
+      }),
+    ]);
+
+    const result = await backupService.importBackup(exported as Record<string, unknown>);
+    expect(result.sections.accounts).toBe(true);
+
+    const restored = await db.select().from(schema.modelProbeResults)
+      .orderBy(asc(schema.modelProbeResults.modelName))
+      .all();
+    expect(restored).toHaveLength(2);
+    expect(restored[0]).toMatchObject({
+      siteId: site.id,
+      accountId: account.id,
+      modelName: 'gpt-supported',
+      status: 'supported',
+      latencyMs: 321,
+      httpStatus: 200,
+      endpointUsed: '/v1/chat/completions',
+      promptUsed: 'ping',
+      userAgentUsed: 'codex_cli_rs/0.20.0',
+      checkedAt: now,
+    });
+    expect(restored[1]).toMatchObject({
+      siteId: site.id,
+      accountId: null,
+      modelName: 'gpt-unsupported',
+      status: 'unsupported',
+      failureKind: 'model_absent',
+      reason: 'model not found',
+    });
+  });
+
+  it('restores a backup that predates the probe result table as empty', async () => {
+    const now = new Date().toISOString();
+    const site = await db.insert(schema.sites).values({
+      name: 'stale-probe-site',
+      url: 'https://stale-probe.example.com',
+      platform: 'new-api',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+
+    await db.insert(schema.modelProbeResults).values({
+      siteId: site.id,
+      accountId: null,
+      modelName: 'gpt-stale',
+      status: 'supported',
+      checkedAt: now,
+    }).run();
+
+    // An older build's file carries no modelProbeResults key at all. The restore
+    // must still succeed and must not leave the pre-restore verdicts behind
+    // pointing at sites the file never mentioned.
+    const result = await backupService.importBackup({
+      version: '2.0',
+      timestamp: Date.now(),
+      type: 'accounts',
+      accounts: {
+        sites: [
+          {
+            id: 601,
+            name: 'legacy-probe-site',
+            url: 'https://legacy-probe.example.com',
+            platform: 'new-api',
+            status: 'active',
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        accounts: [],
+        accountTokens: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+      },
+    } as Record<string, unknown>);
+
+    expect(result.sections.accounts).toBe(true);
+    expect(await db.select().from(schema.modelProbeResults).all()).toEqual([]);
   });
 
   it('does not export runtime database config in preferences backups', async () => {

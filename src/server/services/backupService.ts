@@ -49,6 +49,7 @@ type RouteGroupSourceRow = typeof schema.routeGroupSources.$inferSelect;
 type SiteDisabledModelRow = typeof schema.siteDisabledModels.$inferSelect;
 type ModelAvailabilityRow = typeof schema.modelAvailability.$inferSelect;
 type TokenModelAvailabilityRow = typeof schema.tokenModelAvailability.$inferSelect;
+type ModelProbeResultRow = typeof schema.modelProbeResults.$inferSelect;
 type ProxyLogRow = typeof schema.proxyLogs.$inferSelect;
 type CheckinLogRow = typeof schema.checkinLogs.$inferSelect;
 type DownstreamApiKeyRow = typeof schema.downstreamApiKeys.$inferSelect;
@@ -82,6 +83,9 @@ type BackupRouteChannelRow = Omit<RouteChannelRow,
 >>;
 
 type BackupSiteDisabledModelRow = Pick<SiteDisabledModelRow, 'siteId' | 'modelName'>;
+// The row id is dropped: results are keyed by (siteId, modelName) and the
+// restore re-inserts them under the imported site ids.
+type BackupModelProbeResultRow = Omit<ModelProbeResultRow, 'id'>;
 type BackupManualModelRow = {
   accountId: number;
   modelName: string;
@@ -113,6 +117,9 @@ interface AccountsBackupSection {
   routeGroupSources: RouteGroupSourceRow[];
   siteDisabledModels?: BackupSiteDisabledModelRow[];
   manualModels?: BackupManualModelRow[];
+  // Optional: files written before this table existed carry no key, and the
+  // restore then leaves the table empty rather than failing.
+  modelProbeResults?: BackupModelProbeResultRow[];
   downstreamApiKeys?: BackupDownstreamApiKeyRow[];
 }
 
@@ -1336,6 +1343,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     routeGroupSources,
     siteDisabledModels,
     manualModels,
+    modelProbeResults,
     downstreamApiKeys,
   ] = await Promise.all([
     db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all(),
@@ -1357,6 +1365,9 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     db.select().from(schema.modelAvailability)
       .where(eq(schema.modelAvailability.isManual, true))
       .orderBy(asc(schema.modelAvailability.accountId), asc(schema.modelAvailability.modelName))
+      .all(),
+    db.select().from(schema.modelProbeResults)
+      .orderBy(asc(schema.modelProbeResults.siteId), asc(schema.modelProbeResults.modelName))
       .all(),
     db.select().from(schema.downstreamApiKeys).orderBy(asc(schema.downstreamApiKeys.id)).all(),
   ]);
@@ -1389,6 +1400,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
       accountId: row.accountId,
       modelName: row.modelName,
     })),
+    modelProbeResults: modelProbeResults.map(({ id: _id, ...row }) => row),
     downstreamApiKeys: downstreamApiKeys.map(({
       id: _id,
       usedCost: _usedCost,
@@ -1460,6 +1472,9 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
   const manualModels = Array.isArray(input.manualModels)
     ? input.manualModels as BackupManualModelRow[]
     : undefined;
+  const modelProbeResults = Array.isArray(input.modelProbeResults)
+    ? input.modelProbeResults as BackupModelProbeResultRow[]
+    : undefined;
   const downstreamApiKeys = Array.isArray(input.downstreamApiKeys)
     ? input.downstreamApiKeys as BackupDownstreamApiKeyRow[]
     : undefined;
@@ -1476,6 +1491,7 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
     routeGroupSources,
     siteDisabledModels,
     manualModels,
+    modelProbeResults,
     downstreamApiKeys,
   };
 }
@@ -1569,6 +1585,10 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     await tx.delete(schema.tokenRoutes).run();
     await tx.delete(schema.tokenModelAvailability).run();
     await tx.delete(schema.modelAvailability).run();
+    // Deleted explicitly rather than left to the sites cascade: a file that
+    // predates this table would otherwise keep stale verdicts alive on any
+    // dialect or connection where foreign keys are not being enforced.
+    await tx.delete(schema.modelProbeResults).run();
     await tx.delete(schema.accountTokens).run();
     await tx.delete(schema.accounts).run();
     await tx.delete(schema.sites).run();
@@ -1723,6 +1743,30 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
           modelName: row.modelName,
         }).run();
       }
+    }
+
+    // Guarded by the ids this file actually restored: a hand-trimmed section can
+    // reference a site or account it no longer carries, and an unguarded insert
+    // would abort the entire restore on the foreign key instead of dropping one
+    // stale verdict.
+    const importedSiteIds = new Set(section.sites.map((row) => row.id));
+    const importedAccountIds = new Set(section.accounts.map((row) => row.id));
+    for (const row of section.modelProbeResults || []) {
+      if (!importedSiteIds.has(row.siteId)) continue;
+      await tx.insert(schema.modelProbeResults).values({
+        siteId: row.siteId,
+        accountId: row.accountId != null && importedAccountIds.has(row.accountId) ? row.accountId : null,
+        modelName: row.modelName,
+        status: row.status,
+        latencyMs: row.latencyMs ?? null,
+        httpStatus: row.httpStatus ?? null,
+        failureKind: row.failureKind ?? null,
+        reason: row.reason ?? null,
+        endpointUsed: row.endpointUsed ?? null,
+        promptUsed: row.promptUsed ?? null,
+        userAgentUsed: row.userAgentUsed ?? null,
+        checkedAt: row.checkedAt,
+      }).run();
     }
 
     const importedManualModelKeys = new Set<string>();
