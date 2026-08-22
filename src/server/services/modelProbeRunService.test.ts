@@ -1753,12 +1753,32 @@ describe('modelProbeRunService', () => {
 
     /**
      * The property that genuinely underwrites `PROXY_ROUTING_ENABLED=false`:
-     * importing the probe modules must not *do* anything. Whatever the import
-     * closure happens to contain, nothing routing-related executes until a caller
-     * calls something.
+     * none of these eight modules *does* anything when it is imported, so no
+     * routing state can be read or written until a caller calls something.
+     *
+     * Scoped to those eight files, and that scope matters — the wider closure is
+     * NOT inert. `db/index.ts` runs `initDb()` at import (see its `let activeDb =
+     * initDb()`), which opens the connection. That predates this feature and is
+     * not what this test claims. The claim is narrower and is the one that counts
+     * here: opening a database handle touches no routing table, and nothing in
+     * these modules turns that handle into a routing read or write at import.
      */
     it('executes nothing at import time, here or in the routing modules it can reach', async () => {
-      const topLevelStatement = /^(?:setInterval|setTimeout|queueMicrotask|process\.|void |await |db\.)/m;
+      // `^` is the whole "top level" heuristic: these files indent every nested
+      // statement, so column 0 means module scope.
+      //
+      // Three shapes, because one pattern anchored at column 0 only catches an
+      // effect written as a bare statement. `const timer = setInterval(...)` and
+      // `initSomething();` are equally import-time and were both missed before.
+      const EFFECTS = String.raw`setInterval|setTimeout|setImmediate|queueMicrotask|process\.|db\.`;
+      const importTimeEffects = [
+        // `setTimeout(...)`, `await x`, `void x`, `process.on(...)`, `db.select(...)`
+        new RegExp(String.raw`^(?:void |await |${EFFECTS})`, 'm'),
+        // The same effects, hidden behind a binding.
+        new RegExp(String.raw`^(?:export\s+)?(?:const|let|var)\s[^\n=]*=\s*(?:await\s+)?(?:${EFFECTS})`, 'm'),
+        // A bare call at column 0, whatever it is called: `initSomething();`.
+        /^[A-Za-z_$][\w$]*(?:\.[\w$]+)*\s*\(/m,
+      ];
 
       const probeModules = [
         'modelProbeRunService.ts',
@@ -1779,12 +1799,36 @@ describe('modelProbeRunService', () => {
       for (const file of [...probeModules, ...reachableRoutingModules]) {
         const source = await readFile(new URL(`./${file}`, import.meta.url), 'utf8');
         expect(source.length).toBeGreaterThan(0);
-        expect(source).not.toMatch(topLevelStatement);
+        for (const pattern of importTimeEffects) expect(source).not.toMatch(pattern);
       }
 
-      // Positive control: the pattern does detect a top-level statement, so the
-      // assertions above cannot be passing because the regex matches nothing.
-      expect('await bootstrap();\n').toMatch(topLevelStatement);
+      // Positive controls: the assertions above cannot be passing because a
+      // pattern matches nothing. Every effect token is pinned in both the bare
+      // and the assigned shape, so dropping one from `EFFECTS` fails here.
+      for (const effect of [
+        'setInterval(tick, 1000)',
+        'setTimeout(tick, 1000)',
+        'setImmediate(tick)',
+        'queueMicrotask(tick)',
+        'process.on("exit", tick)',
+        'db.select()',
+      ]) {
+        expect(`${effect};\n`).toMatch(importTimeEffects[0]!);
+        expect(`const handle = ${effect};\n`).toMatch(importTimeEffects[1]!);
+      }
+      expect('await bootstrap();\n').toMatch(importTimeEffects[0]!);
+      expect('void bootstrap();\n').toMatch(importTimeEffects[0]!);
+      expect('export const rows = await db.select();\n').toMatch(importTimeEffects[1]!);
+      expect('initSomething();\n').toMatch(importTimeEffects[2]!);
+
+      // Deliberately NOT flagged. `Symbol()` allocates and returns; it touches
+      // nothing outside the module, so it cannot make importing observable. This
+      // guard is about effects, not about "no executable statement at column 0" —
+      // widening it to the latter would only add an allowlist for pure values.
+      // `modelService.ts` has exactly this line, and it is fine.
+      for (const pattern of importTimeEffects) {
+        expect("const REFRESHED = Symbol('refreshed');\n").not.toMatch(pattern);
+      }
     });
   });
 });
