@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+import {
+  MODEL_PROBE_ENDPOINT_TYPES,
+  type ModelProbeEndpointType,
+} from '../../shared/modelProbeEndpointTypes.js';
+
 /**
  * Zod contracts for the active model probe API surface.
  *
@@ -46,9 +51,7 @@ const modelProbeConfigPayloadSchema = z.object({
   syncToRouting: z.boolean().optional(),
 }).strict();
 
-export const MODEL_PROBE_ENDPOINT_TYPES = ['auto', 'chat', 'messages', 'responses'] as const;
-
-export type ModelProbeEndpointType = (typeof MODEL_PROBE_ENDPOINT_TYPES)[number];
+export { MODEL_PROBE_ENDPOINT_TYPES, type ModelProbeEndpointType };
 
 /**
  * The two per-site probe profile fields, exported as schemas rather than as raw

@@ -6,6 +6,8 @@ import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
+import { normalizeModelProbeEndpointType } from '../../shared/modelProbeEndpointTypes.js';
+import { MAX_PROBE_USER_AGENT_LENGTH } from '../contracts/modelProbePayloads.js';
 
 const BACKUP_VERSION = '2.1';
 
@@ -1590,10 +1592,12 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         postRefreshProbeModel: row.postRefreshProbeModel ?? '',
         postRefreshProbeScope: (row.postRefreshProbeScope === 'all' ? 'all' : 'single') as 'single' | 'all',
         postRefreshProbeLatencyThresholdMs: row.postRefreshProbeLatencyThresholdMs ?? 0,
-        // Snapshots taken before these columns existed carry no value, so fall
-        // back to the same defaults the columns declare.
-        probeEndpointType: row.probeEndpointType ?? 'auto',
-        probeUserAgent: row.probeUserAgent ?? '',
+        // Converged rather than trusted, like postRefreshProbeScope above: a
+        // snapshot predating these columns carries no value, and a hand-edited or
+        // downgraded one can carry anything, so an unrecognized endpoint would
+        // otherwise land in the column verbatim and mis-target that site's probes.
+        probeEndpointType: normalizeModelProbeEndpointType(row.probeEndpointType),
+        probeUserAgent: (row.probeUserAgent ?? '').slice(0, MAX_PROBE_USER_AGENT_LENGTH),
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
       }).run();

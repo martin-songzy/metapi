@@ -116,6 +116,48 @@ describe('schema artifact generator', () => {
     expect(artifacts.mysqlBootstrap).not.toContain('CREATE TABLE IF NOT EXISTS `settings` (`key` TEXT NOT NULL PRIMARY KEY, `value` TEXT)');
   });
 
+  // A text column with a default becomes VARCHAR(191), which would cap
+  // probe_user_agent below the 512 characters its contract accepts: strict MySQL
+  // turns an over-length write into ER_DATA_TOO_LONG, non-strict truncates it.
+  it('widens mysql varchar columns whose contract allows more than 191 characters', () => {
+    const artifacts = generateDialectArtifacts(readSchemaContract());
+
+    expect(artifacts.mysqlBootstrap).toContain("`probe_user_agent` VARCHAR(512) NOT NULL DEFAULT ''");
+    expect(artifacts.mysqlBootstrap).not.toContain('`probe_user_agent` VARCHAR(191)');
+    // Columns without an override keep the default width.
+    expect(artifacts.mysqlBootstrap).toContain("`probe_endpoint_type` VARCHAR(191) NOT NULL DEFAULT 'auto'");
+    // The wider type must not leak into the other dialects.
+    expect(artifacts.postgresBootstrap).toContain('"probe_user_agent" TEXT NOT NULL');
+    expect(artifacts.postgresBootstrap).not.toContain('VARCHAR(512)');
+  });
+
+  // The live upgrade path matters more than the checked-in upgrade artifact:
+  // ensureRuntimeDatabaseSchema introspects the real database and diffs the
+  // contract against it, so this is the DDL an existing MySQL database receives.
+  it('widens the column on the upgrade path an existing mysql database takes', () => {
+    const contract = readSchemaContract();
+    const liveBaseline: SchemaContract = {
+      ...contract,
+      tables: {
+        ...contract.tables,
+        sites: {
+          columns: Object.fromEntries(
+            Object.entries(contract.tables.sites!.columns)
+              .filter(([name]) => name !== 'probe_user_agent' && name !== 'probe_endpoint_type'),
+          ),
+        },
+      },
+    };
+
+    const mysqlUpgrade = generateUpgradeSql('mysql', contract, liveBaseline);
+    expect(mysqlUpgrade).toContain("ALTER TABLE `sites` ADD COLUMN `probe_user_agent` VARCHAR(512) NOT NULL DEFAULT ''");
+    expect(mysqlUpgrade).toContain("ALTER TABLE `sites` ADD COLUMN `probe_endpoint_type` VARCHAR(191) NOT NULL DEFAULT 'auto'");
+
+    const postgresUpgrade = generateUpgradeSql('postgres', contract, liveBaseline);
+    expect(postgresUpgrade).toContain('ALTER TABLE "sites" ADD COLUMN "probe_user_agent" TEXT NOT NULL');
+    expect(postgresUpgrade).not.toContain('VARCHAR(512)');
+  });
+
   it('does not add mysql text prefixes to non-text index columns', () => {
     const artifacts = generateDialectArtifacts(readSchemaContract());
 

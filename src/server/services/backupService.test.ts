@@ -66,6 +66,8 @@ describe('backupService', () => {
       isPinned: true,
       sortOrder: 9,
       apiKey: 'site-api-key',
+      probeEndpointType: 'messages',
+      probeUserAgent: 'claude-cli/2.1.63 (external, cli)',
       createdAt: now,
       updatedAt: now,
     }).returning().get();
@@ -276,6 +278,11 @@ describe('backupService', () => {
     expect(restoredSite?.customHeaders).toBe('{"cf-access-client-id":"roundtrip-client"}');
     expect(restoredSite?.isPinned).toBe(true);
     expect(restoredSite?.sortOrder).toBe(9);
+    // A restore must not silently reset the per-site probe profile: dropping
+    // these two fields from the restore insert leaves every other assertion here
+    // passing while each restore quietly reverts the site to auto / no override.
+    expect(restoredSite?.probeEndpointType).toBe('messages');
+    expect(restoredSite?.probeUserAgent).toBe('claude-cli/2.1.63 (external, cli)');
 
     expect(restoredAccount?.isPinned).toBe(true);
     expect(restoredAccount?.sortOrder).toBe(7);
@@ -318,6 +325,75 @@ describe('backupService', () => {
         lastUsedAt: now,
       }),
     ]);
+  });
+
+  // A snapshot can be hand-edited or produced by an older build, so the restore
+  // converges these two fields instead of trusting them — the same treatment
+  // postRefreshProbeScope already gets.
+  it('converges out-of-contract probe profile values when restoring a site', async () => {
+    const now = new Date().toISOString();
+    const result = await backupService.importBackup({
+      version: '2.0',
+      timestamp: Date.now(),
+      type: 'accounts',
+      accounts: {
+        sites: [
+          {
+            id: 501,
+            name: 'hand-edited-site',
+            url: 'https://hand-edited.example.com',
+            platform: 'new-api',
+            status: 'active',
+            probeEndpointType: 'response',
+            probeUserAgent: 'u'.repeat(600),
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        accounts: [],
+        accountTokens: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+      },
+    } as Record<string, unknown>);
+
+    expect(result.sections.accounts).toBe(true);
+
+    const restored = await db.select().from(schema.sites).where(eq(schema.sites.id, 501)).get();
+    expect(restored?.probeEndpointType).toBe('auto');
+    expect(restored?.probeUserAgent).toHaveLength(512);
+  });
+
+  it('restores a site that predates the probe profile columns', async () => {
+    const now = new Date().toISOString();
+    await backupService.importBackup({
+      version: '2.0',
+      timestamp: Date.now(),
+      type: 'accounts',
+      accounts: {
+        sites: [
+          {
+            id: 502,
+            name: 'legacy-site',
+            url: 'https://legacy.example.com',
+            platform: 'new-api',
+            status: 'active',
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        accounts: [],
+        accountTokens: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+      },
+    } as Record<string, unknown>);
+
+    const restored = await db.select().from(schema.sites).where(eq(schema.sites.id, 502)).get();
+    expect(restored?.probeEndpointType).toBe('auto');
+    expect(restored?.probeUserAgent).toBe('');
   });
 
   it('does not export runtime database config in preferences backups', async () => {

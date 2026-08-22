@@ -232,7 +232,10 @@ describe('site probe request profile fields', () => {
     expect(siteFormFromSite({ probeUserAgent: null }).probeUserAgent).toBe('');
   });
 
-  it('carries the probe profile through the save action payload', () => {
+  // buildSiteSaveAction is an identity wrapper, so this only pins the profile
+  // fields as accepted members of SiteSavePayload. The page-level payload builder
+  // in Sites.tsx does not send them yet; that is Task 7's job.
+  it('accepts the probe profile fields on the save payload type', () => {
     const action = buildSiteSaveAction(
       { mode: 'edit', editingSiteId: 7 },
       {

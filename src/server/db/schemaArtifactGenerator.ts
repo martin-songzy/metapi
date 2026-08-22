@@ -66,6 +66,26 @@ function isMysqlLargeTextColumn(tableName: string, columnName: string): boolean 
   return MYSQL_LARGE_TEXT_COLUMNS[tableName]?.has(columnName) ?? false;
 }
 
+/**
+ * A text column with a default becomes VARCHAR(191) below, because MySQL cannot
+ * put a DEFAULT on a TEXT column. That default width silently caps any column
+ * whose contract allows more than 191 characters: in strict mode an over-length
+ * write is ER_DATA_TOO_LONG (a 500), and in non-strict mode it is a silent
+ * truncation — exactly the cross-dialect divergence the schema contract exists
+ * to prevent. Widen the column here rather than shrinking the contract.
+ *
+ * Safe for widths above 191 only while the column carries no index: MySQL's
+ * 191-character prefix limit applies to indexed columns under utf8mb4.
+ */
+const MYSQL_TEXT_COLUMN_WIDTHS: Record<string, Readonly<Record<string, number>>> = {
+  sites: { probe_user_agent: 512 },
+};
+
+function mysqlTextColumnWidth(tableName: string | undefined, columnName: string): number {
+  if (!tableName) return 191;
+  return MYSQL_TEXT_COLUMN_WIDTHS[tableName]?.[columnName] ?? 191;
+}
+
 function mapColumnType(
   dialect: SqlDialect,
   columnName: string,
@@ -100,7 +120,9 @@ function mapColumnType(
       case 'json':
         return 'JSON';
       case 'text':
-        if (column.primaryKey || column.defaultValue != null) return 'VARCHAR(191)';
+        if (column.primaryKey || column.defaultValue != null) {
+          return `VARCHAR(${mysqlTextColumnWidth(tableName, columnName)})`;
+        }
         return tableName && isMysqlLargeTextColumn(tableName, columnName) ? 'LONGTEXT' : 'TEXT';
       default:
         return 'TEXT';

@@ -1,3 +1,11 @@
+import {
+  MODEL_PROBE_ENDPOINT_TYPES,
+  normalizeModelProbeEndpointType,
+  type ModelProbeEndpointType,
+} from '../../../shared/modelProbeEndpointTypes.js';
+
+export { MODEL_PROBE_ENDPOINT_TYPES, type ModelProbeEndpointType };
+
 export type SiteCustomHeaderField = {
   key: string;
   value: string;
@@ -11,17 +19,6 @@ export type SiteApiEndpointField = {
   lastFailureReason?: string | null;
 };
 
-/**
- * Mirrors MODEL_PROBE_ENDPOINT_TYPES in
- * src/server/contracts/modelProbePayloads.ts. Inlined rather than imported
- * because web pages must not import server modules (same reason
- * `postRefreshProbeScope` inlines its union below); the server contract is the
- * authority and rejects anything this list does not cover.
- */
-export const SITE_PROBE_ENDPOINT_TYPES = ['auto', 'chat', 'messages', 'responses'] as const;
-
-export type SiteProbeEndpointType = (typeof SITE_PROBE_ENDPOINT_TYPES)[number];
-
 export type SiteForm = {
   name: string;
   url: string;
@@ -32,7 +29,7 @@ export type SiteForm = {
   apiEndpoints: SiteApiEndpointField[];
   customHeaders: SiteCustomHeaderField[];
   globalWeight: string;
-  probeEndpointType: SiteProbeEndpointType;
+  probeEndpointType: ModelProbeEndpointType;
   probeUserAgent: string;
 };
 
@@ -61,7 +58,7 @@ export type SiteSavePayload = {
   postRefreshProbeLatencyThresholdMs?: number;
   // Optional so callers that do not edit the probe profile omit them, which the
   // server reads as "leave the stored profile alone".
-  probeEndpointType?: SiteProbeEndpointType;
+  probeEndpointType?: ModelProbeEndpointType;
   probeUserAgent?: string;
 };
 
@@ -100,10 +97,6 @@ export function emptySiteForm(): SiteForm {
     probeEndpointType: 'auto',
     probeUserAgent: '',
   };
-}
-
-function normalizeProbeEndpointTypeForEditor(raw: unknown): SiteProbeEndpointType {
-  return SITE_PROBE_ENDPOINT_TYPES.find((candidate) => candidate === raw) ?? 'auto';
 }
 
 function ensureSiteApiEndpointRows(rows: SiteApiEndpointField[]): SiteApiEndpointField[] {
@@ -183,7 +176,7 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     apiEndpoints: parseApiEndpointsForEditor(site.apiEndpoints),
     customHeaders: parseCustomHeadersForEditor(site.customHeaders),
     globalWeight,
-    probeEndpointType: normalizeProbeEndpointTypeForEditor(site.probeEndpointType),
+    probeEndpointType: normalizeModelProbeEndpointType(site.probeEndpointType),
     probeUserAgent: site.probeUserAgent ?? '',
   };
 }
