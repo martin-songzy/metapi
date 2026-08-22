@@ -48,6 +48,17 @@ import { compileInterestPatterns, matchesInterest } from './modelInterestFilter.
 import { chooseModelProbePrompt } from './modelProbePrompts.js';
 import { normalizeModelProbeEndpointType } from '../../shared/modelProbeEndpointTypes.js';
 
+/**
+ * Ceiling on how many models one manual `scope: 'all'` probe run may target.
+ *
+ * Probes run at concurrency 1 by default and each one is a real billed request, so
+ * an over-broad interest regex would otherwise turn one button press into a very
+ * long serial run against upstream quota. Exceeding this is reported as a
+ * caller-fixable error rather than silently truncated, because probing an
+ * arbitrary subset would produce verdicts for models the operator did not choose.
+ */
+const MAX_MANUAL_PROBE_TARGETS = 200;
+
 const API_TOKEN_DISCOVERY_TIMEOUT_MS = 8_000;
 const MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
 const MODEL_REFRESH_BATCH_SIZE = 3;
@@ -543,10 +554,33 @@ export async function probeSiteModels(
       }
       modelsToProbe = [found];
     } else {
-      const fallback = interestMatched[0] ?? discoveredModels[0];
-      if (!fallback) return failure(scope, '实时发现的模型列表为空，未执行探测');
+      // No explicit model: fall back to the first interest-matched one. It must be
+      // interest-matched — reaching past the filter to "any discovered model"
+      // would contradict the filter it just applied and probe something the
+      // operator never expressed interest in.
+      const fallback = interestMatched[0];
+      if (!fallback) {
+        return failure(
+          scope,
+          probeConfig.interestPatterns.length === 0
+            ? '未配置模型兴趣正则：请先在模型探测设置中添加正则，或显式指定要探测的模型'
+            : `实时发现的 ${discoveredModels.length} 个模型均未匹配模型兴趣正则，请调整正则或显式指定模型`,
+        );
+      }
       modelsToProbe = [fallback];
     }
+  }
+
+  // A hard ceiling on one manual run. Concurrency is deliberately 1 (a burst of
+  // parallel probes is exactly what upstream liveness-detection looks for), so a
+  // broad regex matching hundreds of models would mean a very long serial run
+  // against real quota. Refuse with the numbers needed to narrow the regex.
+  if (modelsToProbe.length > MAX_MANUAL_PROBE_TARGETS) {
+    return failure(
+      scope,
+      `本次匹配到 ${modelsToProbe.length} 个模型，超过单次上限 ${MAX_MANUAL_PROBE_TARGETS} 个`
+      + `（实时发现 ${discoveredModels.length} 个）。请收窄模型兴趣正则，或改用指定单个模型探测。`,
+    );
   }
 
   onProgress?.({
@@ -656,6 +690,11 @@ export async function probeSiteModels(
     details,
   };
 
+  // An aborted run writes nothing. The caller pressed stop and the SSE route
+  // suppresses the `complete` event, so disabling models here would change site
+  // configuration with no confirmation ever shown to the operator.
+  if (options?.signal?.aborted) return baseResult;
+
   // ONLY `unsupported` reaches the write path. `inconclusive` is excluded by
   // construction rather than by a later check, so no future edit can leak it in.
   const unsupportedModels = details
@@ -737,7 +776,12 @@ async function runPostRefreshProbeIfEnabled(params: {
 
   const scope = (params.site.postRefreshProbeScope === 'all' ? 'all' : 'single') as 'single' | 'all';
 
-  // Determine which models to probe
+  // Determine which models to probe.
+  //
+  // The interest regex is deliberately NOT applied here. It defaults to an empty
+  // list which matches nothing, so filtering this path would silently stop a
+  // feature that already ships enabled. scope 'all' therefore means every
+  // discovered model, unlike the manual path.
   let modelsToProbe: string[];
   if (scope === 'all') {
     modelsToProbe = params.discoveredModels;
@@ -749,17 +793,35 @@ async function runPostRefreshProbeIfEnabled(params: {
     modelsToProbe = [found];
   }
 
+  // The request profile (endpoint, UA) and the global probe settings (prompt pool,
+  // error keywords, timeout) apply to every probe. Ignoring them here would make
+  // the unattended path systematically less accurate than the manual one and let
+  // it disable models the manual path would have judged fine.
+  const probeConfig = await loadModelProbeConfig();
+  const userAgent = resolveModelProbeUserAgent(probeConfig, params.site.probeUserAgent);
+  const endpointType = normalizeModelProbeEndpointType(params.site.probeEndpointType);
+  const forcedEndpoint = endpointType === 'auto' ? undefined : endpointType as UpstreamEndpoint;
+
   // runPostRefreshProbeIfEnabled: apply latency threshold from site config
   const threshold = params.site.postRefreshProbeLatencyThresholdMs ?? 0;
   // Probe each model sequentially
-  const details: Array<{ modelName: string; status: RuntimeModelProbeStatus; latencyMs: number | null }> = [];
+  const details: Array<{
+    modelName: string;
+    status: RuntimeModelProbeStatus;
+    latencyMs: number | null;
+    latencyExceeded?: true;
+  }> = [];
   for (const modelName of modelsToProbe) {
     try {
       const result = await probeRuntimeModel({
         site: params.site,
         account: params.account,
         modelName,
-        timeoutMs: config.modelAvailabilityProbeTimeoutMs,
+        timeoutMs: probeConfig.timeoutMs,
+        prompt: chooseModelProbePrompt(probeConfig.prompts),
+        errorKeywords: probeConfig.errorKeywords,
+        ...(userAgent ? { userAgent } : {}),
+        ...(forcedEndpoint ? { forcedEndpoint } : {}),
       });
       const latencyExceeded = (
         result.status === 'supported'
@@ -768,7 +830,12 @@ async function runPostRefreshProbeIfEnabled(params: {
         && result.latencyMs > threshold
       );
       const effectiveStatus: RuntimeModelProbeStatus = latencyExceeded ? 'unsupported' : result.status;
-      details.push({ modelName, status: effectiveStatus, latencyMs: result.latencyMs });
+      details.push({
+        modelName,
+        status: effectiveStatus,
+        latencyMs: result.latencyMs,
+        ...(latencyExceeded ? { latencyExceeded: true as const } : {}),
+      });
     } catch (err) {
       console.warn(`[post-refresh-probe] probe failed for account ${params.account.id} model ${modelName}`, err);
       details.push({ modelName, status: 'inconclusive', latencyMs: null });
@@ -780,7 +847,14 @@ async function runPostRefreshProbeIfEnabled(params: {
   // unattended on every successful model refresh, so treating it as a failure
   // verdict is exactly how a transient upstream wobble used to permanently
   // disable working models.
-  const unsupportedModels = details.filter((d) => d.status === 'unsupported').map((d) => d.modelName);
+  //
+  // A latency breach is also excluded here, unlike on the manual path. Slowness is
+  // a routing-preference signal, not a verdict that the model is absent, and this
+  // path writes a SITE-level disable with nobody watching — so a working-but-slow
+  // model would be removed from the site for every account on it.
+  const unsupportedModels = details
+    .filter((d) => d.status === 'unsupported' && d.latencyExceeded !== true)
+    .map((d) => d.modelName);
   const inconclusiveCount = details.filter((d) => d.status === 'inconclusive').length;
   const disabledModels: string[] = [];
   if (unsupportedModels.length > 0) {
@@ -838,7 +912,9 @@ async function runPostRefreshProbeIfEnabled(params: {
   return {
     scope,
     probed: details.length,
-    unsupported: unsupportedModels.length,
+    // Reports every unsupported verdict, including latency breaches. Those are
+    // excluded from disabling above, not from reporting.
+    unsupported: details.filter((d) => d.status === 'unsupported').length,
     inconclusive: inconclusiveCount,
     details,
   };

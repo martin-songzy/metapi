@@ -718,6 +718,18 @@ export default function Sites() {
               addLog(`  ↳ 未同步到路由（探测结果不写库）: ${d.modelName}`, 'var(--color-text-muted)');
             }
           } else if (type === 'complete') {
+            // The route emits `complete` even for a refused run, so a failed
+            // result must be surfaced here. Without this, a fresh install with no
+            // interest patterns reads as "探测完成：0 个模型可用" and the
+            // actionable server-side reason never reaches the user.
+            if (d.success === false) {
+              const failMsg = d.error || '探测未执行';
+              addLog(failMsg, 'var(--color-error, #ef4444)');
+              toast.error(failMsg);
+              setTimeout(() => probeLogEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 30);
+              setProbeCompleted(true);
+              return;
+            }
             const summary = [
               `可用 ${d.supported ?? 0}`,
               `不可用 ${d.unsupported ?? 0}`,
@@ -1785,7 +1797,14 @@ export default function Sites() {
             <div style={{ marginTop: 16, padding: '14px', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-sm)', background: 'var(--color-bg)' }}>
               <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>模型主动探测</div>
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10 }}>
-                对模型发送一次真实请求来判定可用性。探测范围取「模型探测设置」里的兴趣正则；只有明确判定「不可用」的模型才可能被禁用，超时 / 限流 / 鉴权失败等「未确定」结果不会禁用任何模型。是否写回禁用列表与重建路由，取决于全局的「同步到路由」开关。
+                对模型发送一次真实请求来判定可用性。任何路径下，超时 / 限流 / 鉴权失败等「未确定」结果都不会禁用模型，手动添加的模型也不会被自动禁用。
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 10, lineHeight: 1.7 }}>
+                下面的「请求端点」与「User-Agent」对手动和自动探测都生效。两条路径的其余行为不同：
+                <br />
+                · <strong>手动「立即探测」</strong>：范围取「模型探测设置」里的兴趣正则；是否写回禁用列表与重建路由，取决于全局的「同步到路由」开关（默认关闭，即只看结果不改配置）。
+                <br />
+                · <strong>刷新后自动探测</strong>：探测全部已发现模型（不使用兴趣正则，否则默认的空正则会直接停掉该功能）；判定不可用会直接写入站点禁用列表，<strong>不受「同步到路由」开关约束</strong>。延迟超阈值不会在此路径下禁用模型。
               </div>
               <div style={{ display: 'grid', gap: 8, marginBottom: 12 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1837,7 +1856,7 @@ export default function Sites() {
                 the automatic toggle.
               */}
               <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-                {([['single', '指定模型'] , ['all', '兴趣正则匹配的全部模型']] as const).map(([val, label]) => (
+                {([['single', '指定模型'] , ['all', '全部模型']] as const).map(([val, label]) => (
                   <label
                     key={val}
                     style={{
@@ -1864,7 +1883,7 @@ export default function Sites() {
               {probeScope === 'single' && (
                 <input
                   type="text"
-                  placeholder="探测模型名（留空则自动取第一个匹配兴趣正则的模型）"
+                  placeholder="探测模型名（留空：手动路径取第一个匹配兴趣正则的模型，自动路径取第一个已发现模型）"
                   value={probeModel}
                   onChange={(e) => setProbeModel(e.target.value)}
                   style={{
@@ -1891,7 +1910,9 @@ export default function Sites() {
                     background: 'var(--color-bg)', color: 'var(--color-text-primary)',
                   }}
                 />
-                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>ms（响应超过该时间即判定不可用，0=不限）</span>
+                <span style={{ fontSize: 11, color: 'var(--color-text-muted)' }}>
+                  ms（响应超过该时间判定为不可用，0=不限；仅手动路径会据此禁用模型）
+                </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <button

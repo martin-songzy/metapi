@@ -30,6 +30,7 @@ vi.mock('./runtimeModelProbe.js', () => ({
   probeRuntimeModel: (...args: unknown[]) => probeRuntimeModelMock(...args),
 }));
 
+
 type DbModule = typeof import('../db/index.js');
 type ModelServiceModule = typeof import('./modelService.js');
 type ProbeConfigModule = typeof import('./modelProbeConfigService.js');
@@ -577,5 +578,71 @@ describe('probeSiteModels routing-independent semantics', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBeTruthy();
     expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses scope single with no explicit model rather than probing an unmatched one', async () => {
+    const { site, account } = await seedSite();
+    await saveModelProbeConfig({
+      ...getDefaultModelProbeConfig(),
+      interestPatterns: ['^claude-'],
+    });
+    mockDiscovery(site, account, ['gpt-4o', 'gemini-2.5-pro']);
+
+    const result = await probeSiteModels(site.id, { scope: 'single' });
+
+    expect(result.success).toBe(false);
+    // Reaching past the interest filter to "any discovered model" would probe
+    // something the operator never expressed interest in.
+    expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a manual run whose interest regex matches more models than the per-run cap', async () => {
+    const { site, account } = await seedSite();
+    await saveModelProbeConfig({
+      ...getDefaultModelProbeConfig(),
+      interestPatterns: ['.'],
+    });
+    const many = Array.from({ length: 201 }, (_, index) => `model-${index}`);
+    mockDiscovery(site, account, many);
+
+    const result = await probeSiteModels(site.id, { scope: 'all' });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('201');
+    expect(result.error).toContain('200');
+    expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+  });
+
+  it('writes nothing when the run was aborted, even with routing sync enabled', async () => {
+    const { site, account } = await seedSite();
+    await enableRoutingSync();
+    await seedRoutableKeeperModel(account.id);
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'ghost-model',
+      available: true,
+    }).run();
+
+    mockDiscovery(site, account, ['ghost-model']);
+    const controller = new AbortController();
+    probeRuntimeModelMock.mockImplementation(async () => {
+      // Abort mid-run, the way a client disconnect does.
+      controller.abort();
+      return probeResult({
+        status: 'unsupported',
+        reason: 'no such model',
+        httpStatus: 404,
+        failureKind: 'model_missing',
+      });
+    });
+
+    const result = await probeSiteModels(site.id, { scope: 'all', signal: controller.signal });
+
+    expect(result.routingSynced).toBe(false);
+    expect(result.disabled).toBe(0);
+    // The SSE route suppresses `complete` on abort, so a write here would change
+    // site config with no confirmation ever shown.
+    expect(await db.select().from(schema.siteDisabledModels).all()).toEqual([]);
+    expect(await routeCount()).toBe(0);
   });
 });
