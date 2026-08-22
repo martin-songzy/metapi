@@ -1,5 +1,6 @@
 ﻿import Database from 'better-sqlite3';
 import currentSchemaContract from '../db/generated/schemaContract.json' with { type: 'json' };
+import { MAX_PROBE_USER_AGENT_LENGTH } from '../contracts/modelProbePayloads.js';
 import { db, schema } from '../db/index.js';
 import {
   createRuntimeSchemaClient,
@@ -327,7 +328,7 @@ function buildStatements(
   for (const row of snapshot.accounts.sites) {
     statements.push({
       table: 'sites',
-      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'created_at', 'updated_at'],
+      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'post_refresh_probe_enabled', 'post_refresh_probe_model', 'post_refresh_probe_scope', 'post_refresh_probe_latency_threshold_ms', 'probe_endpoint_type', 'probe_user_agent', 'created_at', 'updated_at'],
       values: [
         asNumber(row.id, 0),
         asNullableString(row.name),
@@ -342,6 +343,18 @@ function buildStatements(
         asNumber(row.sortOrder, 0),
         asNumber(row.globalWeight, 1),
         asNullableString(row.apiKey),
+        asBoolean(row.postRefreshProbeEnabled, false),
+        asNullableString(row.postRefreshProbeModel) ?? '',
+        row.postRefreshProbeScope === 'all' ? 'all' : 'single',
+        asNumber(row.postRefreshProbeLatencyThresholdMs, 0),
+        // Defaulted rather than passed through: both columns are NOT NULL, and a
+        // row copied from a database predating them carries no value.
+        asNullableString(row.probeEndpointType) ?? 'auto',
+        // Capped because this is the cross-dialect boundary: SQLite stores
+        // unbounded TEXT while the MySQL column is VARCHAR(512), so an over-long
+        // agent would either abort the migration with ER_DATA_TOO_LONG or be
+        // truncated silently depending on strict mode.
+        (asNullableString(row.probeUserAgent) ?? '').slice(0, MAX_PROBE_USER_AGENT_LENGTH),
         asNullableString(row.createdAt),
         asNullableString(row.updatedAt),
       ],

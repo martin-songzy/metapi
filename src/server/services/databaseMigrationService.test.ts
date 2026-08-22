@@ -203,6 +203,181 @@ describe('databaseMigrationService', () => {
     ).toBe(true);
   });
 
+  it('carries every site probe column through a migration', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [{
+          id: 3,
+          name: 'probe-site',
+          url: 'https://probe.example.com',
+          platform: 'new-api',
+          status: 'active',
+          postRefreshProbeEnabled: true,
+          postRefreshProbeModel: 'claude-opus-4-6',
+          postRefreshProbeScope: 'all',
+          postRefreshProbeLatencyThresholdMs: 4500,
+          probeEndpointType: 'messages',
+          probeUserAgent: 'claude-cli/2.1.63 (external, cli)',
+          createdAt: '2026-03-14T00:00:00.000Z',
+          updatedAt: '2026-03-14T01:00:00.000Z',
+        }],
+        siteApiEndpoints: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        modelProbeResults: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: { settings: [] },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'sites');
+    const valueOf = (column: string) => statement?.values[statement.columns.indexOf(column)];
+
+    // Every one of these was absent from the column list, so migrating a database
+    // silently reset all six to their defaults. Deleting any single line below
+    // must fail this test.
+    expect(valueOf('post_refresh_probe_enabled')).toBe(true);
+    expect(valueOf('post_refresh_probe_model')).toBe('claude-opus-4-6');
+    expect(valueOf('post_refresh_probe_scope')).toBe('all');
+    expect(valueOf('post_refresh_probe_latency_threshold_ms')).toBe(4500);
+    expect(valueOf('probe_endpoint_type')).toBe('messages');
+    expect(valueOf('probe_user_agent')).toBe('claude-cli/2.1.63 (external, cli)');
+  });
+
+  it('keeps a not-null site probe column from migrating as null', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        // A row from a database that predates these columns carries no value at
+        // all; probe_endpoint_type and probe_user_agent are NOT NULL, so a bare
+        // passthrough would fail the insert on the target.
+        sites: [{ id: 4, name: 'legacy', url: 'https://legacy.example.com', platform: 'new-api' }],
+        siteApiEndpoints: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        modelProbeResults: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: { settings: [] },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'sites');
+    const valueOf = (column: string) => statement?.values[statement.columns.indexOf(column)];
+
+    expect(valueOf('probe_endpoint_type')).toBe('auto');
+    expect(valueOf('probe_user_agent')).toBe('');
+    expect(valueOf('post_refresh_probe_scope')).toBe('single');
+    expect(valueOf('post_refresh_probe_latency_threshold_ms')).toBe(0);
+  });
+
+  it('caps an over-long probe user agent so the value survives every dialect', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        // SQLite stores unbounded TEXT, but the MySQL column is VARCHAR(512):
+        // uncapped, this row either aborts the migration with ER_DATA_TOO_LONG or
+        // is silently truncated depending on strict mode.
+        sites: [{
+          id: 5,
+          name: 'long-agent',
+          url: 'https://long-agent.example.com',
+          platform: 'new-api',
+          probeUserAgent: 'u'.repeat(900),
+        }],
+        siteApiEndpoints: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        modelProbeResults: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: { settings: [] },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'sites');
+    const value = statement?.values[statement.columns.indexOf('probe_user_agent')];
+    expect(typeof value === 'string' && value.length).toBe(512);
+  });
+
+  it('caps the migrated probe user agent at the contract length', async () => {
+    const { MAX_PROBE_USER_AGENT_LENGTH } = await import('../contracts/modelProbePayloads.js');
+    expect(MAX_PROBE_USER_AGENT_LENGTH).toBe(512);
+  });
+
+  it('migrates every sites column the schema contract declares', () => {
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      accounts: {
+        sites: [{ id: 1, name: 'x', url: 'https://x.example.com', platform: 'new-api' }],
+        siteApiEndpoints: [],
+        siteAnnouncements: [],
+        siteDisabledModels: [],
+        accounts: [],
+        accountTokens: [],
+        checkinLogs: [],
+        modelAvailability: [],
+        tokenModelAvailability: [],
+        modelProbeResults: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        proxyLogs: [],
+        proxyVideoTasks: [],
+        proxyFiles: [],
+        downstreamApiKeys: [],
+        events: [],
+      },
+      preferences: { settings: [] },
+    } as any);
+
+    const statement = statements.find((item) => item.table === 'sites');
+    const contractColumns = Object.keys(currentContract.tables.sites.columns).sort();
+    // This hand-maintained list has already drifted behind the schema once, and
+    // the only symptom was users quietly losing configuration on a database
+    // migration. Adding a sites column now fails here instead.
+    expect([...(statement?.columns ?? [])].sort()).toEqual(contractColumns);
+  });
+
   it('includes useSystemProxy and customHeaders when building site migration statements', () => {
     const statements = __databaseMigrationServiceTestUtils.buildStatements({
       version: 'test',
@@ -1155,6 +1330,64 @@ describe('databaseMigrationService', () => {
     expect(valueOf('latency_ms')).toBeNull();
     expect(valueOf('http_status')).toBeNull();
     expect(valueOf('failure_kind')).toBe('timeout');
+  });
+
+  // Every column omitted here is a column that silently reverts to its default
+// when a user migrates their database. These six tables were already drifted
+  // before the probe work started; they are recorded rather than fixed so that
+  // *new* drift fails this test instead of hiding among them. Fixing one means
+  // deleting its entry, and this test will say so.
+  const KNOWN_COLUMN_DRIFT: Record<string, string[]> = {
+    accounts: ['oauth_provider', 'oauth_account_key', 'oauth_project_id'],
+    downstream_api_keys: ['group_name', 'tags'],
+    model_availability: ['is_manual'],
+    proxy_logs: [
+      'client_family',
+      'client_app_id',
+      'client_app_name',
+      'client_confidence',
+      'is_stream',
+      'first_byte_latency_ms',
+    ],
+    route_channels: ['oauth_route_unit_id'],
+  };
+
+  it('does not add new column drift between the contract and the migration inserts', () => {
+    const tableKeys = [
+      'sites', 'siteApiEndpoints', 'siteAnnouncements', 'siteDisabledModels', 'accounts',
+      'accountTokens', 'checkinLogs', 'modelAvailability', 'tokenModelAvailability',
+      'modelProbeResults', 'tokenRoutes', 'routeChannels', 'routeGroupSources', 'proxyLogs',
+      'proxyVideoTasks', 'proxyFiles', 'downstreamApiKeys', 'events',
+    ];
+    const statements = __databaseMigrationServiceTestUtils.buildStatements({
+      version: 'test',
+      timestamp: Date.now(),
+      // One placeholder row per table is enough: only the column list is read.
+      accounts: Object.fromEntries(tableKeys.map((key) => [key, [{ id: 1 }]])),
+      preferences: { settings: [{ key: 'k', value: 'v' }] },
+    } as any);
+
+    const unexpected: string[] = [];
+    const fixedButStillListed: string[] = [];
+
+    for (const statement of statements) {
+      const contractColumns = Object.keys(
+        (currentContract.tables as Record<string, { columns: Record<string, unknown> }>)[statement.table]?.columns ?? {},
+      );
+      if (contractColumns.length === 0) continue;
+      const allowed = new Set(KNOWN_COLUMN_DRIFT[statement.table] ?? []);
+      const missing = contractColumns.filter((column) => !statement.columns.includes(column));
+
+      for (const column of missing) {
+        if (!allowed.has(column)) unexpected.push(`${statement.table}.${column}`);
+      }
+      for (const column of allowed) {
+        if (!missing.includes(column)) fixedButStillListed.push(`${statement.table}.${column}`);
+      }
+    }
+
+    expect(unexpected, 'new column drift: add these to the migration insert').toEqual([]);
+    expect(fixedButStillListed, 'now migrated: delete these from KNOWN_COLUMN_DRIFT').toEqual([]);
   });
 
   it('clears probe results and resets their postgres sequence when migrating', async () => {
