@@ -60,6 +60,17 @@ const DEFAULT_USER_AGENT_PRESETS: readonly ModelProbeUserAgentPreset[] = [
  * An earlier revision returned `unsupported` for any top-level `error` before
  * reaching the list at all, which made this narrowing ineffective on the
  * commonest relay error shape; that branch is now keyword-gated.
+ *
+ * Two properties of the matching itself, both load-bearing for a CJK list like
+ * this one:
+ *
+ * - It matches DECODED text, so a keyword written here in characters still hits an
+ *   upstream that emits `\uXXXX`. Python escapes non-ASCII by default, so the
+ *   five CJK entries below would otherwise never have matched such a relay.
+ * - On the top-level-error branch it searches the ANNOUNCED ERROR only, not the
+ *   whole body, so a keyword appearing in a model name or an echoed prompt cannot
+ *   promote an account-level error to `unsupported`. The other branches have no
+ *   error to scope to and still search the whole body.
  */
 const DEFAULT_ERROR_KEYWORDS: readonly string[] = [
   'no available channel',
