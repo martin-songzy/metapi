@@ -242,6 +242,26 @@ Adapters cover shared capabilities such as model discovery, balance access, toke
   <p><sub>Model Marketplace — browse all available models' coverage, pricing, and performance metrics in one place</sub></p>
 </div>
 
+### Active Model Probing
+
+Fetches each site's model list with that site's own API key, filters it by your regex interest patterns, then verifies each match by **sending a real request**. Relay sites commonly answer HTTP 200 with an error body, so a status-code-only liveness check reports dead models as available.
+
+**Runs only when you trigger it** — every probe spends account quota, so nothing runs on a schedule.
+
+Three verdicts, separating "the model is missing" from "the account has a problem":
+
+| Verdict          | Meaning                            | Side effect                  |
+| ---------------- | ---------------------------------- | ---------------------------- |
+| **Supported**    | Returned protocol-native content   | none                         |
+| **Unsupported**  | Matched the error keyword list     | writes site-disabled models  |
+| **Inconclusive** | An error it could not attribute    | **writes nothing**           |
+
+`site_disabled_models` is keyed by **site**, not by account, and never auto-clears — so one wrong verdict costs every account on that site the use of that model. The default keyword list therefore carries model-absence wording only; account-level failures (insufficient balance, rate limits, invalid key) all land on Inconclusive. To make a particular error phrasing count as unsupported, add it to the keyword list.
+
+- **Configuration**: interest patterns, a randomized probe-word table (avoids the fixed `hi`/`hello` that sites flag as liveness probing), User-Agent (Claude Code and Codex built in, custom supported), endpoint type (chat / messages / responses), proxy, concurrency and timeout. Endpoint type and User-Agent are configurable per site.
+- **Running**: past a threshold it asks for confirmation and states how many real requests it will send; a hard cap of 300 refuses outright and tells you to narrow the regex. A sweep can be cancelled mid-run — finished results are kept and marked cancelled rather than presented as a complete sweep.
+- **Results**: filter by model or site, sort by response time or site balance, persisted and included in backup/restore. Unmeasured rows (timeouts, unknown balance) sort last in **both** directions.
+
 ### Auto Check-in
 
 - Cron-scheduled automatic check-in (default: daily at 08:00)
