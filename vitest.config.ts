@@ -4,7 +4,15 @@ export default defineConfig({
   test: {
     exclude: [
       ...configDefaults.exclude,
+      // Two locations, because this repo has used both. `.claude/worktrees/` is
+      // where worktrees are actually created today, and `.worktrees/` alone does
+      // NOT match it — a leading-segment glob is not a substring match. That gap
+      // was observed in the wild: a run from the shared checkout collected both
+      // `src/server/db/schemaUpgrade.live.test.ts` and
+      // `.claude/worktrees/active-model-probe/src/server/db/schemaUpgrade.live.test.ts`,
+      // so every suite ran twice against two different commits of the same repo.
       '.worktrees/**',
+      '.claude/worktrees/**',
       // `tmp/` is the gitignored scratch area agents and reviewers use for
       // throwaway sandboxes, and a sandbox is usually a COPY of `src/` plus its
       // own `package.json`. Without this, `npm test` collects those copies and
