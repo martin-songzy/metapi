@@ -20,7 +20,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: DB_TYPE
-        value: mysql
+        value: postgres
       - key: DB_URL
         sync: false
       - key: DB_SSL
