@@ -235,17 +235,36 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
           </div>
 
           <div>
-            <div style={fieldLabelStyle}>并发数</div>
+            <div style={fieldLabelStyle}>站点间并发</div>
             <input
               type="number"
-              data-testid="model-probe-concurrency"
-              value={draft.concurrencyText}
-              min={limits.minConcurrency}
-              max={limits.maxConcurrency}
-              onChange={(event) => setDraft((prev) => ({ ...prev, concurrencyText: event.target.value }))}
+              data-testid="model-probe-site-concurrency"
+              value={draft.siteConcurrencyText}
+              min={limits.minSiteConcurrency}
+              max={limits.maxSiteConcurrency}
+              onChange={(event) => setDraft((prev) => ({ ...prev, siteConcurrencyText: event.target.value }))}
               style={numberInputStyle}
             />
-            <div style={hintStyle}>{limits.minConcurrency} ~ {limits.maxConcurrency}。</div>
+            <div style={hintStyle}>
+              {limits.minSiteConcurrency} ~ {limits.maxSiteConcurrency}。同时探测多少个不同站点。
+            </div>
+          </div>
+
+          <div>
+            <div style={fieldLabelStyle}>站点内模型并发</div>
+            <input
+              type="number"
+              data-testid="model-probe-model-concurrency"
+              value={draft.modelConcurrencyText}
+              min={limits.minModelConcurrency}
+              max={limits.maxModelConcurrency}
+              onChange={(event) => setDraft((prev) => ({ ...prev, modelConcurrencyText: event.target.value }))}
+              style={numberInputStyle}
+            />
+            <div style={hintStyle}>
+              {limits.minModelConcurrency} ~ {limits.maxModelConcurrency}。同一个站点内同时探测多少个模型；
+              对单站突发太高容易触发限流。两项相乘即同时在飞的请求数，全部计费。
+            </div>
           </div>
 
           <div>

@@ -60,7 +60,8 @@ function buildConfig(overrides: Record<string, unknown> = {}) {
     ],
     defaultUserAgentId: 'claude-code',
     errorKeywords: ['no available channel'],
-    concurrency: 3,
+    siteConcurrency: 3,
+    modelConcurrency: 2,
     timeoutMs: 15_000,
     maxTokens: 77,
     syncToRouting: false,
@@ -75,8 +76,10 @@ function buildConfig(overrides: Record<string, unknown> = {}) {
  * prompt / keyword / concurrency / timeout hints be hard-coded silently.
  */
 const PRODUCTION_LIMITS = {
-  minConcurrency: 1,
-  maxConcurrency: 8,
+  minSiteConcurrency: 1,
+  maxSiteConcurrency: 10,
+  minModelConcurrency: 1,
+  maxModelConcurrency: 8,
   minTimeoutMs: 3_000,
   maxTimeoutMs: 60_000,
   minMaxTokens: 1,
@@ -91,8 +94,10 @@ const PRODUCTION_LIMITS = {
 
 function buildLimits(overrides: Record<string, unknown> = {}) {
   return {
-    minConcurrency: 2,
-    maxConcurrency: 6,
+    minSiteConcurrency: 2,
+    maxSiteConcurrency: 7,
+    minModelConcurrency: 2,
+    maxModelConcurrency: 6,
     minTimeoutMs: 4_000,
     maxTimeoutMs: 41_000,
     minMaxTokens: 2,
@@ -354,7 +359,8 @@ describe('ModelProbe global configuration panel', () => {
         userAgents: buildConfig().userAgents,
         defaultUserAgentId: 'claude-code',
         errorKeywords: ['no available channel'],
-        concurrency: 3,
+        siteConcurrency: 3,
+        modelConcurrency: 2,
         timeoutMs: 15_000,
         maxTokens: 77,
         syncToRouting: false,
@@ -395,13 +401,15 @@ describe('ModelProbe global configuration panel', () => {
     return calls[calls.length - 1][0] as Record<string, number>;
   }
 
-  it('clamps concurrency to the server-reported bounds, not to hard-coded ones', async () => {
+  it('clamps both concurrency axes to the server-reported bounds, not hard-coded ones', async () => {
     const root = await renderPage();
     try {
-      // Hard-coding 1..8 would clamp these to 8 and 1 instead, saving a value
-      // the operator never chose and never saw.
-      expect((await saveWith(root.root, 'model-probe-concurrency', '9')).concurrency).toBe(6);
-      expect((await saveWith(root.root, 'model-probe-concurrency', '1')).concurrency).toBe(2);
+      // Hard-coding the production bounds (1..10 sites, 1..8 models) would clamp
+      // these differently — the fixture deliberately reports 2..7 / 2..6.
+      expect((await saveWith(root.root, 'model-probe-site-concurrency', '99')).siteConcurrency).toBe(7);
+      expect((await saveWith(root.root, 'model-probe-site-concurrency', '0')).siteConcurrency).toBe(2);
+      expect((await saveWith(root.root, 'model-probe-model-concurrency', '99')).modelConcurrency).toBe(6);
+      expect((await saveWith(root.root, 'model-probe-model-concurrency', '1')).modelConcurrency).toBe(2);
     } finally {
       root.unmount();
     }
@@ -425,14 +433,15 @@ describe('ModelProbe global configuration panel', () => {
    * clearing the timeout used to install a 3s probe timeout — short enough to
    * time out slow-but-working models and report them as unavailable.
    *
-   * The fixture's saved config (concurrency 3, timeoutMs 15000) shares no value
-   * with the fixture's bounds (2..6, 4000..41000), so falling back to either
-   * bound, or to a hard-coded 1 / 15000 / 3000, fails these.
+   * The fixture's saved config (site 3 / model 2, timeoutMs 15000) shares no value
+   * with the fixture's bounds (2..7 / 2..6, 4000..41000), so falling back to either
+   * bound, or to a hard-coded default, fails these.
    */
   it('keeps the saved value when a numeric field is cleared, rather than dropping to the minimum', async () => {
     const root = await renderPage();
     try {
-      expect((await saveWith(root.root, 'model-probe-concurrency', '')).concurrency).toBe(3);
+      expect((await saveWith(root.root, 'model-probe-site-concurrency', '')).siteConcurrency).toBe(3);
+      expect((await saveWith(root.root, 'model-probe-model-concurrency', '')).modelConcurrency).toBe(2);
 
       const timeout = (await saveWith(root.root, 'model-probe-timeout', '')).timeoutMs;
       expect(timeout).toBe(15_000);
@@ -449,7 +458,7 @@ describe('ModelProbe global configuration panel', () => {
     const root = await renderPage();
     try {
       expect((await saveWith(root.root, 'model-probe-timeout', 'abc')).timeoutMs).toBe(15_000);
-      expect((await saveWith(root.root, 'model-probe-concurrency', '   ')).concurrency).toBe(3);
+      expect((await saveWith(root.root, 'model-probe-model-concurrency', '   ')).modelConcurrency).toBe(2);
     } finally {
       root.unmount();
     }

@@ -601,7 +601,10 @@ export async function probeSiteModels(
   // verdict describes the endpoint the operator chose.
   const forcedEndpoint = endpointType === 'auto' ? undefined : endpointType as UpstreamEndpoint;
 
-  const concurrency = Math.max(1, options?.concurrency ?? probeConfig.concurrency);
+  // Single-site path: the pool spans one site's models, so this is the per-site
+  // axis. An explicit options override (used by callers that deliberately
+  // serialize, e.g. post-refresh probes behind a refresh) still wins.
+  const concurrency = Math.max(1, options?.concurrency ?? probeConfig.modelConcurrency);
   const threshold = options?.latencyThresholdMs ?? 0;
   const detailsMap = new Map<string, ProbeSiteModelDetail>();
 

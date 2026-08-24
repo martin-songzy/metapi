@@ -322,12 +322,14 @@ describe('active model probe end to end', () => {
       errorKeywords: ['probe-restart-keyword'],
       userAgents: [{ id: 'restart-preset', label: 'Restart', value: 'metapi-restart-ua/1.0' }],
       defaultUserAgentId: 'restart-preset',
-      concurrency: 3,
+      siteConcurrency: 3,
+      modelConcurrency: 2,
       timeoutMs: 21_000,
       maxTokens: 777,
       syncToRouting: true,
     });
-    expect(saved.concurrency).toBe(3);
+    expect(saved.siteConcurrency).toBe(3);
+    expect(saved.modelConcurrency).toBe(2);
 
     // Stop the instance and drop the whole module graph, then boot again. The new
     // graph opens a new database handle, so what comes back was read off disk.
@@ -344,7 +346,8 @@ describe('active model probe end to end', () => {
       prompts: ['probe-restart-prompt'],
       errorKeywords: ['probe-restart-keyword'],
       defaultUserAgentId: 'restart-preset',
-      concurrency: 3,
+      siteConcurrency: 3,
+      modelConcurrency: 2,
       timeoutMs: 21_000,
       maxTokens: 777,
       syncToRouting: true,
@@ -540,7 +543,7 @@ describe('active model probe end to end', () => {
     // assertion below can be satisfied by a single shared ordering.
     await insertAccount(fastSiteId, { balance: 99, username: 'fast-account' });
     await insertAccount(slowSiteId, { balance: 1, username: 'slow-account' });
-    await putConfig({ interestPatterns: ['^probe-model$'], concurrency: 2 });
+    await putConfig({ interestPatterns: ['^probe-model$'], siteConcurrency: 1, modelConcurrency: 2 });
 
     upstreamModels = ['probe-model'];
     // A real server-side delay on one site only, so the stored latencies are
@@ -599,7 +602,7 @@ describe('active model probe end to end', () => {
     await insertAccount(unknownSiteId, { balance: null, username: 'unknown-account' });
     // `^probe-` matches both, so each site yields one measured row and one skipped
     // row.
-    await putConfig({ interestPatterns: ['^probe-'], concurrency: 2 });
+    await putConfig({ interestPatterns: ['^probe-'], siteConcurrency: 1, modelConcurrency: 2 });
 
     upstreamModels = ['probe-model', 'probe-embedding'];
     probeResponder = () => chatOk();
@@ -739,7 +742,7 @@ describe('active model probe end to end', () => {
   it('stops a running sweep on request and reports it as cancelled, not completed', async () => {
     const siteId = await insertSite({ slug: 'cancel', name: 'Cancel Site', probeEndpointType: 'chat' });
     await insertAccount(siteId);
-    await putConfig({ interestPatterns: ['^probe-slow-'], concurrency: 1 });
+    await putConfig({ interestPatterns: ['^probe-slow-'], siteConcurrency: 1, modelConcurrency: 1 });
 
     const modelCount = 8;
     upstreamModels = Array.from({ length: modelCount }, (_, index) => `probe-slow-${index}`);
@@ -792,7 +795,7 @@ describe('active model probe end to end', () => {
     const siteId = await insertSite({ slug: 'prompts', name: 'Prompt Site', probeEndpointType: 'chat' });
     await insertAccount(siteId);
     const configuredPrompts = ['probe-prompt-alpha', 'probe-prompt-beta'];
-    await putConfig({ interestPatterns: ['^probe-model-'], prompts: configuredPrompts, concurrency: 2 });
+    await putConfig({ interestPatterns: ['^probe-model-'], prompts: configuredPrompts, siteConcurrency: 1, modelConcurrency: 2 });
 
     upstreamModels = Array.from({ length: 8 }, (_, index) => `probe-model-${index}`);
     await runProbe();

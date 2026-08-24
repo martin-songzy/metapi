@@ -527,7 +527,7 @@ async function discoverAcrossSites(input: {
 
   await mapWithConcurrency(
     input.sites,
-    Math.max(input.probeConfig.concurrency, DISCOVERY_MIN_CONCURRENCY),
+    Math.max(input.probeConfig.siteConcurrency, DISCOVERY_MIN_CONCURRENCY),
     async (site) => {
       try {
         const discovery = await discoverModelsForActiveProbe({
@@ -734,7 +734,7 @@ async function runActiveModelProbe(
     }));
   }
 
-  log(`共 ${outcomes.length} 个站点、${targets.length} 个模型待探测，并发 ${probeConfig.concurrency}`);
+  log(`共 ${outcomes.length} 个站点、${targets.length} 个模型待探测，站点间并发 ${probeConfig.siteConcurrency}、站点内并发 ${probeConfig.modelConcurrency}`);
 
   type ProbeOutcome = {
     site: SiteRow;
@@ -744,7 +744,28 @@ async function runActiveModelProbe(
   };
   const probeOutcomes: ProbeOutcome[] = [];
 
-  await mapWithConcurrency(targets, probeConfig.concurrency, async (target) => {
+  // Two-axis concurrency: SITES fan out in the outer pool, and within each site
+  // its models run in an inner pool. A single flat pool could not express "fan
+  // out across relays, but stay gentle inside any one relay" — a burst against
+  // one site's channel pool for one token group is what gets keys throttled, while
+  // parallel different-site traffic is normally fine. The cancel check below sits
+  // in the INNER callback, the smallest scheduling unit, so a cancel still lands
+  // within one probe.
+  //
+  // The probe body below keeps its original (single-pool) indentation to keep this
+  // diff reviewable; it now runs one level deeper.
+  const targetsBySite = new Map<number, typeof targets>();
+  for (const target of targets) {
+    const siteId = target.discovery.site.id;
+    const bucket = targetsBySite.get(siteId);
+    if (bucket) bucket.push(target);
+    else targetsBySite.set(siteId, [target]);
+  }
+
+  await mapWithConcurrency(
+    [...targetsBySite.values()],
+    probeConfig.siteConcurrency,
+    async (siteTargets) => mapWithConcurrency(siteTargets, probeConfig.modelConcurrency, async (target) => {
     // Checked per target rather than once, so a cancel lands within one probe
     // instead of at the end of the sweep. Every target after the flag is set
     // costs nothing, which is the whole point.
@@ -829,7 +850,8 @@ async function runActiveModelProbe(
       + (httpStatus != null ? ` HTTP ${httpStatus}` : '')
       + (failureKind ? ` (${failureKind})` : ''),
     );
-  });
+      }),
+  );
 
   const counts = {
     supported: probeOutcomes.filter((outcome) => outcome.status === 'supported').length,

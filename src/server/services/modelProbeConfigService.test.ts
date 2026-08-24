@@ -72,9 +72,10 @@ describe('modelProbeConfigService', () => {
       expect(config.defaultUserAgentId).toBe('claude-code');
     });
 
-    it('defaults concurrency to 1 and timeout to 15000', () => {
+    it('defaults site concurrency to 5, model concurrency to 1, timeout to 15000', () => {
       const config = service.getDefaultModelProbeConfig();
-      expect(config.concurrency).toBe(1);
+      expect(config.siteConcurrency).toBe(5);
+      expect(config.modelConcurrency).toBe(1);
       expect(config.timeoutMs).toBe(15000);
     });
 
@@ -159,12 +160,18 @@ describe('modelProbeConfigService', () => {
       expect(service.normalizeModelProbeConfig('nope')).toEqual(service.getDefaultModelProbeConfig());
     });
 
-    it('clamps concurrency into 1..8 and timeout into 3000..60000', () => {
-      expect(service.normalizeModelProbeConfig({ concurrency: 0 }).concurrency).toBe(1);
-      expect(service.normalizeModelProbeConfig({ concurrency: -5 }).concurrency).toBe(1);
-      expect(service.normalizeModelProbeConfig({ concurrency: 99 }).concurrency).toBe(8);
-      expect(service.normalizeModelProbeConfig({ concurrency: 3.7 }).concurrency).toBe(3);
-      expect(service.normalizeModelProbeConfig({ concurrency: 'x' }).concurrency).toBe(1);
+    it('clamps both concurrency axes and the timeout into their bounds', () => {
+      // Site axis: 1..10.
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: 0 }).siteConcurrency).toBe(1);
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: -5 }).siteConcurrency).toBe(1);
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: 99 }).siteConcurrency).toBe(10);
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: 3.7 }).siteConcurrency).toBe(3);
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: 'x' }).siteConcurrency).toBe(5);
+
+      // Model axis: 1..8, same shape as before the split.
+      expect(service.normalizeModelProbeConfig({ modelConcurrency: 0 }).modelConcurrency).toBe(1);
+      expect(service.normalizeModelProbeConfig({ modelConcurrency: 99 }).modelConcurrency).toBe(8);
+      expect(service.normalizeModelProbeConfig({ modelConcurrency: 3.7 }).modelConcurrency).toBe(3);
 
       expect(service.normalizeModelProbeConfig({ timeoutMs: 10 }).timeoutMs).toBe(3000);
       expect(service.normalizeModelProbeConfig({ timeoutMs: 999999 }).timeoutMs).toBe(60000);
@@ -184,14 +191,30 @@ describe('modelProbeConfigService', () => {
     it('falls back to defaults instead of clamping empty-ish numeric fields to the floor', () => {
       for (const blank of [null, undefined, '', '   ', [], false, {}]) {
         expect(service.normalizeModelProbeConfig({ timeoutMs: blank }).timeoutMs).toBe(15000);
-        expect(service.normalizeModelProbeConfig({ concurrency: blank }).concurrency).toBe(1);
+        expect(service.normalizeModelProbeConfig({ siteConcurrency: blank }).siteConcurrency).toBe(5);
+        expect(service.normalizeModelProbeConfig({ modelConcurrency: blank }).modelConcurrency).toBe(1);
         expect(service.normalizeModelProbeConfig({ maxTokens: blank }).maxTokens).toBe(64);
       }
     });
 
     it('accepts numeric strings from hand-edited settings rows', () => {
       expect(service.normalizeModelProbeConfig({ timeoutMs: '20000' }).timeoutMs).toBe(20000);
-      expect(service.normalizeModelProbeConfig({ concurrency: ' 4 ' }).concurrency).toBe(4);
+      expect(service.normalizeModelProbeConfig({ modelConcurrency: ' 2 ' }).modelConcurrency).toBe(2);
+    });
+
+    it('maps the legacy single concurrency onto the per-site axis', () => {
+      // Rows saved before the split carry only `concurrency`. Mapping it to
+      // modelConcurrency can only shrink the old flat burst rate; a NEW explicit
+      // modelConcurrency must win over the legacy key so an operator raising the
+      // per-site knob is not silently dragged back.
+      expect(service.normalizeModelProbeConfig({ concurrency: 4 }).modelConcurrency).toBe(4);
+      expect(service.normalizeModelProbeConfig({ concurrency: 99 }).modelConcurrency).toBe(8);
+      expect(service.normalizeModelProbeConfig({
+        concurrency: 7,
+        modelConcurrency: 2,
+      }).modelConcurrency).toBe(2);
+      // ...and the sites axis is untouched by the legacy key.
+      expect(service.normalizeModelProbeConfig({ concurrency: 4 }).siteConcurrency).toBe(5);
     });
 
     it('trims and dedupes interest patterns, prompts and error keywords', () => {
@@ -277,7 +300,7 @@ describe('modelProbeConfigService', () => {
     });
 
     it('keeps the default preset selection when the caller only replaces other fields', () => {
-      const config = service.normalizeModelProbeConfig({ concurrency: 5 });
+      const config = service.normalizeModelProbeConfig({ modelConcurrency: 5 });
       expect(config.defaultUserAgentId).toBe('claude-code');
       expect(config.userAgents).toEqual(service.getDefaultModelProbeConfig().userAgents);
     });
@@ -326,8 +349,10 @@ describe('modelProbeConfigService', () => {
     it('upserts exactly one JSON settings row under model_probe_config_v1', async () => {
       expect(service.MODEL_PROBE_CONFIG_SETTING_KEY).toBe('model_probe_config_v1');
 
-      await service.saveModelProbeConfig({ interestPatterns: ['gpt-5'], concurrency: 3 });
-      await service.saveModelProbeConfig({ interestPatterns: ['claude'], concurrency: 4 });
+      // The legacy alias feeds modelConcurrency on input, but the PERSISTED record
+      // carries only the new keys — the split is one-way at rest.
+      await service.saveModelProbeConfig({ interestPatterns: ['gpt-5'], modelConcurrency: 3 });
+      await service.saveModelProbeConfig({ interestPatterns: ['claude'], siteConcurrency: 4 });
 
       const rows = await db.select().from(schema.settings).all();
       expect(rows).toHaveLength(1);
@@ -335,7 +360,9 @@ describe('modelProbeConfigService', () => {
 
       const parsed = JSON.parse(String(rows[0]?.value));
       expect(parsed.interestPatterns).toEqual(['claude']);
-      expect(parsed.concurrency).toBe(4);
+      expect(parsed.siteConcurrency).toBe(4);
+      expect(parsed.modelConcurrency).toBe(1);
+      expect(parsed.concurrency).toBeUndefined();
       expect(parsed.syncToRouting).toBe(false);
     });
 

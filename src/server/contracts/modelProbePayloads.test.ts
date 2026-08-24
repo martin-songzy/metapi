@@ -38,7 +38,9 @@ describe('parseModelProbeConfigPayload', () => {
    * frontend with "unrecognized key". A field is not done until all four layers
    * accept it; this file is the layer that bit.
    */
-  it('bounds maxTokens to the same range the config service clamps to', async () => {
+  // 15s timeout: importing the config service transitively initializes the
+  // database layer, which under parallel-suite load can exceed the 5s default.
+  it('bounds maxTokens to the same range the config service clamps to', { timeout: 15_000 }, async () => {
     expect(parseModelProbeConfigPayload({ maxTokens: 1 }).success).toBe(true);
     expect(parseModelProbeConfigPayload({ maxTokens: 4_096 }).success).toBe(true);
     for (const bad of [0, -5, 4_097, 12.5, '777']) {

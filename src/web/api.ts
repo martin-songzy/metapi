@@ -790,15 +790,20 @@ export type ModelProbeConfig = {
   userAgents: ModelProbeUserAgentPreset[];
   defaultUserAgentId: string;
   errorKeywords: string[];
-  concurrency: number;
+  /** How many SITES are probed at the same time. */
+  siteConcurrency: number;
+  /** How many MODELS within one site are probed at the same time. */
+  modelConcurrency: number;
   timeoutMs: number;
   maxTokens: number;
   syncToRouting: boolean;
 };
 
 export type ModelProbeConfigLimits = {
-  minConcurrency: number;
-  maxConcurrency: number;
+  minSiteConcurrency: number;
+  maxSiteConcurrency: number;
+  minModelConcurrency: number;
+  maxModelConcurrency: number;
   minTimeoutMs: number;
   maxTimeoutMs: number;
   minMaxTokens: number;

@@ -550,14 +550,10 @@ describe('modelProbeRunService', () => {
       }
     });
 
-    it('never exceeds the configured concurrency across sites', async () => {
-      const first = await seedSite({ name: 'one' });
-      const second = await seedSite({ name: 'two' });
-      await setInterest(['^gpt-'], { concurrency: 2 });
-      primeDiscovery([
-        { site: first.site, account: first.account, models: ['gpt-a', 'gpt-b', 'gpt-c'] },
-        { site: second.site, account: second.account, models: ['gpt-d', 'gpt-e', 'gpt-f'] },
-      ]);
+    it('never exceeds the configured per-site concurrency inside one site', async () => {
+      const { site, account } = await seedSite({ name: 'one' });
+      await setInterest(['^gpt-'], { modelConcurrency: 2 });
+      primeDiscovery([{ site, account, models: ['gpt-a', 'gpt-b', 'gpt-c', 'gpt-d'] }]);
 
       let inFlight = 0;
       let peak = 0;
@@ -580,9 +576,66 @@ describe('modelProbeRunService', () => {
 
       await runProbe();
 
-      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(6);
-      expect(peak).toBeGreaterThan(0);
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(4);
+      expect(peak).toBeGreaterThan(1);
       expect(peak).toBeLessThanOrEqual(2);
+    });
+
+    it('fans out across sites while capping each site at its own axis', async () => {
+      const first = await seedSite({ name: 'one' });
+      const second = await seedSite({ name: 'two' });
+      const third = await seedSite({ name: 'three' });
+      await setInterest(['^gpt-'], { siteConcurrency: 2, modelConcurrency: 2 });
+      primeDiscovery([
+        { site: first.site, account: first.account, models: ['gpt-a', 'gpt-b'] },
+        { site: second.site, account: second.account, models: ['gpt-c', 'gpt-d'] },
+        { site: third.site, account: third.account, models: ['gpt-e', 'gpt-f'] },
+      ]);
+
+      let inFlight = 0;
+      let totalPeak = 0;
+      const sitesInFlight = new Set<string>();
+      let distinctSitePeak = 0;
+      const perSiteInFlight = new Map<string, number>();
+      const perSitePeak = new Map<string, number>();
+      const gates: Array<() => void> = [];
+      probeRuntimeModelMock.mockImplementation(async (input: Record<string, unknown>) => {
+        const siteName = String((input.site as { name?: string }).name);
+        inFlight += 1;
+        totalPeak = Math.max(totalPeak, inFlight);
+        sitesInFlight.add(siteName);
+        distinctSitePeak = Math.max(distinctSitePeak, sitesInFlight.size);
+        const now = (perSiteInFlight.get(siteName) ?? 0) + 1;
+        perSiteInFlight.set(siteName, now);
+        perSitePeak.set(siteName, Math.max(perSitePeak.get(siteName) ?? 0, now));
+
+        await new Promise<void>((resolve) => {
+          gates.push(resolve);
+          setTimeout(() => {
+            const release = gates.shift();
+            release?.();
+          }, 0).unref?.();
+        });
+
+        inFlight -= 1;
+        perSiteInFlight.set(siteName, (perSiteInFlight.get(siteName) ?? 1) - 1);
+        if ((perSiteInFlight.get(siteName) ?? 0) === 0) sitesInFlight.delete(siteName);
+        return probeResult();
+      });
+
+      await runProbe();
+
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(6);
+      // Two of the three sites must genuinely overlap — the whole point of the
+      // sites axis. Without this a broken grouper that serializes sites passes
+      // every cap assertion.
+      expect(distinctSitePeak).toBeGreaterThanOrEqual(2);
+      // ...while no single site exceeds its own axis...
+      for (const peak of perSitePeak.values()) {
+        expect(peak).toBeLessThanOrEqual(2);
+      }
+      // ...and the global burst honours the product of both axes.
+      expect(totalPeak).toBeLessThanOrEqual(4);
     });
 
     it('defaults concurrency to one probe at a time', async () => {

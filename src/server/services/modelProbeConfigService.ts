@@ -13,7 +13,10 @@ export type ModelProbeConfig = {
   userAgents: ModelProbeUserAgentPreset[];
   defaultUserAgentId: string;
   errorKeywords: string[];
-  concurrency: number;
+  /** How many SITES are probed at the same time. */
+  siteConcurrency: number;
+  /** How many MODELS within one site are probed at the same time. */
+  modelConcurrency: number;
   timeoutMs: number;
   maxTokens: number;
   syncToRouting: boolean;
@@ -21,8 +24,27 @@ export type ModelProbeConfig = {
 
 export const MODEL_PROBE_CONFIG_SETTING_KEY = 'model_probe_config_v1';
 
-export const MODEL_PROBE_MIN_CONCURRENCY = 1;
-export const MODEL_PROBE_MAX_CONCURRENCY = 8;
+/**
+ * The two concurrency axes.
+ *
+ * Split from a single flat `concurrency` (which capped ALL site×model probes in
+ * one pool) because one number could not express "fan out across sites, but stay
+ * gentle inside any one site" — relays tolerate parallel DIFFERENT-site traffic
+ * far better than a burst against their own channel pool for one group.
+ *
+ * Worst-case in-flight requests are `siteConcurrency × modelConcurrency`
+ * (currently ≤ 10 × 8 = 80), and every one spends real quota — the UI hint says
+ * so. Legacy stored configs carry the old single `concurrency`; normalize maps it
+ * to `modelConcurrency`, which never increases the old burst rate (old flat N ≥
+ * new per-site N), while sites pick up the new default of 5.
+ */
+export const MODEL_PROBE_MIN_SITE_CONCURRENCY = 1;
+export const MODEL_PROBE_MAX_SITE_CONCURRENCY = 10;
+export const MODEL_PROBE_DEFAULT_SITE_CONCURRENCY = 5;
+export const MODEL_PROBE_MIN_MODEL_CONCURRENCY = 1;
+export const MODEL_PROBE_MAX_MODEL_CONCURRENCY = 8;
+/** Deprecated alias of `MODEL_PROBE_MAX_MODEL_CONCURRENCY`, kept for imports. */
+export const MODEL_PROBE_MAX_CONCURRENCY = MODEL_PROBE_MAX_MODEL_CONCURRENCY;
 export const MODEL_PROBE_MIN_TIMEOUT_MS = 3_000;
 export const MODEL_PROBE_MAX_TIMEOUT_MS = 60_000;
 
@@ -113,7 +135,8 @@ export function getDefaultModelProbeConfig(): ModelProbeConfig {
     userAgents: DEFAULT_USER_AGENT_PRESETS.map((preset) => ({ ...preset })),
     defaultUserAgentId: DEFAULT_USER_AGENT_PRESETS[0]!.id,
     errorKeywords: [...DEFAULT_ERROR_KEYWORDS],
-    concurrency: 1,
+    siteConcurrency: MODEL_PROBE_DEFAULT_SITE_CONCURRENCY,
+    modelConcurrency: 1,
     timeoutMs: 15_000,
     maxTokens: MODEL_PROBE_DEFAULT_MAX_TOKENS,
     syncToRouting: false,
@@ -247,11 +270,22 @@ export function normalizeModelProbeConfig(input: unknown): ModelProbeConfig {
       maxCount: MODEL_PROBE_MAX_ERROR_KEYWORD_COUNT,
       maxLength: MODEL_PROBE_MAX_ERROR_KEYWORD_LENGTH,
     }),
-    concurrency: clampInteger(
-      record.concurrency,
-      MODEL_PROBE_MIN_CONCURRENCY,
-      MODEL_PROBE_MAX_CONCURRENCY,
-      defaults.concurrency,
+    siteConcurrency: clampInteger(
+      record.siteConcurrency,
+      MODEL_PROBE_MIN_SITE_CONCURRENCY,
+      MODEL_PROBE_MAX_SITE_CONCURRENCY,
+      defaults.siteConcurrency,
+    ),
+    // Legacy alias: rows saved before the split carry a single `concurrency`,
+    // which capped the flat site×model pool. Mapping it to the per-site axis can
+    // only SHRINK the old burst rate (flat N ≥ per-site N), never grow it — the
+    // new sites axis takes its own default instead, which is the intended
+    // behaviour change rather than a silent migration surprise.
+    modelConcurrency: clampInteger(
+      record.modelConcurrency ?? record.concurrency,
+      MODEL_PROBE_MIN_MODEL_CONCURRENCY,
+      MODEL_PROBE_MAX_MODEL_CONCURRENCY,
+      defaults.modelConcurrency,
     ),
     timeoutMs: clampInteger(
       record.timeoutMs,

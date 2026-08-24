@@ -16,7 +16,11 @@ import {
 
 export const MAX_PROBE_USER_AGENT_LENGTH = 512;
 
-const probeConcurrencySchema = z.number().int().min(1).max(8);
+// Caps mirror the config-service constants; duplicated as literals because that
+// module imports the database and this one must stay importable without it. A
+// test pins the pairs equal.
+const probeSiteConcurrencySchema = z.number().int().min(1).max(10);
+const probeModelConcurrencySchema = z.number().int().min(1).max(8);
 const probeTimeoutSchema = z.number().int().min(3000).max(60000);
 // Caps mirror `MODEL_PROBE_MIN/MAX_MAX_TOKENS` in the config service. Duplicated
 // rather than imported because that module touches the database and this one must
@@ -51,7 +55,14 @@ const modelProbeConfigPayloadSchema = z.object({
   defaultUserAgentId: z.string().trim().optional(),
   errorKeywords: z.array(z.string().max(MAX_ERROR_KEYWORD_LENGTH))
     .max(MAX_ERROR_KEYWORD_COUNT).optional(),
-  concurrency: probeConcurrencySchema.optional(),
+  siteConcurrency: probeSiteConcurrencySchema.optional(),
+  modelConcurrency: probeModelConcurrencySchema.optional(),
+  /**
+   * Deprecated alias of `modelConcurrency`, accepted so a client or hand-edited
+   * row from before the split keeps parsing; the config service maps it and the
+   * normalized record only ever stores the new keys.
+   */
+  concurrency: probeModelConcurrencySchema.optional(),
   timeoutMs: probeTimeoutSchema.optional(),
   maxTokens: probeMaxTokensSchema.optional(),
   syncToRouting: z.boolean().optional(),

@@ -16,7 +16,10 @@ import {
   MODEL_PROBE_MAX_TIMEOUT_MS,
   MODEL_PROBE_MIN_MAX_TOKENS,
   MODEL_PROBE_MAX_MAX_TOKENS,
-  MODEL_PROBE_MIN_CONCURRENCY,
+  MODEL_PROBE_MIN_SITE_CONCURRENCY,
+  MODEL_PROBE_MAX_SITE_CONCURRENCY,
+  MODEL_PROBE_MIN_MODEL_CONCURRENCY,
+  MODEL_PROBE_MAX_MODEL_CONCURRENCY,
   MODEL_PROBE_MIN_TIMEOUT_MS,
   loadModelProbeConfig,
   saveModelProbeConfig,
@@ -369,7 +372,13 @@ export function redactBackgroundTaskLogForResponse(
 }
 
 export type ModelProbeConfigLimits = {
+  minSiteConcurrency: number;
+  maxSiteConcurrency: number;
+  minModelConcurrency: number;
+  maxModelConcurrency: number;
+  /** @deprecated alias pair of the model-concurrency bounds, kept for old clients. */
   minConcurrency: number;
+  /** @deprecated see minConcurrency. */
   maxConcurrency: number;
   minTimeoutMs: number;
   maxTimeoutMs: number;
@@ -385,8 +394,14 @@ export type ModelProbeConfigLimits = {
 
 export function getModelProbeConfigLimits(): ModelProbeConfigLimits {
   return {
-    minConcurrency: MODEL_PROBE_MIN_CONCURRENCY,
-    maxConcurrency: MODEL_PROBE_MAX_CONCURRENCY,
+    minSiteConcurrency: MODEL_PROBE_MIN_SITE_CONCURRENCY,
+    maxSiteConcurrency: MODEL_PROBE_MAX_SITE_CONCURRENCY,
+    minModelConcurrency: MODEL_PROBE_MIN_MODEL_CONCURRENCY,
+    maxModelConcurrency: MODEL_PROBE_MAX_MODEL_CONCURRENCY,
+    // Deprecated alias pair — same numbers as the model axis, so an older
+    // frontend rendering a single 并数 field still gets working bounds.
+    minConcurrency: MODEL_PROBE_MIN_MODEL_CONCURRENCY,
+    maxConcurrency: MODEL_PROBE_MAX_MODEL_CONCURRENCY,
     minTimeoutMs: MODEL_PROBE_MIN_TIMEOUT_MS,
     maxTimeoutMs: MODEL_PROBE_MAX_TIMEOUT_MS,
     minMaxTokens: MODEL_PROBE_MIN_MAX_TOKENS,

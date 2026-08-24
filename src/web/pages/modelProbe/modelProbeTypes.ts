@@ -54,7 +54,8 @@ export type ModelProbeConfigDraft = {
   promptsText: string;
   errorKeywordsText: string;
   defaultUserAgentId: string;
-  concurrencyText: string;
+  siteConcurrencyText: string;
+  modelConcurrencyText: string;
   timeoutMsText: string;
   maxTokensText: string;
   syncToRouting: boolean;
@@ -133,7 +134,8 @@ export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfi
     promptsText: joinConfigLines(config.prompts),
     errorKeywordsText: joinConfigLines(config.errorKeywords),
     defaultUserAgentId: config.defaultUserAgentId,
-    concurrencyText: String(config.concurrency),
+    siteConcurrencyText: String(config.siteConcurrency),
+    modelConcurrencyText: String(config.modelConcurrency),
     timeoutMsText: String(config.timeoutMs),
     maxTokensText: String(config.maxTokens),
     syncToRouting: config.syncToRouting,
@@ -149,7 +151,7 @@ export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfi
 export function configPayloadFromDraft(
   draft: ModelProbeConfigDraft,
   limits: ModelProbeConfigLimits,
-  saved: Pick<ModelProbeConfig, 'concurrency' | 'timeoutMs' | 'maxTokens'>,
+  saved: Pick<ModelProbeConfig, 'siteConcurrency' | 'modelConcurrency' | 'timeoutMs' | 'maxTokens'>,
 ): ModelProbeConfigPayload {
   return {
     interestPatterns: splitConfigLines(draft.interestPatternsText),
@@ -157,11 +159,17 @@ export function configPayloadFromDraft(
     userAgents: draft.userAgents.map((preset) => ({ ...preset })),
     defaultUserAgentId: draft.defaultUserAgentId,
     errorKeywords: splitConfigLines(draft.errorKeywordsText),
-    concurrency: clampDraftInteger(
-      draft.concurrencyText,
-      limits.minConcurrency,
-      limits.maxConcurrency,
-      saved.concurrency,
+    siteConcurrency: clampDraftInteger(
+      draft.siteConcurrencyText,
+      limits.minSiteConcurrency,
+      limits.maxSiteConcurrency,
+      saved.siteConcurrency,
+    ),
+    modelConcurrency: clampDraftInteger(
+      draft.modelConcurrencyText,
+      limits.minModelConcurrency,
+      limits.maxModelConcurrency,
+      saved.modelConcurrency,
     ),
     timeoutMs: clampDraftInteger(
       draft.timeoutMsText,
