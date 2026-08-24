@@ -16,6 +16,7 @@ const { apiMock, isMobileMock } = vi.hoisted(() => ({
     runModelProbe: vi.fn(),
     getModelProbeTask: vi.fn(),
     getModelProbeResults: vi.fn(),
+    clearModelProbeResults: vi.fn(),
   },
   isMobileMock: vi.fn(() => false),
 }));
@@ -853,6 +854,89 @@ describe('ModelProbe results column layout', () => {
       expect(lastResultsQuery().sortBy).toBe('checkedAt');
     } finally {
       root.unmount();
+    }
+  });
+});
+
+/**
+ * 清空结果 — the operator-triggered wipe.
+ *
+ * There is no TTL and no background pruning, so without this the results table
+ * grew forever. The delete is deliberately ALL results: the visible filters are
+ * for viewing, and a filtered delete would let one misclick while a filter is
+ * active destroy rows the operator believed untouched — which is why the confirm
+ * copy names the blast radius instead of saying 当前筛选.
+ */
+describe('ModelProbe results clearing', () => {
+  beforeEach(() => {
+    isMobileMock.mockReturnValue(false);
+    apiMock.clearModelProbeResults.mockResolvedValue({ success: true });
+  });
+
+  async function renderWithRows() {
+    const root = await renderPage();
+    // Positive control that rows exist before clearing: the button is disabled at
+    // total===0, so an always-disabled button would fail the click below rather
+    // than silently passing.
+    expect(root.root.findAll((node) => (
+      node.props['data-testid']?.toString().startsWith('model-probe-result-row-')
+    )).length).toBeGreaterThan(0);
+    return root;
+  }
+
+  it('clears after confirm and refreshes through the parent token', async () => {
+    vi.stubGlobal('confirm', () => true);
+    try {
+      const root = await renderWithRows();
+      try {
+        const callsBefore = apiMock.getModelProbeResults.mock.calls.length;
+        await click(findByTestId(root.root, 'model-probe-results-clear'));
+
+        expect(apiMock.clearModelProbeResults).toHaveBeenCalledTimes(1);
+        // The refresh must go through onResultsCleared → parent refreshToken, i.e.
+        // a NEW fetch, not just local state mutation.
+        expect(apiMock.getModelProbeResults.mock.calls.length).toBeGreaterThan(callsBefore);
+      } finally {
+        root.unmount();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not clear when the confirm is dismissed', async () => {
+    vi.stubGlobal('confirm', () => false);
+    try {
+      const root = await renderWithRows();
+      try {
+        await click(findByTestId(root.root, 'model-probe-results-clear'));
+
+        expect(apiMock.clearModelProbeResults).not.toHaveBeenCalled();
+      } finally {
+        root.unmount();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('does not refresh when the clear request fails', async () => {
+    vi.stubGlobal('confirm', () => true);
+    try {
+      const root = await renderWithRows();
+      try {
+        apiMock.clearModelProbeResults.mockRejectedValue(new Error('db locked'));
+        const callsBefore = apiMock.getModelProbeResults.mock.calls.length;
+        await click(findByTestId(root.root, 'model-probe-results-clear'));
+
+        // The rows the operator still sees must stay truthful: a failed wipe
+        // must not trigger the reload that would look like "cleared".
+        expect(apiMock.getModelProbeResults.mock.calls.length).toBe(callsBefore);
+      } finally {
+        root.unmount();
+      }
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

@@ -134,6 +134,8 @@ type ModelProbeResultsPanelProps = {
   isMobile: boolean;
   /** Bumped by the run panel when a sweep finishes, so the table reloads itself. */
   refreshToken: number;
+  /** Called after a successful 清空结果 so the parent bumps `refreshToken`. */
+  onResultsCleared?: () => void;
 };
 
 const STATUS_LABELS: Record<ModelProbeResultStatus, string> = {
@@ -194,7 +196,7 @@ function formatCheckedAt(value: string | null): string {
   return parsed.toLocaleString();
 }
 
-export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }: ModelProbeResultsPanelProps) {
+export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, onResultsCleared }: ModelProbeResultsPanelProps) {
   const toast = useToast();
   const [modelDraft, setModelDraft] = useState('');
   const [query, setQuery] = useState<ModelProbeResultsQuery>({
@@ -211,6 +213,31 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
   const [filterOpen, setFilterOpen] = useState(false);
   const [layout, setLayout] = useState<ColumnLayout>(() => readColumnLayout());
   const [columnMenuOpen, setColumnMenuOpen] = useState(false);
+  const [clearing, setClearing] = useState(false);
+
+  /**
+   * 清空结果 is all-or-nothing across every site and model — the server offers no
+   * scoped delete, on purpose: the visible filters are for VIEWING, and a filtered
+   * delete would let one misclick destroy rows the operator believed untouched.
+   * Hence the confirm copy spells out the blast radius instead of saying 当前筛选.
+   */
+  const handleClearResults = async () => {
+    const confirmed = globalThis.confirm?.(
+      '将删除全部探测结果（所有站点、所有模型），不可恢复。确认清空？',
+    );
+    if (!confirmed) return;
+
+    setClearing(true);
+    try {
+      await api.clearModelProbeResults();
+      toast.success('探测结果已清空');
+      onResultsCleared?.();
+    } catch (error: any) {
+      toast.error(error?.message || '清空探测结果失败');
+    } finally {
+      setClearing(false);
+    }
+  };
 
   const hiddenColumns = useMemo(() => new Set(layout.hidden), [layout.hidden]);
   const visibleColumns = useMemo(
@@ -659,6 +686,17 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
           {sortButtons}
           {/* Desktop only: the mobile view is cards, which have no columns to configure. */}
           {!isMobile && columnSettings}
+          <button
+            type="button"
+            data-testid="model-probe-results-clear"
+            className="btn btn-ghost"
+            style={{ border: '1px solid var(--color-border)', color: 'var(--color-danger, #c0392b)' }}
+            onClick={() => { void handleClearResults(); }}
+            disabled={clearing || total === 0}
+            title="删除全部探测结果（所有站点），不可恢复"
+          >
+            {clearing ? <><span className="spinner spinner-sm" /> 清空中...</> : '清空结果'}
+          </button>
         </div>
       </div>
 

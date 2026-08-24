@@ -1593,6 +1593,9 @@ export const api = {
         offset: query.offset,
       })}`,
     ),
+  /** Operator-triggered wipe of every stored probe result. No TTL exists. */
+  clearModelProbeResults: () =>
+    request<{ success: boolean }>('/api/model-probe/results', { method: 'DELETE' }),
   /** Typed view of `/api/tasks/:id` for polling one probe sweep. */
   getModelProbeTask: (taskId: string) =>
     request<ModelProbeTaskResponse>(

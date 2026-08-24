@@ -22,6 +22,7 @@ import {
 } from '../../services/modelProbeApiService.js';
 import {
   buildModelProbeRunLimitMessage,
+  clearModelProbeResults,
   listActiveModelProbeResults,
   previewActiveModelProbe,
   requestActiveModelProbeCancellation,
@@ -212,5 +213,10 @@ export async function modelProbeRoutes(app: FastifyInstance) {
       total: results.total,
       query,
     };
+  });
+
+  app.delete('/api/model-probe/results', async () => {
+    await clearModelProbeResults();
+    return { success: true };
   });
 }

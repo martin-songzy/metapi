@@ -1128,6 +1128,21 @@ export function buildModelProbeResultOrdering(sortColumn: Column, order: 'asc' |
   ];
 }
 
+/**
+ * Removes every stored probe result. Operator-triggered only, from the results
+ * panel's 清空结果 button behind a confirm dialog — there is no TTL and no
+ * background pruning, so before this existed the table grew forever and the only
+ * reset was a full backup import.
+ *
+ * Deliberately unscoped (no per-site variant): the panel filters sites for
+ * VIEWING, and a filtered delete would let one misclick while a filter is active
+ * destroy rows the operator believed were untouched. Clearing is all-or-nothing;
+ * the confirm copy says so.
+ */
+export async function clearModelProbeResults(): Promise<void> {
+  await db.delete(schema.modelProbeResults).run();
+}
+
 export async function listActiveModelProbeResults(query: ModelProbeResultsQuery): Promise<{
   items: ModelProbeResultView[];
   total: number;

@@ -580,6 +580,28 @@ describe('model probe API routes', () => {
     });
   });
 
+  describe('DELETE /api/model-probe/results', () => {
+    it('deletes EVERY stored result, whatever sites or models they belong to', async () => {
+      // Real rows in the temp sqlite — the run-service module is partially mocked
+      // here, but `clearModelProbeResults` is deliberately left real via the
+      // `...actual` spread, so this exercises the true delete path.
+      await db.insert(schema.modelProbeResults).values([
+        { siteId, modelName: 'm-a', status: 'supported' },
+        { siteId, modelName: 'm-b', status: 'unsupported' },
+        { siteId, modelName: 'm-c', status: 'inconclusive' },
+      ]).run();
+      const before = await db.select().from(schema.modelProbeResults).all();
+      expect(before.length).toBe(3);
+
+      const response = await app.inject({ method: 'DELETE', url: '/api/model-probe/results' });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ success: true });
+
+      const after = await db.select().from(schema.modelProbeResults).all();
+      expect(after).toEqual([]);
+    });
+  });
+
   describe('GET /api/model-probe/results', () => {
     it('forwards every normalized filter, sort and paging value', async () => {
       const response = await app.inject({

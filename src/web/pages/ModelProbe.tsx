@@ -155,6 +155,7 @@ export default function ModelProbe() {
             sites={sites}
             isMobile={isMobile}
             refreshToken={resultsRefreshToken}
+            onResultsCleared={() => setResultsRefreshToken((token) => token + 1)}
           />
         </>
       )}
