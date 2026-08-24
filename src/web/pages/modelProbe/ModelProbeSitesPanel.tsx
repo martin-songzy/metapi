@@ -51,6 +51,24 @@ function buildDrafts(
   return drafts;
 }
 
+/**
+ * Whether a site's STORED settings differ from the defaults.
+ *
+ * Reads the site record, not the draft, so the marker tracks what is saved rather
+ * than what is being typed — an unsaved edit is already signalled by the save
+ * button becoming enabled.
+ *
+ * This exists because the desktop layout now shows one site at a time. Listing
+ * every site was what the operator asked to remove, but it did make overrides
+ * visible at a glance, and losing that entirely would leave no way to find the
+ * sites you had customised without clicking through the whole dropdown.
+ */
+export function siteHasProbeOverride(site: ModelProbeSite): boolean {
+  const endpointOverridden = normalizeModelProbeEndpointType(site.probeEndpointType) !== 'auto';
+  const userAgentOverridden = String(site.probeUserAgent ?? '').trim().length > 0;
+  return endpointOverridden || userAgentOverridden;
+}
+
 export default function ModelProbeSitesPanel({
   sites,
   userAgents,
@@ -64,6 +82,7 @@ export default function ModelProbeSitesPanel({
   const [savingSiteId, setSavingSiteId] = useState<number | null>(null);
   const [keyword, setKeyword] = useState('');
   const [filterOpen, setFilterOpen] = useState(false);
+  const [selectedSiteId, setSelectedSiteId] = useState<number | null>(null);
 
   // Re-seed from the server list so a page refresh drops stale drafts instead of
   // showing edits against rows that no longer exist.
@@ -89,6 +108,39 @@ export default function ModelProbeSitesPanel({
       return { ...prev, [siteId]: { ...current, ...patch } };
     });
   };
+
+  /**
+   * Keeps the desktop selection pointing at a site that is actually listed.
+   *
+   * Both directions matter: the initial render has no selection, and narrowing the
+   * keyword filter can drop the selected site out of the list — leaving it selected
+   * would render a config block for a site the operator can no longer see.
+   */
+  const selectableSiteIds = filteredSites.map((site) => site.id).join(',');
+  useEffect(() => {
+    const ids = selectableSiteIds ? selectableSiteIds.split(',').map(Number) : [];
+    if (ids.length === 0) {
+      setSelectedSiteId(null);
+      return;
+    }
+    setSelectedSiteId((current) => (
+      current !== null && ids.includes(current) ? current : (ids[0] as number)
+    ));
+  }, [selectableSiteIds]);
+
+  const overriddenSiteCount = useMemo(
+    () => sites.filter((site) => siteHasProbeOverride(site)).length,
+    [sites],
+  );
+
+  const siteSelectOptions = useMemo(() => filteredSites.map((site) => ({
+    value: String(site.id),
+    // The marker rides on the label because `ModernSelect` renders options as
+    // plain text; there is no per-option slot for a badge.
+    label: siteHasProbeOverride(site) ? `${site.name} ● 已自定义` : site.name,
+  })), [filteredSites]);
+
+  const selectedSite = filteredSites.find((site) => site.id === selectedSiteId) ?? null;
 
   const handleSave = async (site: ModelProbeSite) => {
     const draft = drafts[site.id];
@@ -255,39 +307,65 @@ export default function ModelProbeSitesPanel({
           })}
         </div>
       ) : (
-        <div style={{ overflowX: 'auto' }}>
-          <table className="data-table" style={{ width: '100%' }}>
-            <thead>
-              <tr>
-                <th>站点</th>
-                <th>平台</th>
-                <th style={{ minWidth: 150 }}>接口类型</th>
-                <th style={{ minWidth: 220 }}>User-Agent</th>
-                <th style={{ width: 100 }}>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredSites.map((site) => {
-                const draft = drafts[site.id];
-                if (!draft) return null;
-                return (
-                  <tr key={site.id}>
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <span style={{ fontWeight: 600 }}>{site.name}</span>
-                        {renderStatusBadge(site)}
-                      </div>
-                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{site.url}</div>
-                    </td>
-                    <td><span className="badge badge-muted">{site.platform}</span></td>
-                    <td>{renderEndpointSelect(site, draft)}</td>
-                    <td>{renderUserAgentControl(site, draft)}</td>
-                    <td>{renderSaveButton(site, draft)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div data-testid="model-probe-site-selector-layout">
+          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 14 }}>
+            <div style={{ flex: '1 1 280px', minWidth: 220 }}>
+              <div style={labelStyle}>选择站点</div>
+              <ModernSelect
+                data-testid="model-probe-site-selector"
+                size="sm"
+                value={selectedSiteId === null ? '' : String(selectedSiteId)}
+                onChange={(value) => setSelectedSiteId(Number(value))}
+                options={siteSelectOptions}
+              />
+            </div>
+            <div
+              data-testid="model-probe-site-override-count"
+              style={{ fontSize: 12, color: 'var(--color-text-muted)', paddingBottom: 8 }}
+            >
+              {overriddenSiteCount > 0
+                ? `${overriddenSiteCount} 个站点已自定义（下拉中标 ●）`
+                : '所有站点都使用默认设置'}
+            </div>
+          </div>
+
+          {selectedSite && drafts[selectedSite.id] ? (() => {
+            const site = selectedSite;
+            const draft = drafts[site.id] as ModelProbeSiteDraft;
+            return (
+              <div
+                data-testid={`model-probe-site-config-${site.id}`}
+                style={{
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: 14,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 14,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontWeight: 600 }}>{site.name}</span>
+                  <span className="badge badge-muted">{site.platform}</span>
+                  {renderStatusBadge(site)}
+                  <span style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{site.url}</span>
+                </div>
+
+                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 200px', minWidth: 180 }}>
+                    <div style={labelStyle}>接口类型</div>
+                    {renderEndpointSelect(site, draft)}
+                  </div>
+                  <div style={{ flex: '1 1 260px', minWidth: 220 }}>
+                    <div style={labelStyle}>User-Agent</div>
+                    {renderUserAgentControl(site, draft)}
+                  </div>
+                </div>
+
+                <div>{renderSaveButton(site, draft)}</div>
+              </div>
+            );
+          })() : null}
         </div>
       )}
     </div>

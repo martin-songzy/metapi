@@ -27,6 +27,108 @@ import { useToast } from '../../components/Toast.js';
 const PAGE_SIZE = 50;
 const PLACEHOLDER = '—';
 
+/**
+ * Identifies the desktop table's columns.
+ *
+ * A registry rather than inline `<th>`/`<td>` pairs, because visibility and width
+ * both need a stable key to persist against, and because a header and its cell
+ * drifting out of order is the classic way a table like this breaks silently.
+ */
+type ResultColumnKey =
+  | 'site' | 'model' | 'status' | 'latency' | 'balance'
+  | 'endpoint' | 'checkedAt' | 'prompt' | 'userAgent' | 'reason';
+
+const COLUMN_LABELS: Record<ResultColumnKey, string> = {
+  site: '站点 / 账号',
+  model: '模型',
+  status: '状态',
+  latency: '响应',
+  balance: '余额',
+  endpoint: '接口',
+  checkedAt: '探测时间',
+  prompt: '提示词',
+  userAgent: 'User-Agent',
+  reason: '原因',
+};
+
+const COLUMN_ORDER: ResultColumnKey[] = [
+  'site', 'model', 'status', 'latency', 'balance',
+  'endpoint', 'checkedAt', 'prompt', 'userAgent', 'reason',
+];
+
+const DEFAULT_COLUMN_WIDTHS: Partial<Record<ResultColumnKey, number>> = {
+  endpoint: 170,
+  checkedAt: 150,
+  prompt: 200,
+  userAgent: 200,
+  reason: 220,
+};
+
+/**
+ * `prompt` and `userAgent` are hidden by default: they answer a real question —
+ * probe prompts are drawn at random from a configurable pool, so "which prompt
+ * produced this verdict?" is not otherwise answerable, and it matters most for the
+ * `empty_content` verdict where a model returned a valid shape with no text — but
+ * showing them unasked would crowd a table the operator already reports as too wide.
+ */
+const DEFAULT_HIDDEN_COLUMNS: ResultColumnKey[] = ['prompt', 'userAgent'];
+
+const COLUMN_LAYOUT_STORAGE_KEY = 'metapi.modelProbe.results.columns.v1';
+const MIN_COLUMN_WIDTH = 80;
+
+type ColumnLayout = {
+  hidden: ResultColumnKey[];
+  widths: Partial<Record<ResultColumnKey, number>>;
+};
+
+function defaultColumnLayout(): ColumnLayout {
+  return { hidden: [...DEFAULT_HIDDEN_COLUMNS], widths: {} };
+}
+
+/**
+ * Reads the persisted layout, discarding anything that no longer makes sense.
+ *
+ * Unknown keys are dropped rather than kept: a layout stored by an older build can
+ * name a column that has since been removed, and carrying it through would leave
+ * the table permanently hiding a column that no checkbox can restore. Any parse or
+ * storage failure falls back to defaults — a corrupt preference must not break the
+ * page, and `localStorage` itself is absent in the test environment.
+ */
+function readColumnLayout(): ColumnLayout {
+  try {
+    const raw = globalThis.localStorage?.getItem(COLUMN_LAYOUT_STORAGE_KEY);
+    if (!raw) return defaultColumnLayout();
+
+    const parsed = JSON.parse(raw) as Partial<ColumnLayout> | null;
+    if (!parsed || typeof parsed !== 'object') return defaultColumnLayout();
+
+    const hidden = Array.isArray(parsed.hidden)
+      ? parsed.hidden.filter((key): key is ResultColumnKey => COLUMN_ORDER.includes(key as ResultColumnKey))
+      : [...DEFAULT_HIDDEN_COLUMNS];
+
+    const widths: Partial<Record<ResultColumnKey, number>> = {};
+    if (parsed.widths && typeof parsed.widths === 'object') {
+      for (const [key, value] of Object.entries(parsed.widths)) {
+        if (!COLUMN_ORDER.includes(key as ResultColumnKey)) continue;
+        if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+        widths[key as ResultColumnKey] = Math.max(MIN_COLUMN_WIDTH, Math.round(value));
+      }
+    }
+
+    return { hidden, widths };
+  } catch {
+    return defaultColumnLayout();
+  }
+}
+
+function writeColumnLayout(layout: ColumnLayout): void {
+  try {
+    globalThis.localStorage?.setItem(COLUMN_LAYOUT_STORAGE_KEY, JSON.stringify(layout));
+  } catch {
+    // A full or unavailable storage must not stop the operator resizing a column.
+  }
+}
+
 type ModelProbeResultsPanelProps = {
   sites: ModelProbeSite[];
   isMobile: boolean;
@@ -107,6 +209,35 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [filterOpen, setFilterOpen] = useState(false);
+  const [layout, setLayout] = useState<ColumnLayout>(() => readColumnLayout());
+  const [columnMenuOpen, setColumnMenuOpen] = useState(false);
+
+  const hiddenColumns = useMemo(() => new Set(layout.hidden), [layout.hidden]);
+  const visibleColumns = useMemo(
+    () => COLUMN_ORDER.filter((key) => !hiddenColumns.has(key)),
+    [hiddenColumns],
+  );
+
+  const persistLayout = (next: ColumnLayout) => {
+    setLayout(next);
+    writeColumnLayout(next);
+  };
+
+  const toggleColumn = (key: ResultColumnKey) => {
+    const hidden = hiddenColumns.has(key)
+      ? layout.hidden.filter((entry) => entry !== key)
+      : [...layout.hidden, key];
+    persistLayout({ ...layout, hidden });
+  };
+
+  const setColumnWidth = (key: ResultColumnKey, width: number) => {
+    persistLayout({
+      ...layout,
+      widths: { ...layout.widths, [key]: Math.max(MIN_COLUMN_WIDTH, Math.round(width)) },
+    });
+  };
+
+  const resetColumnLayout = () => persistLayout(defaultColumnLayout());
 
   /**
    * `cancelled` is the repo's standard stale-response guard (see `TokensPanel`,
@@ -337,40 +468,177 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
     </div>
   );
 
+  const renderColumnCell = (key: ResultColumnKey, row: ModelProbeResult): React.ReactNode => {
+    switch (key) {
+      case 'site':
+        return (
+          <>
+            <div style={{ fontWeight: 600 }}>{row.siteName}</div>
+            <div style={hintStyle}>{formatText(row.accountUsername)}</div>
+          </>
+        );
+      case 'model':
+        return <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }}>{row.modelName}</span>;
+      case 'status':
+        return renderStatus(row.status);
+      case 'latency':
+        return formatLatency(row.latencyMs);
+      case 'balance':
+        return formatBalance(row.balance);
+      case 'endpoint':
+        return <span style={{ fontSize: 12, wordBreak: 'break-all' }}>{formatText(row.endpointUsed)}</span>;
+      case 'checkedAt':
+        return <span style={{ fontSize: 12 }}>{formatCheckedAt(row.checkedAt)}</span>;
+      case 'prompt':
+        // Upstream-neutral but operator-authored text; rendered as a text child only.
+        return <span style={{ fontSize: 12, wordBreak: 'break-word' }}>{formatText(row.promptUsed)}</span>;
+      case 'userAgent':
+        return <span style={{ fontSize: 12, wordBreak: 'break-all' }}>{formatText(row.userAgentUsed)}</span>;
+      case 'reason':
+      default:
+        return renderReason(row);
+    }
+  };
+
+  const SORTABLE_COLUMNS: Partial<Record<ResultColumnKey, ModelProbeResultSortBy>> = {
+    latency: 'latency',
+    balance: 'balance',
+    checkedAt: 'checkedAt',
+  };
+
+  /**
+   * Drag-to-resize.
+   *
+   * Bound on the handle, not the `<th>`, and it stops propagation so the gesture
+   * cannot also fire the header's sort toggle — a resize that silently re-sorted the
+   * page would be worse than no resize at all. Listeners live on `window` for the
+   * duration of the drag so the pointer can leave the handle without stranding it.
+   */
+  const startColumnResize = (key: ResultColumnKey, startX: number, startWidth: number) => {
+    const onMove = (event: PointerEvent) => {
+      setColumnWidth(key, startWidth + (event.clientX - startX));
+    };
+    const onUp = () => {
+      globalThis.removeEventListener?.('pointermove', onMove);
+      globalThis.removeEventListener?.('pointerup', onUp);
+    };
+    globalThis.addEventListener?.('pointermove', onMove);
+    globalThis.addEventListener?.('pointerup', onUp);
+  };
+
+  const columnSettings = (
+    <div style={{ position: 'relative' }}>
+      <button
+        type="button"
+        data-testid="model-probe-results-column-toggle"
+        className="btn btn-ghost"
+        style={{ border: '1px solid var(--color-border)' }}
+        onClick={() => setColumnMenuOpen((open) => !open)}
+      >
+        列设置（{visibleColumns.length}/{COLUMN_ORDER.length}）
+      </button>
+      {columnMenuOpen && (
+        <div
+          data-testid="model-probe-results-column-menu"
+          style={{
+            position: 'absolute',
+            right: 0,
+            top: '100%',
+            marginTop: 4,
+            zIndex: 20,
+            background: 'var(--color-bg-elevated, var(--color-bg))',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius-sm)',
+            padding: 10,
+            minWidth: 180,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+          }}
+        >
+          {COLUMN_ORDER.map((key) => (
+            <label
+              key={key}
+              style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', fontSize: 13 }}
+            >
+              <input
+                type="checkbox"
+                data-testid={`model-probe-results-column-${key}`}
+                checked={!hiddenColumns.has(key)}
+                onChange={() => toggleColumn(key)}
+              />
+              {COLUMN_LABELS[key]}
+            </label>
+          ))}
+          <button
+            type="button"
+            data-testid="model-probe-results-column-reset"
+            className="btn btn-ghost"
+            style={{ marginTop: 6, width: '100%', border: '1px solid var(--color-border)' }}
+            onClick={resetColumnLayout}
+          >
+            恢复默认
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
   const renderDesktopRows = () => (
     <div data-testid="model-probe-results-table" style={{ overflowX: 'auto' }}>
-      <table className="data-table" style={{ width: '100%' }}>
+      <table className="data-table" style={{ width: '100%', tableLayout: 'fixed' }}>
         <thead>
           <tr>
-            <th>站点 / 账号</th>
-            <th>模型</th>
-            <th>状态</th>
-            {/*
-              `aria-sort` goes on the column headers, the only ARIA-valid surface
-              for it. Only the three sortable columns carry it, and only the active
-              one reports a direction — marking every column 'none' would be noise.
-            */}
-            <th aria-sort={ariaSortFor('latency')}>响应</th>
-            <th aria-sort={ariaSortFor('balance')}>余额</th>
-            <th style={{ minWidth: 170 }}>接口</th>
-            <th style={{ minWidth: 150 }} aria-sort={ariaSortFor('checkedAt')}>探测时间</th>
-            <th style={{ minWidth: 220 }}>原因</th>
+            {visibleColumns.map((key) => {
+              const sortKey = SORTABLE_COLUMNS[key];
+              const width = layout.widths[key] ?? DEFAULT_COLUMN_WIDTHS[key];
+              return (
+                <th
+                  key={key}
+                  data-testid={`model-probe-results-header-${key}`}
+                  style={{ position: 'relative', ...(width ? { width } : {}) }}
+                  /*
+                    `aria-sort` stays on the header, the only ARIA-valid surface for
+                    it, and only the sortable columns carry it — marking every column
+                    'none' would be noise.
+                  */
+                  {...(sortKey ? { 'aria-sort': ariaSortFor(sortKey) } : {})}
+                >
+                  {COLUMN_LABELS[key]}
+                  <span
+                    data-testid={`model-probe-results-resize-${key}`}
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label={`调整${COLUMN_LABELS[key]}列宽`}
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                      startColumnResize(
+                        key,
+                        event.clientX,
+                        width ?? MIN_COLUMN_WIDTH,
+                      );
+                    }}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      right: 0,
+                      width: 6,
+                      height: '100%',
+                      cursor: 'col-resize',
+                      userSelect: 'none',
+                    }}
+                  />
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
           {items.map((row) => (
             <tr key={row.id} data-testid={`model-probe-result-row-${row.id}`}>
-              <td>
-                <div style={{ fontWeight: 600 }}>{row.siteName}</div>
-                <div style={hintStyle}>{formatText(row.accountUsername)}</div>
-              </td>
-              <td style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }}>{row.modelName}</td>
-              <td>{renderStatus(row.status)}</td>
-              <td>{formatLatency(row.latencyMs)}</td>
-              <td>{formatBalance(row.balance)}</td>
-              <td style={{ fontSize: 12, wordBreak: 'break-all' }}>{formatText(row.endpointUsed)}</td>
-              <td style={{ fontSize: 12 }}>{formatCheckedAt(row.checkedAt)}</td>
-              <td>{renderReason(row)}</td>
+              {visibleColumns.map((key) => (
+                <td key={key} data-testid={`model-probe-result-cell-${key}-${row.id}`}>
+                  {renderColumnCell(key, row)}
+                </td>
+              ))}
             </tr>
           ))}
         </tbody>
@@ -387,7 +655,11 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken }
             每行是一次真实请求得出的结论。「未确定」只说明这次没测出来，不代表模型不可用。
           </div>
         </div>
-        {sortButtons}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          {sortButtons}
+          {/* Desktop only: the mobile view is cards, which have no columns to configure. */}
+          {!isMobile && columnSettings}
+        </div>
       </div>
 
       <ResponsiveFilterPanel

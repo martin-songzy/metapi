@@ -666,3 +666,193 @@ describe('ModelProbe results safety and layout', () => {
   });
 });
 
+
+/**
+ * Column visibility and width.
+ *
+ * The operator reported content cut off at both ends of the table, so the columns
+ * became configurable. Two of them — 提示词 and User-Agent — are new and hidden by
+ * default: probe prompts are drawn at random from a configurable pool, so "which
+ * prompt produced this verdict?" was not answerable from the UI at all, but showing
+ * them unasked would crowd a table already reported as too wide.
+ */
+describe('ModelProbe results column layout', () => {
+  const STORAGE_KEY = 'metapi.modelProbe.results.columns.v1';
+  let store: Record<string, string>;
+
+  /**
+   * Scoped inside this describe on purpose, and separate from the file's `click`
+   * helper: these are checkboxes driven by `onChange`, while `click` calls
+   * `onClick`, which the panel never supplies for them.
+   */
+  async function toggleColumn(root: ReactTestInstance, columnKey: string) {
+    const box = findByTestId(root, `model-probe-results-column-${columnKey}`);
+    await act(async () => {
+      box.props.onChange({ target: { checked: !box.props.checked } });
+    });
+    await flushMicrotasks();
+  }
+
+  function headerCount(root: ReactTestInstance, columnKey: string): number {
+    return root.findAll((node) => (
+      node.props['data-testid'] === `model-probe-results-header-${columnKey}`
+    )).length;
+  }
+
+  beforeEach(() => {
+    // Deliberately NOT calling `vi.clearAllMocks()`: the file-level `beforeEach`
+    // runs first and installs the config / sites / results mocks, and clearing them
+    // again would strip those resolved values back to `undefined`.
+    isMobileMock.mockReturnValue(false);
+    store = {};
+    // `localStorage` does not exist in this environment, and the panel reads it
+    // through optional chaining — so without a stub the layout silently never
+    // persists, and a persistence assertion would pass against a component that
+    // stores nothing at all.
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (key in store ? store[key] : null),
+      setItem: (key: string, value: string) => { store[key] = value; },
+      removeItem: (key: string) => { delete store[key]; },
+      clear: () => { store = {}; },
+      key: () => null,
+      length: 0,
+    });
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW]));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('hides 提示词 and User-Agent by default, and shows them once toggled on', async () => {
+    const root = await renderPage();
+    try {
+      expect(headerCount(root.root, 'prompt')).toBe(0);
+      expect(headerCount(root.root, 'userAgent')).toBe(0);
+      // Paired positive: a default-visible column IS rendered, so the absences
+      // above cannot pass against a table that rendered no headers at all.
+      expect(headerCount(root.root, 'model')).toBe(1);
+
+      await click(findByTestId(root.root, 'model-probe-results-column-toggle'));
+      await toggleColumn(root.root, 'prompt');
+
+      expect(headerCount(root.root, 'prompt')).toBe(1);
+      // The cell must arrive with the header — a header-only assertion would miss a
+      // registry whose labels and cells disagree.
+      expect(collectText(findByTestId(root.root, `model-probe-result-cell-prompt-${SUPPORTED_ROW.id}`)))
+        .toContain('hi');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('persists a hidden column across a remount', async () => {
+    const first = await renderPage();
+    try {
+      await click(findByTestId(first.root, 'model-probe-results-column-toggle'));
+      await toggleColumn(first.root, 'balance');
+      expect(headerCount(first.root, 'balance')).toBe(0);
+    } finally {
+      first.unmount();
+    }
+
+    expect(store[STORAGE_KEY]).toBeTruthy();
+
+    const second = await renderPage();
+    try {
+      expect(headerCount(second.root, 'balance')).toBe(0);
+      expect(headerCount(second.root, 'model')).toBe(1);
+    } finally {
+      second.unmount();
+    }
+  });
+
+  it('falls back to defaults when the stored layout is malformed', async () => {
+    for (const stored of ['not json at all', '{"hidden":"nope"}', 'null']) {
+      store[STORAGE_KEY] = stored;
+      const root = await renderPage();
+      try {
+        expect(headerCount(root.root, 'model')).toBe(1);
+        expect(headerCount(root.root, 'reason')).toBe(1);
+      } finally {
+        root.unmount();
+      }
+    }
+  });
+
+  it('drops a stale column key instead of carrying it forward', async () => {
+    // Rendering alone does not prove the sanitising: a build that KEEPS unknown keys
+    // renders identically, since a hidden column that does not exist changes
+    // nothing. Persistence is what makes it observable — whatever is written back
+    // must no longer name a column this build does not have.
+    store[STORAGE_KEY] = '{"hidden":["ghostColumn","balance"]}';
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-results-column-toggle'));
+      await toggleColumn(root.root, 'prompt');
+
+      const persisted = JSON.parse(store[STORAGE_KEY] as string) as { hidden: string[] };
+      expect(persisted.hidden).not.toContain('ghostColumn');
+      // ...while the legitimate key from the same stored value survives, so this
+      // cannot pass by discarding the whole list.
+      expect(persisted.hidden).toContain('balance');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('restores the default layout on demand', async () => {
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-results-column-toggle'));
+      await toggleColumn(root.root, 'prompt');
+      expect(headerCount(root.root, 'prompt')).toBe(1);
+
+      await click(findByTestId(root.root, 'model-probe-results-column-reset'));
+
+      expect(headerCount(root.root, 'prompt')).toBe(0);
+      expect(headerCount(root.root, 'model')).toBe(1);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps aria-sort on the sortable headers only', async () => {
+    const root = await renderPage();
+    try {
+      // Regression guard for the registry rewrite: the sortable columns must keep
+      // reporting sort state, and the rest must not start claiming it.
+      expect(findByTestId(root.root, 'model-probe-results-header-checkedAt').props['aria-sort'])
+        .toBe('descending');
+      expect(findByTestId(root.root, 'model-probe-results-header-latency').props['aria-sort'])
+        .toBe('none');
+      expect(findByTestId(root.root, 'model-probe-results-header-model').props['aria-sort'])
+        .toBeUndefined();
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('exposes a resize handle that does not trigger sorting', async () => {
+    const root = await renderPage();
+    try {
+      const handle = findByTestId(root.root, 'model-probe-results-resize-checkedAt');
+      expect(typeof handle.props.onPointerDown).toBe('function');
+
+      // The gesture must not also fire the header's sort toggle. Asserting that it
+      // stops propagation is the testable half; the DRAG ITSELF needs real pointer
+      // events on a real layout and is NOT covered by this suite.
+      let propagationStopped = false;
+      await act(async () => {
+        handle.props.onPointerDown({
+          clientX: 100,
+          stopPropagation() { propagationStopped = true; },
+        });
+      });
+      expect(propagationStopped).toBe(true);
+      expect(lastResultsQuery().sortBy).toBe('checkedAt');
+    } finally {
+      root.unmount();
+    }
+  });
+});

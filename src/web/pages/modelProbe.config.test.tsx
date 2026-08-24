@@ -62,6 +62,7 @@ function buildConfig(overrides: Record<string, unknown> = {}) {
     errorKeywords: ['no available channel'],
     concurrency: 3,
     timeoutMs: 15_000,
+    maxTokens: 77,
     syncToRouting: false,
     ...overrides,
   };
@@ -78,6 +79,8 @@ const PRODUCTION_LIMITS = {
   maxConcurrency: 8,
   minTimeoutMs: 3_000,
   maxTimeoutMs: 60_000,
+  minMaxTokens: 1,
+  maxMaxTokens: 4_096,
   maxInterestPatterns: 50,
   maxInterestPatternLength: 200,
   maxPrompts: 50,
@@ -92,6 +95,8 @@ function buildLimits(overrides: Record<string, unknown> = {}) {
     maxConcurrency: 6,
     minTimeoutMs: 4_000,
     maxTimeoutMs: 41_000,
+    minMaxTokens: 2,
+    maxMaxTokens: 999,
     maxInterestPatterns: 3,
     maxInterestPatternLength: 40,
     maxPrompts: 9,
@@ -170,6 +175,39 @@ function findSelectOption(select: ReactTestInstance, label: string): ReactTestIn
       && collectText(child).trim() === label
     )).length === 1
   ));
+}
+
+/**
+ * Selects a site in the desktop per-site panel.
+ *
+ * Needed because that panel shows ONE site at a time now — the operator asked for
+ * the dropdown because listing every site ate the whole viewport. The selection
+ * defaults to the first site, so only assertions about a non-first site need this.
+ */
+async function selectSite(root: ReactTestInstance, siteName: string) {
+  const selector = findByTestId(root, 'model-probe-site-selector');
+  const trigger = selector.find((node) => (
+    node.type === 'button' && node.props.className === 'modern-select-trigger'
+  ));
+  await act(async () => {
+    trigger.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  });
+  await flushMicrotasks();
+
+  const option = findByTestId(root, 'model-probe-site-selector').find((node) => (
+    node.props.className?.startsWith?.('modern-select-option')
+    && node.type === 'button'
+    // Prefix match, not equality: a site with saved overrides carries a 「● 已自定义」
+    // marker in its label, so an exact match would only ever find pristine sites.
+    && node.findAll((child) => (
+      child.props.className === 'modern-select-option-label'
+      && collectText(child).trim().startsWith(siteName)
+    )).length === 1
+  ));
+  await act(async () => {
+    option.props.onClick({ stopPropagation() {}, preventDefault() {} });
+  });
+  await flushMicrotasks();
 }
 
 function findSaveConfigButton(root: ReactTestInstance): ReactTestInstance {
@@ -318,6 +356,7 @@ describe('ModelProbe global configuration panel', () => {
         errorKeywords: ['no available channel'],
         concurrency: 3,
         timeoutMs: 15_000,
+        maxTokens: 77,
         syncToRouting: false,
       });
     } finally {
@@ -684,6 +723,7 @@ describe('ModelProbe per-site configuration panel', () => {
   it('treats a stored value that matches no preset as a custom entry and keeps it editable', async () => {
     const root = await renderPage();
     try {
+      await selectSite(root.root, '站点乙');
       const uaSelect = findByTestId(root.root, 'model-probe-site-user-agent-9');
       const trigger = uaSelect.find((node) => (
         node.type === 'button'
@@ -719,6 +759,7 @@ describe('ModelProbe per-site configuration panel', () => {
   it('says a blank custom User-Agent inherits the global preset, not that it sends none', async () => {
     const root = await renderPage();
     try {
+      await selectSite(root.root, '站点乙');
       const customInput = findByTestId(root.root, 'model-probe-site-user-agent-custom-9');
 
       // The server treats a blank per-site override as "use the global default
@@ -740,6 +781,7 @@ describe('ModelProbe per-site configuration panel', () => {
   it('warns in place that clearing the custom field will fall back to 继承全局', async () => {
     const root = await renderPage();
     try {
+      await selectSite(root.root, '站点乙');
       const customInput = findByTestId(root.root, 'model-probe-site-user-agent-custom-9');
       await act(async () => {
         customInput.props.onChange({ target: { value: '   ' } });
@@ -757,6 +799,7 @@ describe('ModelProbe per-site configuration panel', () => {
   it('saves an inherited User-Agent as an empty string', async () => {
     const root = await renderPage();
     try {
+      await selectSite(root.root, '站点乙');
       const uaSelect = findByTestId(root.root, 'model-probe-site-user-agent-9');
       const inheritOption = uaSelect.find((node) => (
         node.type === 'button'
@@ -981,6 +1024,7 @@ describe('ModelProbe per-site User-Agent with a non-blank global custom preset',
     apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
     const root = await renderPage();
     try {
+      await selectSite(root.root, '站点乙');
       const select = findByTestId(root.root, 'model-probe-site-user-agent-9');
       await act(async () => {
         select.find((node) => (
@@ -1037,6 +1081,7 @@ describe('ModelProbe disabled site visibility', () => {
     });
     const root = await renderPage();
     try {
+      await selectSite(root.root, '站点乙');
       // `modelProbeRunService` skips any site whose status is not 'active'. Fetching
       // that status and never showing it lets an operator tune settings for a site
       // that will never be probed.
@@ -1190,6 +1235,120 @@ describe('ModelProbe refresh failure handling', () => {
       expect(text).toContain('首次加载失败');
       expect(text).not.toContain('站点甲');
       expect(root.root.findAll((node) => node.props['data-testid'] === 'model-probe-refresh-error')).toHaveLength(0);
+    } finally {
+      root.unmount();
+    }
+  });
+});
+
+/**
+ * The desktop per-site panel shows ONE site at a time, selected from a dropdown.
+ * The operator asked for this because a config block per site consumed the whole
+ * viewport once more than a couple of sites existed.
+ */
+describe('ModelProbe per-site panel site selector', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig(),
+      limits: buildLimits(),
+    });
+    apiMock.getModelProbeSites.mockResolvedValue({ success: true, sites: SITES });
+    apiMock.saveModelProbeSiteConfig.mockImplementation(async (siteId: number, patch: Record<string, unknown>) => ({
+      success: true,
+      site: { ...SITES.find((site) => site.id === siteId), ...patch },
+    }));
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('renders only the selected site, and swaps when the selection changes', async () => {
+    const root = await renderPage();
+    try {
+      // Site 4 is first, so it is the default selection...
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-4'
+      ))).toHaveLength(1);
+      // ...and the other site's block must be absent, which is the whole point of
+      // the change. Paired with the positive assertion above so this cannot pass
+      // against a panel that renders nothing at all.
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-9'
+      ))).toHaveLength(0);
+
+      await selectSite(root.root, '站点乙');
+
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-9'
+      ))).toHaveLength(1);
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-4'
+      ))).toHaveLength(0);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('marks sites whose stored settings differ from the defaults', async () => {
+    const root = await renderPage();
+    try {
+      const labels = selectOptionLabels(findByTestId(root.root, 'model-probe-site-selector'));
+      // Site 9 stores probeEndpointType 'chat' and a literal UA; site 4 stores the
+      // defaults ('auto' and ''), so exactly one option carries the marker.
+      expect(labels.filter((label) => label.includes('已自定义'))).toHaveLength(1);
+      expect(labels.find((label) => label.startsWith('站点乙'))).toContain('已自定义');
+      expect(labels.find((label) => label.startsWith('站点甲'))).not.toContain('已自定义');
+
+      const summary = collectText(findByTestId(root.root, 'model-probe-site-override-count'));
+      expect(summary).toContain('1 个站点已自定义');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('says so plainly when no site has been customised', async () => {
+    // Positive control for the marker: with both sites at their defaults the
+    // count must flip, so a hard-coded 「1 个站点已自定义」 cannot pass both tests.
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [SITES[0], { ...SITES[1], probeEndpointType: 'auto', probeUserAgent: '' }],
+    });
+    const root = await renderPage();
+    try {
+      const labels = selectOptionLabels(findByTestId(root.root, 'model-probe-site-selector'));
+      expect(labels.filter((label) => label.includes('已自定义'))).toHaveLength(0);
+      expect(collectText(findByTestId(root.root, 'model-probe-site-override-count')))
+        .toContain('所有站点都使用默认设置');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps the selection valid when the keyword filter excludes it', async () => {
+    const root = await renderPage();
+    try {
+      await selectSite(root.root, '站点乙');
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-9'
+      ))).toHaveLength(1);
+
+      // Filtering site 9 out must move the selection rather than leave a config
+      // block mounted for a site the operator can no longer see in the dropdown.
+      const keywordInput = findByTestId(root.root, 'model-probe-site-keyword');
+      await act(async () => {
+        keywordInput.props.onChange({ target: { value: '站点甲' } });
+      });
+      await flushMicrotasks();
+
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-9'
+      ))).toHaveLength(0);
+      expect(root.root.findAll((node) => (
+        node.props['data-testid'] === 'model-probe-site-config-4'
+      ))).toHaveLength(1);
     } finally {
       root.unmount();
     }

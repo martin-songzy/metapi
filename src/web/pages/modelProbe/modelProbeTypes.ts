@@ -56,6 +56,7 @@ export type ModelProbeConfigDraft = {
   defaultUserAgentId: string;
   concurrencyText: string;
   timeoutMsText: string;
+  maxTokensText: string;
   syncToRouting: boolean;
   /**
    * Carried through, and editable in exactly one place: the value of the
@@ -134,6 +135,7 @@ export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfi
     defaultUserAgentId: config.defaultUserAgentId,
     concurrencyText: String(config.concurrency),
     timeoutMsText: String(config.timeoutMs),
+    maxTokensText: String(config.maxTokens),
     syncToRouting: config.syncToRouting,
     userAgents: config.userAgents.map((preset) => ({ ...preset })),
   };
@@ -147,7 +149,7 @@ export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfi
 export function configPayloadFromDraft(
   draft: ModelProbeConfigDraft,
   limits: ModelProbeConfigLimits,
-  saved: Pick<ModelProbeConfig, 'concurrency' | 'timeoutMs'>,
+  saved: Pick<ModelProbeConfig, 'concurrency' | 'timeoutMs' | 'maxTokens'>,
 ): ModelProbeConfigPayload {
   return {
     interestPatterns: splitConfigLines(draft.interestPatternsText),
@@ -166,6 +168,12 @@ export function configPayloadFromDraft(
       limits.minTimeoutMs,
       limits.maxTimeoutMs,
       saved.timeoutMs,
+    ),
+    maxTokens: clampDraftInteger(
+      draft.maxTokensText,
+      limits.minMaxTokens,
+      limits.maxMaxTokens,
+      saved.maxTokens,
     ),
     syncToRouting: draft.syncToRouting,
   };
