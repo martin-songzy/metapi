@@ -14,6 +14,20 @@ function capReason(reason: string): string {
   return reason.slice(0, 1_000);
 }
 
+/**
+ * Collapses whitespace and caps an upstream excerpt for embedding in `reason`.
+ *
+ * 160 characters: long enough to show a full short reply or the decisive half of
+ * an error body; short enough that a chatty model cannot push the operator-facing
+ * reason toward the 1000-character cap. The capReason wrapper still bounds the
+ * final string regardless.
+ */
+function excerptForReason(text: string, max = 160): string {
+  const collapsed = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (!collapsed) return '(empty)';
+  return collapsed.length <= max ? collapsed : `${collapsed.slice(0, max)}…`;
+}
+
 function unsupported(reason: string): ModelProbeResponseClassification {
   return {
     status: 'unsupported',
@@ -184,7 +198,7 @@ export function classifySuccessfulProbeResponse(input: {
     const errorKeyword = findErrorKeyword([input.rawBody], errorKeywords);
     return errorKeyword
       ? unsupported(`probe response matched error keyword: ${errorKeyword}`)
-      : inconclusive('invalid or non-JSON probe response');
+      : inconclusive(`invalid or non-JSON probe response: 「${excerptForReason(input.rawBody)}」`);
   }
 
   if (!isJsonObject(body)) {
@@ -193,7 +207,7 @@ export function classifySuccessfulProbeResponse(input: {
     const errorKeyword = findErrorKeyword([searchableText(body), input.rawBody], errorKeywords);
     return errorKeyword
       ? unsupported(`probe response matched error keyword: ${errorKeyword}`)
-      : inconclusive('invalid or non-JSON probe response');
+      : inconclusive(`invalid or non-JSON probe response: 「${excerptForReason(input.rawBody)}」`);
   }
 
   // An announced top-level error settles ONE thing on its own: the reply is not an
@@ -235,7 +249,7 @@ export function classifySuccessfulProbeResponse(input: {
     const errorKeyword = findErrorKeyword([searchableText(announced)], errorKeywords);
     return errorKeyword
       ? unsupported(`probe response matched error keyword: ${errorKeyword}`)
-      : inconclusive('probe response contains an unrecognized top-level error', 'error_body');
+      : inconclusive(`unrecognized top-level error: 「${excerptForReason(searchableText(announced))}」`, 'error_body');
   }
 
   const protocolShaped = isProtocolShapedResponse(input.endpoint, body);
@@ -249,7 +263,10 @@ export function classifySuccessfulProbeResponse(input: {
     return {
       status: 'supported',
       failureKind: null,
-      reason: 'probe response contains protocol-native content',
+      // The excerpt is the point: 「可用」 with a generic reason forces the operator
+      // to re-run a probe by hand just to see what the model actually said — which
+      // spends quota again. Showing the reply's own words makes the verdict checkable.
+      reason: `model replied: 「${excerptForReason(content)}」`,
     };
   }
 
@@ -260,6 +277,10 @@ export function classifySuccessfulProbeResponse(input: {
   if (errorKeyword) return unsupported(`probe response matched error keyword: ${errorKeyword}`);
 
   return protocolShaped
-    ? inconclusive('probe response contains no usable content')
-    : inconclusive('invalid or non-JSON probe response');
+    // Here the extracted content is empty BY DEFINITION, so the raw body is the
+    // only thing that can explain why: an empty `choices[0].message.content`, a
+    // content array of tool-call blocks, a reasoning-only reply — each needs a
+    // different follow-up, and without the excerpt they all look identical.
+    ? inconclusive(`no usable content in protocol-shaped reply: 「${excerptForReason(input.rawBody)}」`)
+    : inconclusive(`invalid or non-JSON probe response: 「${excerptForReason(input.rawBody)}」`);
 }

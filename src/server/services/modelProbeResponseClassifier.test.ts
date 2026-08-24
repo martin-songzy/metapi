@@ -284,7 +284,7 @@ describe('classifySuccessfulProbeResponse', () => {
     })).toMatchObject({
       status: 'inconclusive',
       failureKind: 'empty_content',
-      reason: 'invalid or non-JSON probe response',
+      reason: expect.stringContaining('invalid or non-JSON probe response'),
     });
 
     expect(classifySuccessfulProbeResponse({
@@ -293,7 +293,7 @@ describe('classifySuccessfulProbeResponse', () => {
     })).toMatchObject({
       status: 'inconclusive',
       failureKind: 'empty_content',
-      reason: 'invalid or non-JSON probe response',
+      reason: expect.stringContaining('temporarily unavailable'),
     });
 
     expect(classifySuccessfulProbeResponse({
@@ -310,7 +310,7 @@ describe('classifySuccessfulProbeResponse', () => {
     })).toMatchObject({
       status: 'inconclusive',
       failureKind: 'empty_content',
-      reason: 'probe response contains no usable content',
+      reason: expect.stringContaining('no usable content in protocol-shaped reply'),
     });
 
     expect(classifySuccessfulProbeResponse({
@@ -321,7 +321,7 @@ describe('classifySuccessfulProbeResponse', () => {
     })).toMatchObject({
       status: 'inconclusive',
       failureKind: 'empty_content',
-      reason: 'probe response contains no usable content',
+      reason: expect.stringContaining('no usable content in protocol-shaped reply'),
     });
   });
 
@@ -361,5 +361,84 @@ describe('classifySuccessfulProbeResponse', () => {
     });
 
     expect(result.reason.length).toBe(1_000);
+  });
+});
+
+/**
+ * Reasons carry an excerpt of what the upstream actually returned. A generic
+ * 「可用」/「无可用内容」 verdict forced the operator to re-run a probe by hand just
+ * to see the reply — spending quota again — and made `empty_content` undiagnosable:
+ * an empty `choices[0].message.content`, tool-call-only blocks, and a reasoning-only
+ * reply all looked identical without the body.
+ */
+describe('reason excerpts', () => {
+  it('quotes the model reply on supported', () => {
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: JSON.stringify({
+        choices: [{ message: { content: 'The tower of London is in England.' } }],
+      }),
+    })).toMatchObject({
+      status: 'supported',
+      reason: 'model replied: 「The tower of London is in England.」',
+    });
+  });
+
+  it('collapses whitespace and truncates long replies', () => {
+    const long = 'word '.repeat(80) + 'END';
+    const result = classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: JSON.stringify({ choices: [{ message: { content: `line1\n\n  line2\t${long}` } }] }),
+    });
+
+    expect(result.status).toBe('supported');
+    expect(result.reason).toContain('「line1 line2 word word');
+    expect(result.reason).toContain('…');
+    expect(result.reason.length).toBeLessThan(200);
+  });
+
+  it('shows the raw body when a protocol-shaped reply has no extractable content', () => {
+    const raw = JSON.stringify({ choices: [{ message: { content: '', reasoning: 'thinking...' } }] });
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: raw,
+    })).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'empty_content',
+      reason: expect.stringContaining('"reasoning":"thinking..."'),
+    });
+  });
+
+  it('shows the raw text for a non-JSON body', () => {
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: '<html>please log in</html>',
+    })).toMatchObject({
+      status: 'inconclusive',
+      reason: 'invalid or non-JSON probe response: 「<html>please log in</html>」',
+    });
+  });
+
+  it('shows the announced error text when no keyword matches it', () => {
+    expect(classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: JSON.stringify({ error: { message: '余额不足，请充值' } }),
+      errorKeywords: ['no such model'],
+    })).toMatchObject({
+      status: 'inconclusive',
+      failureKind: 'error_body',
+      reason: expect.stringContaining('余额不足，请充值'),
+    });
+  });
+
+  it('falls back to the raw body rather than quoting nothing', () => {
+    // Whitespace-only visible content: what explains the verdict is the BODY
+    // (here, a reasoning field), so the excerpt must come from rawBody.
+    const result = classifySuccessfulProbeResponse({
+      endpoint: 'chat',
+      rawBody: '{"choices":[{"message":{"content":"   ","reasoning":"spent all tokens thinking"}}]}',
+    });
+    expect(result.status).toBe('inconclusive');
+    expect(result.reason).toContain('spent all tokens thinking');
   });
 });
