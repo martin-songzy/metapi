@@ -12,6 +12,7 @@ const getAdapterMock = vi.fn();
 const resolvePlatformUserIdMock = vi.fn();
 const resolveChannelProxyUrlMock = vi.fn();
 const withAccountProxyOverrideMock = vi.fn();
+const withSiteRecordProxyRequestInitMock = vi.fn();
 const isUsableAccountTokenMock = vi.fn();
 const isMaskedTokenValueMock = vi.fn();
 const getOauthInfoFromAccountMock = vi.fn();
@@ -97,6 +98,7 @@ vi.mock('./accountExtraConfig.js', () => ({
 vi.mock('./siteProxy.js', () => ({
   resolveChannelProxyUrl: (...args: unknown[]) => resolveChannelProxyUrlMock(...args),
   withAccountProxyOverride: (...args: unknown[]) => withAccountProxyOverrideMock(...args),
+  withSiteRecordProxyRequestInit: (...args: unknown[]) => withSiteRecordProxyRequestInitMock(...args),
 }));
 
 vi.mock('./accountTokenService.js', () => ({
@@ -151,6 +153,7 @@ describe('discoverModelsForActiveProbe', () => {
   let insideProxyOverride = false;
   let observedInsideProxyOverride = false;
   let observedProxyUrl: unknown;
+  let tokenCatalogFetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -165,6 +168,7 @@ describe('discoverModelsForActiveProbe', () => {
     resolvePlatformUserIdMock.mockReset();
     resolveChannelProxyUrlMock.mockReset();
     withAccountProxyOverrideMock.mockReset();
+    withSiteRecordProxyRequestInitMock.mockReset();
     isUsableAccountTokenMock.mockReset();
     isMaskedTokenValueMock.mockReset();
     getOauthInfoFromAccountMock.mockReset();
@@ -192,6 +196,15 @@ describe('discoverModelsForActiveProbe', () => {
         insideProxyOverride = false;
       }
     });
+    withSiteRecordProxyRequestInitMock.mockImplementation(
+      async (_site: unknown, init: RequestInit) => init,
+    );
+    // Every account fixture carries an apiToken, so discovery now tries the
+    // token-scoped `/v1/models` catalog before the adapter. Default the fetch stub
+    // to a 404 so all pre-existing tests exercise the FALLBACK path deterministically
+    // instead of attempting real DNS lookups against the fake hostname.
+    tokenCatalogFetchMock = vi.fn(async () => new Response('not found', { status: 404 }));
+    vi.stubGlobal('fetch', tokenCatalogFetchMock);
     getModelsMock.mockImplementation(async () => {
       observedInsideProxyOverride = insideProxyOverride;
       return ['gpt-5.4'];
@@ -853,5 +866,73 @@ describe('discoverModelsForActiveProbe', () => {
     // could hide one.
     expect(code).not.toMatch(/db\.(insert|update|delete)\b/);
     expect(code).not.toMatch(/db\.transaction\b/);
+  });
+
+  /**
+   * Token-scoped discovery.
+   *
+   * The adapter path lists what the USER can reach; the probe fires with a TOKEN,
+   * and tokens sit in one group — so a listed model can be unreachable for the key
+   * actually being used, and the sweep reported "failures" for models that work
+   * through a different key on the same site. `/v1/models` authenticated AS the
+   * probe key makes the list and the credential agree.
+   */
+  describe('token-scoped model catalog', () => {
+    function primeApiTokenAccount() {
+      primeTables({ accounts: [account({ id: 1, apiToken: 'sk-probe-key' })] });
+    }
+
+    it('prefers /v1/models answered to the probe key over the adapter listing', async () => {
+      primeApiTokenAccount();
+      tokenCatalogFetchMock.mockImplementation(async () => new Response(JSON.stringify({
+        object: 'list',
+        data: [{ id: 'm-in-group-a' }, { id: 'm-in-group-b' }],
+      }), { status: 200 }));
+      // The adapter would have listed a model the key cannot reach; if this ever
+      // gets called the test below fails, which is the actual point.
+      getModelsMock.mockResolvedValue(['m-in-group-a', 'm-not-for-this-key']);
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(result.source).toBe('live');
+      expect(result.models).toEqual(['m-in-group-a', 'm-in-group-b']);
+      expect(result.credential).toBe('sk-probe-key');
+      expect(getModelsMock).not.toHaveBeenCalled();
+      // The request must carry the SAME credential probing will use...
+      const [url, init] = tokenCatalogFetchMock.mock.calls[0];
+      expect(url).toBe('https://api.probe.example.com/v1/models');
+      expect(new Headers((init as RequestInit).headers).get('authorization')).toBe('Bearer sk-probe-key');
+    });
+
+    it.each([
+      ['a 404 from a platform without the endpoint', 404, 'nope'],
+      ['malformed JSON', 200, '<html>login</html>'],
+      ['an empty group', 200, JSON.stringify({ data: [] })],
+    ])('falls back to the adapter on %s', async (_name, status, body) => {
+      primeApiTokenAccount();
+      tokenCatalogFetchMock.mockImplementation(async () => new Response(body, { status }));
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(result.source).toBe('live');
+      expect(result.models).toEqual(['gpt-5.4']);
+      expect(getModelsMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not try the token catalog for session-style credentials', async () => {
+      // An access token is not a Bearer key; hitting /v1/models with it is noise.
+      // The empty-array branch of the mock matters: `[]` and null are distinct in
+      // the helper, and neither may trigger an attempt here.
+      primeTables({ accounts: [account({ id: 1, accessToken: 'session-token-value' })] });
+      getModelsMock.mockResolvedValue(['gpt-5.4']);
+
+      const { discoverModelsForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverModelsForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(tokenCatalogFetchMock).not.toHaveBeenCalled();
+      expect(result.models).toEqual(['gpt-5.4']);
+    });
   });
 });

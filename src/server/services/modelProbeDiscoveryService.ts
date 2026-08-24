@@ -3,7 +3,7 @@ import { db, schema } from '../db/index.js';
 import { requireSiteApiBaseUrl } from './siteApiEndpointService.js';
 import { getAdapter } from './platforms/index.js';
 import { resolvePlatformUserId } from './accountExtraConfig.js';
-import { resolveChannelProxyUrl, withAccountProxyOverride } from './siteProxy.js';
+import { resolveChannelProxyUrl, withAccountProxyOverride, withSiteRecordProxyRequestInit } from './siteProxy.js';
 import {
   ACCOUNT_TOKEN_VALUE_STATUS_READY,
   isMaskedTokenValue,
@@ -11,6 +11,7 @@ import {
 } from './accountTokenService.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { maskCredentialInText } from './modelProbeSecrets.js';
+import { fetchTokenAccessibleModels } from './modelProbeTokenModels.js';
 
 /**
  * Read-only model discovery for the active model probe preview/run flows.
@@ -335,6 +336,36 @@ export async function discoverModelsForActiveProbe(input: {
 
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
   const proxyUrl = resolveChannelProxyUrl(site, account.extraConfig);
+
+  // Prefer the OpenAI-compatible catalog scoped to THIS token before any
+  // management-API listing. The adapter path below reads what the USER can reach;
+  // the probe then fires with a TOKEN, and tokens sit in one group — so a model the
+  // management API lists can be unreachable for that key ("无可用渠道") even though
+  // it works through another key on the same site. `/v1/models` authenticated AS
+  // the probe key makes the target list and the probing credential agree.
+  //
+  // Opportunistic by design: only `api_token` credentials are tried (session-style
+  // access tokens are not Bearer keys), and ANY failure here falls through to the
+  // adapter path untouched — some platforms do not expose `/v1/models` at all, and
+  // discovery must not regress for them. `fetchTokenAccessibleModels` never throws.
+  if (credentialKind === 'api_token') {
+    const viaToken = await fetchTokenAccessibleModels({
+      baseUrl,
+      credential,
+      timeoutMs: input.timeoutMs,
+      buildRequestInit: (init) => withSiteRecordProxyRequestInit(site, init, proxyUrl),
+    });
+    if (viaToken && viaToken.length > 0) {
+      return {
+        site,
+        account,
+        credential,
+        models: normalizeModelNames(viaToken),
+        source: 'live',
+        credentialKind,
+      };
+    }
+  }
 
   let liveModels: string[] = [];
   let liveFailure: ModelProbeLiveFailure | null = null;
