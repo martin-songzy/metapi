@@ -63,6 +63,17 @@ export type EndpointFlowResult =
 
 export type ExecuteEndpointFlowInput = {
   siteUrl: string;
+  /**
+   * Overrides the request's BASE URL — this is a mirror/gateway rewrite, NOT a
+   * proxy. Proxying is installed as an undici dispatcher by the caller's
+   * `dispatchRequest`, and the three proxy surfaces therefore leave this unset.
+   *
+   * Only `http:` and `https:` are honoured. A `socks5://user:pass@host:port` value
+   * passed here used to be concatenated with the request path and handed to
+   * `fetch`, which rejects any URL carrying credentials, so every request failed
+   * with "Request cannot be constructed from a URL that includes credentials".
+   * Such a value is ignored now rather than producing that malformed URL.
+   */
   proxyUrl?: string | null;
   disableCrossProtocolFallback?: boolean;
   endpointCandidates: UpstreamEndpoint[];
@@ -98,6 +109,28 @@ async function runEndpointFlowHook<T>(
   }
 }
 
+/**
+ * Whether a `proxyUrl` is usable as a BASE URL override.
+ *
+ * Only `http:`/`https:` qualify. The guard exists because the option's name invites
+ * callers to pass a real proxy URL, and a `socks5://user:pass@host:port` value was
+ * concatenated with the request path and handed to `fetch`, which rejects URLs
+ * carrying credentials — failing every request instead of proxying it. Ignoring an
+ * unusable value falls back to `siteUrl`, so the request still goes out through
+ * whatever dispatcher the caller installed, which is where proxying belongs.
+ */
+function isUsableBaseUrlOverride(proxyUrl: string | null | undefined): boolean {
+  const normalized = String(proxyUrl || '').trim();
+  if (!normalized) return false;
+
+  try {
+    const protocol = new URL(normalized).protocol.toLowerCase();
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Promise<EndpointFlowResult> {
   const endpointCount = input.endpointCandidates.length;
   if (endpointCount <= 0) {
@@ -116,8 +149,8 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
     const endpoint = input.endpointCandidates[endpointIndex] as UpstreamEndpoint;
     const request = input.buildRequest(endpoint, endpointIndex);
     const defaultTarget = buildUpstreamUrl(input.siteUrl, request.path);
-    const targetUrl = input.proxyUrl
-      ? buildUpstreamUrl(input.proxyUrl, request.path)
+    const targetUrl = isUsableBaseUrlOverride(input.proxyUrl)
+      ? buildUpstreamUrl(input.proxyUrl as string, request.path)
       : defaultTarget;
 
     const attemptStartedAtMs = Date.now();
@@ -191,8 +224,8 @@ export async function executeEndpointFlow(input: ExecuteEndpointFlowInput): Prom
       if (recovered?.upstream?.ok) {
         const recoveredRequest = recovered.request ?? baseContext.request;
         const recoveredTargetUrl = recovered.targetUrl ?? (
-          input.proxyUrl
-            ? buildUpstreamUrl(input.proxyUrl, recovered.upstreamPath)
+          isUsableBaseUrlOverride(input.proxyUrl)
+            ? buildUpstreamUrl(input.proxyUrl as string, recovered.upstreamPath)
             : buildUpstreamUrl(input.siteUrl, recovered.upstreamPath)
         );
         await runEndpointFlowHook(input.onAttemptSuccess, {

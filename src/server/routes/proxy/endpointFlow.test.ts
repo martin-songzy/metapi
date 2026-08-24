@@ -403,4 +403,50 @@ describe('executeEndpointFlow', () => {
       expect(result.errText).toContain('Upstream returned HTTP 400');
     }
   });
+
+  /**
+   * `proxyUrl` overrides the request's BASE URL — it is a mirror/gateway rewrite,
+   * not a proxy, and proxying belongs to the caller's dispatcher. The name invites
+   * the confusion, and the active model probe made exactly that mistake: it passed
+   * the site's configured `socks5://user:pass@host:port` here as well as to its
+   * dispatcher, so every probe against a proxied site was sent to
+   * `socks5://user:pass@host:port/v1/responses` and `fetch` refused the URL
+   * outright ("Request cannot be constructed from a URL that includes
+   * credentials"). An unusable scheme now falls back to `siteUrl`.
+   */
+  it.each([
+    'socks5://cc-proxy:secret@10.0.0.1:10080',
+    'socks5h://cc-proxy:secret@10.0.0.1:10080',
+    'socks4://10.0.0.1:1080',
+    'not-a-url',
+  ])('ignores %s as a base URL override and uses siteUrl', async (proxyUrl) => {
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response('{}', { status: 200 })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      proxyUrl,
+      endpointCandidates: ['responses'],
+      buildRequest: () => requestFor('/v1/responses'),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://example.com/v1/responses');
+  });
+
+  it('still honours an http(s) base URL override', async () => {
+    // Positive control: without it, a guard that rejected EVERY override — or one
+    // that ignored `proxyUrl` entirely — would satisfy the cases above.
+    fetchMock.mockResolvedValueOnce(toUndiciResponse(new Response('{}', { status: 200 })));
+
+    const result = await executeEndpointFlow({
+      siteUrl: 'https://example.com',
+      proxyUrl: 'https://mirror.example.net',
+      endpointCandidates: ['responses'],
+      buildRequest: () => requestFor('/v1/responses'),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('https://mirror.example.net/v1/responses');
+  });
 });
