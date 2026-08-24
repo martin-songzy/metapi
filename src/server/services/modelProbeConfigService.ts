@@ -15,6 +15,7 @@ export type ModelProbeConfig = {
   errorKeywords: string[];
   concurrency: number;
   timeoutMs: number;
+  maxTokens: number;
   syncToRouting: boolean;
 };
 
@@ -24,6 +25,28 @@ export const MODEL_PROBE_MIN_CONCURRENCY = 1;
 export const MODEL_PROBE_MAX_CONCURRENCY = 8;
 export const MODEL_PROBE_MIN_TIMEOUT_MS = 3_000;
 export const MODEL_PROBE_MAX_TIMEOUT_MS = 60_000;
+
+/**
+ * Output-token budget for one probe request.
+ *
+ * Raised from a hard-coded 8 because that budget manufactured false
+ * `empty_content` verdicts: the cap counts every token the model emits, so a model
+ * that opens with a short preamble — or any reasoning model, whose thinking tokens
+ * are billed against this same budget — hit the ceiling before producing a single
+ * character of visible content. The probe then saw a protocol-shaped reply with no
+ * extractable text and reported 「未确定」, which reads as "could not tell" when the
+ * real answer was "the model works, we just cut it off".
+ *
+ * 64 is the default rather than something larger because a sweep pays this per
+ * model on real quota, and 64 is comfortably past the truncation cliff for ordinary
+ * chat models while staying negligible in cost. It is deliberately NOT enough for
+ * every reasoning model — some spend hundreds of thinking tokens before any content
+ * — and no fixed value would be, which is exactly why this is configurable now. An
+ * operator seeing `empty_content` on reasoning models should raise it.
+ */
+export const MODEL_PROBE_MIN_MAX_TOKENS = 1;
+export const MODEL_PROBE_MAX_MAX_TOKENS = 4_096;
+export const MODEL_PROBE_DEFAULT_MAX_TOKENS = 64;
 
 /**
  * Probe User-Agent presets are defined here rather than reused from
@@ -92,6 +115,7 @@ export function getDefaultModelProbeConfig(): ModelProbeConfig {
     errorKeywords: [...DEFAULT_ERROR_KEYWORDS],
     concurrency: 1,
     timeoutMs: 15_000,
+    maxTokens: MODEL_PROBE_DEFAULT_MAX_TOKENS,
     syncToRouting: false,
   };
 }
@@ -234,6 +258,12 @@ export function normalizeModelProbeConfig(input: unknown): ModelProbeConfig {
       MODEL_PROBE_MIN_TIMEOUT_MS,
       MODEL_PROBE_MAX_TIMEOUT_MS,
       defaults.timeoutMs,
+    ),
+    maxTokens: clampInteger(
+      record.maxTokens,
+      MODEL_PROBE_MIN_MAX_TOKENS,
+      MODEL_PROBE_MAX_MAX_TOKENS,
+      defaults.maxTokens,
     ),
     syncToRouting: record.syncToRouting === true,
   };

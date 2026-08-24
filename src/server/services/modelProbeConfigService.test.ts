@@ -170,12 +170,22 @@ describe('modelProbeConfigService', () => {
       expect(service.normalizeModelProbeConfig({ timeoutMs: 999999 }).timeoutMs).toBe(60000);
       expect(service.normalizeModelProbeConfig({ timeoutMs: 20000 }).timeoutMs).toBe(20000);
       expect(service.normalizeModelProbeConfig({ timeoutMs: Number.NaN }).timeoutMs).toBe(15000);
+
+      // The budget counts thinking tokens too, so a value small enough to truncate
+      // before any visible content turns working models into false `empty_content`
+      // verdicts. 0 is the dangerous input and must clamp, not pass through.
+      expect(service.normalizeModelProbeConfig({ maxTokens: 0 }).maxTokens).toBe(1);
+      expect(service.normalizeModelProbeConfig({ maxTokens: 99999 }).maxTokens).toBe(4096);
+      expect(service.normalizeModelProbeConfig({ maxTokens: 256 }).maxTokens).toBe(256);
+      expect(service.normalizeModelProbeConfig({ maxTokens: 128.9 }).maxTokens).toBe(128);
+      expect(service.normalizeModelProbeConfig({ maxTokens: Number.NaN }).maxTokens).toBe(64);
     });
 
     it('falls back to defaults instead of clamping empty-ish numeric fields to the floor', () => {
       for (const blank of [null, undefined, '', '   ', [], false, {}]) {
         expect(service.normalizeModelProbeConfig({ timeoutMs: blank }).timeoutMs).toBe(15000);
         expect(service.normalizeModelProbeConfig({ concurrency: blank }).concurrency).toBe(1);
+        expect(service.normalizeModelProbeConfig({ maxTokens: blank }).maxTokens).toBe(64);
       }
     });
 

@@ -261,6 +261,23 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
             />
             <div style={hintStyle}>{limits.minTimeoutMs} ~ {limits.maxTimeoutMs}。</div>
           </div>
+
+          <div>
+            <div style={fieldLabelStyle}>单次探测最大输出 token</div>
+            <input
+              type="number"
+              data-testid="model-probe-max-tokens"
+              value={draft.maxTokensText}
+              min={limits.minMaxTokens}
+              max={limits.maxMaxTokens}
+              onChange={(event) => setDraft((prev) => ({ ...prev, maxTokensText: event.target.value }))}
+              style={numberInputStyle}
+            />
+            <div style={hintStyle}>
+              {limits.minMaxTokens} ~ {limits.maxMaxTokens}。这个额度包含模型的思考 token，太小会让模型还没输出正文就被截断，
+              结果被判成「未确定 / 无可用内容」。推理模型如果频繁出现这种判定，就调大这个值。
+            </div>
+          </div>
         </ResponsiveFormGrid>
       </div>
 

@@ -14,6 +14,8 @@ import {
   MODEL_PROBE_MAX_ERROR_KEYWORD_COUNT,
   MODEL_PROBE_MAX_PROMPT_COUNT,
   MODEL_PROBE_MAX_TIMEOUT_MS,
+  MODEL_PROBE_MIN_MAX_TOKENS,
+  MODEL_PROBE_MAX_MAX_TOKENS,
   MODEL_PROBE_MIN_CONCURRENCY,
   MODEL_PROBE_MIN_TIMEOUT_MS,
   loadModelProbeConfig,
@@ -371,6 +373,8 @@ export type ModelProbeConfigLimits = {
   maxConcurrency: number;
   minTimeoutMs: number;
   maxTimeoutMs: number;
+  minMaxTokens: number;
+  maxMaxTokens: number;
   maxInterestPatterns: number;
   maxInterestPatternLength: number;
   maxPrompts: number;
@@ -385,6 +389,8 @@ export function getModelProbeConfigLimits(): ModelProbeConfigLimits {
     maxConcurrency: MODEL_PROBE_MAX_CONCURRENCY,
     minTimeoutMs: MODEL_PROBE_MIN_TIMEOUT_MS,
     maxTimeoutMs: MODEL_PROBE_MAX_TIMEOUT_MS,
+    minMaxTokens: MODEL_PROBE_MIN_MAX_TOKENS,
+    maxMaxTokens: MODEL_PROBE_MAX_MAX_TOKENS,
     maxInterestPatterns: MODEL_PROBE_MAX_PATTERN_COUNT,
     maxInterestPatternLength: MODEL_PROBE_MAX_PATTERN_LENGTH,
     maxPrompts: MODEL_PROBE_MAX_PROMPT_COUNT,

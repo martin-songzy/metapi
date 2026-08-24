@@ -620,6 +620,7 @@ export async function probeSiteModels(
           tokenValue: credential,
           prompt: chooseModelProbePrompt(probeConfig.prompts),
           errorKeywords: probeConfig.errorKeywords,
+          maxTokens: probeConfig.maxTokens,
           ...(userAgent ? { userAgent } : {}),
           ...(forcedEndpoint ? { forcedEndpoint } : {}),
         });
@@ -820,6 +821,7 @@ async function runPostRefreshProbeIfEnabled(params: {
         timeoutMs: probeConfig.timeoutMs,
         prompt: chooseModelProbePrompt(probeConfig.prompts),
         errorKeywords: probeConfig.errorKeywords,
+        maxTokens: probeConfig.maxTokens,
         ...(userAgent ? { userAgent } : {}),
         ...(forcedEndpoint ? { forcedEndpoint } : {}),
       });

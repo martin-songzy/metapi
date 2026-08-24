@@ -792,6 +792,7 @@ export type ModelProbeConfig = {
   errorKeywords: string[];
   concurrency: number;
   timeoutMs: number;
+  maxTokens: number;
   syncToRouting: boolean;
 };
 
@@ -800,6 +801,8 @@ export type ModelProbeConfigLimits = {
   maxConcurrency: number;
   minTimeoutMs: number;
   maxTimeoutMs: number;
+  minMaxTokens: number;
+  maxMaxTokens: number;
   maxInterestPatterns: number;
   maxInterestPatternLength: number;
   maxPrompts: number;
