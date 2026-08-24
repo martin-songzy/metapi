@@ -19,6 +19,7 @@ describe('parseModelProbeConfigPayload', () => {
       errorKeywords: ['insufficient'],
       concurrency: 4,
       timeoutMs: 20000,
+      maxTokens: 777,
       syncToRouting: true,
     });
 
@@ -26,7 +27,29 @@ describe('parseModelProbeConfigPayload', () => {
     if (!result.success) return;
     expect(result.data.interestPatterns).toEqual(['gpt-5', 'claude']);
     expect(result.data.concurrency).toBe(4);
+    expect(result.data.maxTokens).toBe(777);
     expect(result.data.syncToRouting).toBe(true);
+  });
+
+  /**
+   * Regression guard for the deployed incident: `maxTokens` shipped through the
+   * config service, the limits payload and the UI, but NOT through this contract —
+   * whose `.strict()` then rejected every global-config save from the updated
+   * frontend with "unrecognized key". A field is not done until all four layers
+   * accept it; this file is the layer that bit.
+   */
+  it('bounds maxTokens to the same range the config service clamps to', async () => {
+    expect(parseModelProbeConfigPayload({ maxTokens: 1 }).success).toBe(true);
+    expect(parseModelProbeConfigPayload({ maxTokens: 4_096 }).success).toBe(true);
+    for (const bad of [0, -5, 4_097, 12.5, '777']) {
+      expect(parseModelProbeConfigPayload({ maxTokens: bad }).success).toBe(false);
+    }
+
+    // The literals here exist because importing the config service would pull the
+    // database into this contract module — so pin them equal instead.
+    const configService = await import('../services/modelProbeConfigService.js');
+    expect(configService.MODEL_PROBE_MIN_MAX_TOKENS).toBe(1);
+    expect(configService.MODEL_PROBE_MAX_MAX_TOKENS).toBe(4_096);
   });
 
   it('accepts an empty object, which the service then treats as a full reset to defaults', () => {

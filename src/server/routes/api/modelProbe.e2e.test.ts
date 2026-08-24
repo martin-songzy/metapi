@@ -324,6 +324,7 @@ describe('active model probe end to end', () => {
       defaultUserAgentId: 'restart-preset',
       concurrency: 3,
       timeoutMs: 21_000,
+      maxTokens: 777,
       syncToRouting: true,
     });
     expect(saved.concurrency).toBe(3);
@@ -345,6 +346,7 @@ describe('active model probe end to end', () => {
       defaultUserAgentId: 'restart-preset',
       concurrency: 3,
       timeoutMs: 21_000,
+      maxTokens: 777,
       syncToRouting: true,
     });
     expect(reloaded.payload.config.userAgents).toEqual([

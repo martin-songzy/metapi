@@ -18,6 +18,11 @@ export const MAX_PROBE_USER_AGENT_LENGTH = 512;
 
 const probeConcurrencySchema = z.number().int().min(1).max(8);
 const probeTimeoutSchema = z.number().int().min(3000).max(60000);
+// Caps mirror `MODEL_PROBE_MIN/MAX_MAX_TOKENS` in the config service. Duplicated
+// rather than imported because that module touches the database and this one must
+// stay importable without it — same tradeoff as the concurrency/timeout literals
+// above, which is why a test pins the two pairs equal.
+const probeMaxTokensSchema = z.number().int().min(1).max(4_096);
 
 const userAgentPresetSchema = z.object({
   id: z.string().trim().min(1),
@@ -48,6 +53,7 @@ const modelProbeConfigPayloadSchema = z.object({
     .max(MAX_ERROR_KEYWORD_COUNT).optional(),
   concurrency: probeConcurrencySchema.optional(),
   timeoutMs: probeTimeoutSchema.optional(),
+  maxTokens: probeMaxTokensSchema.optional(),
   syncToRouting: z.boolean().optional(),
 }).strict();
 
