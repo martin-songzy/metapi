@@ -773,6 +773,14 @@ async function runActiveModelProbe(
         tokenValue: credential,
         prompt,
         errorKeywords: probeConfig.errorKeywords,
+        maxTokens: probeConfig.maxTokens,
+        // Operator's ruling for the MANUAL sweep: an upstream that refuses to
+        // serve the model means the model is not usable, whatever the status.
+        // Safe to be this decisive here and not on the unattended path, because a
+        // verdict from this sweep only reaches `site_disabled_models` behind both
+        // `PROXY_ROUTING_ENABLED` and the probe config's `syncToRouting`, whereas
+        // `runPostRefreshProbeIfEnabled` writes it on a per-site switch alone.
+        nonSuccessVerdict: 'strict',
         ...(userAgent ? { userAgent } : {}),
         ...(forcedEndpoint ? { forcedEndpoint } : {}),
       });

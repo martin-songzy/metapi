@@ -230,6 +230,112 @@ describe('probeRuntimeModel', () => {
     });
   });
 
+  /**
+   * The cases below cover `nonSuccessVerdict`, which splits what a non-2xx means.
+   *
+   * The three tests above and below them pass no verdict, so they pin the
+   * `conservative` DEFAULT — still the behaviour of the unattended post-refresh
+   * path, which writes `site_disabled_models` on a per-site switch alone and must
+   * not turn one rate-limited moment into a site-wide catalogue wipe. They were not
+   * edited: they encoded a deliberate behaviour, not a bug, and it still holds.
+   *
+   * `strict` is what the operator-triggered sweep passes. It exists because the
+   * keyword list only ever governed 2xx bodies, so a relay answering
+   * `HTTP 503 {"error":{"message":"No available channel for model X"}}` came back
+   * 「不确定」 no matter what keywords were configured — the status was not in the
+   * 400/404/422 allowlist, and the hardcoded patterns wanted `not available`
+   * where the upstream wrote `No available`.
+   */
+  it.each([
+    [503, 'No available channel for model deepseek-v4-pro-0813'],
+    [500, 'internal error'],
+    [429, 'slow down'],
+    [404, 'nothing here'],
+    [400, 'bad request'],
+  ])('treats HTTP %i as unsupported under the strict verdict', async (status, body) => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(body, { status }));
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+      nonSuccessVerdict: 'strict',
+    });
+
+    expect(result).toMatchObject({
+      status: 'unsupported',
+      failureKind: 'model_missing',
+      httpStatus: status,
+    });
+  });
+
+  it.each([401, 403])(
+    'still defers on HTTP %i under the strict verdict',
+    async (status) => {
+      // The carve-out, and the reason `strict` is not simply `status >= 300`: a
+      // rejected credential says the same thing about every model on the site, so
+      // a per-model verdict would bury the thing that needs fixing.
+      resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+      dispatchRuntimeRequestMock.mockResolvedValue(new Response('denied', { status }));
+
+      const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+      const result = await probeRuntimeModel({
+        site,
+        account,
+        modelName: 'gpt-5.4',
+        timeoutMs: 100,
+        nonSuccessVerdict: 'strict',
+      });
+
+      expect(result.status).toBe('inconclusive');
+      expect(result.httpStatus).toBe(status);
+    },
+  );
+
+  it('treats a thrown request as unsupported under the strict verdict', async () => {
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockRejectedValue(new Error('socket closed'));
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+      nonSuccessVerdict: 'strict',
+    });
+
+    expect(result).toMatchObject({
+      status: 'unsupported',
+      failureKind: 'model_missing',
+      httpStatus: null,
+    });
+  });
+
+  it('leaves a 2xx body to the keyword list even under the strict verdict', async () => {
+    // Positive control for the split: `strict` must change only the non-2xx
+    // reading. Without this, a change that made `strict` short-circuit every
+    // response would satisfy all the cases above.
+    resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+    dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200 }));
+
+    const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+    const result = await probeRuntimeModel({
+      site,
+      account,
+      modelName: 'gpt-5.4',
+      timeoutMs: 100,
+      nonSuccessVerdict: 'strict',
+    });
+
+    expect(result.status).toBe('supported');
+  });
+
   it('keeps rate limiting inconclusive', async () => {
     resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
     dispatchRuntimeRequestMock.mockResolvedValue(new Response('slow down', { status: 429 }));
@@ -496,5 +602,86 @@ describe('probeRuntimeModel', () => {
     expect(result.status).toBe('inconclusive');
     expect(result.latencyMs).not.toBeNull();
     expect(elapsedMs).toBeLessThan(200);
+  });
+
+  /**
+  * `max_tokens` used to be hard-coded to 8, which manufactured false
+  * `empty_content` verdicts: the cap counts every token a model emits, thinking
+  * tokens included, so a model that opens with a short preamble hit the ceiling
+  * before producing any visible content. The probe then saw a protocol-shaped reply
+  * with no extractable text and reported 「未确定」 — "could not tell" when the real
+  * answer was "it works, we cut it off".
+   */
+  describe('output-token budget', () => {
+    function dispatchedBody(): Record<string, unknown> {
+      // The body reaches the transport through `buildUpstreamEndpointRequest`, which
+      // this suite mocks, so its argument is where the budget is observable.
+      const call = buildUpstreamEndpointRequestMock.mock.calls[0]?.[0] as
+        { openaiBody?: Record<string, unknown> } | undefined;
+      return call?.openaiBody ?? {};
+    }
+
+    beforeEach(() => {
+      resolveUpstreamEndpointCandidatesMock.mockResolvedValue(['chat']);
+      dispatchRuntimeRequestMock.mockResolvedValue(new Response(JSON.stringify({
+        choices: [{ message: { content: 'OK' } }],
+      }), { status: 200 }));
+    });
+
+    it('sends the configured budget', async () => {
+      const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+      await probeRuntimeModel({
+        site,
+        account,
+        modelName: 'gpt-5.4',
+        timeoutMs: 100,
+        maxTokens: 512,
+      });
+
+      expect(dispatchedBody().max_tokens).toBe(512);
+    });
+
+    it('falls back to the module default when none is given', async () => {
+      const { probeRuntimeModel, RUNTIME_PROBE_FALLBACK_MAX_TOKENS } = await import('./runtimeModelProbe.js');
+      await probeRuntimeModel({
+        site,
+        account,
+        modelName: 'gpt-5.4',
+        timeoutMs: 100,
+      });
+
+      expect(dispatchedBody().max_tokens).toBe(RUNTIME_PROBE_FALLBACK_MAX_TOKENS);
+      // Pinned with a literal too: asserting only against the constant would pass for
+      // any value it happened to hold, including the old 8 that caused the bug.
+      expect(RUNTIME_PROBE_FALLBACK_MAX_TOKENS).toBe(64);
+    });
+
+    it.each([0, -5, Number.NaN])('ignores a nonsensical budget (%p) rather than sending it', async (value) => {
+      const { probeRuntimeModel, RUNTIME_PROBE_FALLBACK_MAX_TOKENS } = await import('./runtimeModelProbe.js');
+      await probeRuntimeModel({
+        site,
+        account,
+        modelName: 'gpt-5.4',
+        timeoutMs: 100,
+        maxTokens: value,
+      });
+
+      // `max_tokens: 0` would make every probe return empty content, i.e. turn the
+      // whole sweep into false 「未确定」 verdicts.
+      expect(dispatchedBody().max_tokens).toBe(RUNTIME_PROBE_FALLBACK_MAX_TOKENS);
+    });
+
+    it('truncates a fractional budget to an integer', async () => {
+      const { probeRuntimeModel } = await import('./runtimeModelProbe.js');
+      await probeRuntimeModel({
+        site,
+        account,
+        modelName: 'gpt-5.4',
+        timeoutMs: 100,
+        maxTokens: 128.9,
+      });
+
+      expect(dispatchedBody().max_tokens).toBe(128);
+    });
   });
 });
