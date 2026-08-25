@@ -134,15 +134,31 @@ describe('model probe API routes', () => {
       expect(response.statusCode).toBe(200);
       const body = response.json() as {
         success: boolean;
-        config: { concurrency: number; timeoutMs: number; interestPatterns: string[]; syncToRouting: boolean };
-        limits: { minConcurrency: number; maxConcurrency: number; confirmTargetThreshold: number; maxRunTargets: number };
+        config: {
+          siteConcurrency: number;
+          modelConcurrency: number;
+          timeoutMs: number;
+          interestPatterns: string[];
+          syncToRouting: boolean;
+        };
+        limits: {
+          minSiteConcurrency: number;
+          maxSiteConcurrency: number;
+          minModelConcurrency: number;
+          maxModelConcurrency: number;
+          confirmTargetThreshold: number;
+          maxRunTargets: number;
+        };
       };
       expect(body.success).toBe(true);
       expect(body.config.interestPatterns).toEqual([]);
-      expect(body.config.concurrency).toBe(1);
+      expect(body.config.siteConcurrency).toBe(5);
+      expect(body.config.modelConcurrency).toBe(1);
       expect(body.config.syncToRouting).toBe(false);
-      expect(body.limits.minConcurrency).toBe(1);
-      expect(body.limits.maxConcurrency).toBe(8);
+      expect(body.limits.minSiteConcurrency).toBe(1);
+      expect(body.limits.maxSiteConcurrency).toBe(10);
+      expect(body.limits.minModelConcurrency).toBe(1);
+      expect(body.limits.maxModelConcurrency).toBe(8);
       expect(body.limits.maxRunTargets).toBe(runService.MAX_ACTIVE_PROBE_RUN_TARGETS);
       expect(body.limits.confirmTargetThreshold).toBeGreaterThan(0);
     });
@@ -153,7 +169,7 @@ describe('model probe API routes', () => {
       const first = await app.inject({
         method: 'PUT',
         url: '/api/model-probe/config',
-        payload: { interestPatterns: ['^gpt-5'], concurrency: 3 },
+        payload: { interestPatterns: ['^gpt-5'], siteConcurrency: 3, modelConcurrency: 2 },
       });
       expect(first.statusCode).toBe(200);
 
@@ -165,15 +181,24 @@ describe('model probe API routes', () => {
 
       expect(second.statusCode).toBe(200);
       const body = second.json() as {
-        config: { interestPatterns: string[]; concurrency: number; syncToRouting: boolean; prompts: string[] };
+        config: {
+          interestPatterns: string[];
+          siteConcurrency: number;
+          modelConcurrency: number;
+          syncToRouting: boolean;
+          prompts: string[];
+        };
       };
       expect(body.config.interestPatterns).toEqual(['^gpt-5']);
-      expect(body.config.concurrency).toBe(3);
+      expect(body.config.siteConcurrency).toBe(3);
+      expect(body.config.modelConcurrency).toBe(2);
       expect(body.config.syncToRouting).toBe(true);
       expect(body.config.prompts.length).toBeGreaterThan(0);
 
       const reread = await app.inject({ method: 'GET', url: '/api/model-probe/config' });
-      expect((reread.json() as { config: { concurrency: number } }).config.concurrency).toBe(3);
+      const rereadConfig = (reread.json() as { config: { siteConcurrency: number; modelConcurrency: number } }).config;
+      expect(rereadConfig.siteConcurrency).toBe(3);
+      expect(rereadConfig.modelConcurrency).toBe(2);
     });
 
     it('maps an uncompilable interest pattern to 400 with the offending entries', async () => {
