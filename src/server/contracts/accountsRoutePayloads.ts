@@ -14,6 +14,16 @@ const accountCreatePayloadSchema = z.object({
   refreshToken: z.string().optional(),
   tokenExpiresAt: z.union([z.number(), z.string()]).optional(),
   skipModelFetch: z.boolean().optional(),
+  /**
+   * Keep the connection even when verification produced nothing.
+   *
+   * Distinct from `skipModelFetch`, which does not even ATTEMPT discovery: this
+   * one still tries, keeps whatever it finds, and only downgrades an empty result
+   * from fatal to acceptable. That is the difference between "I know this key, do
+   * not check it" and "check it, but a site that cannot answer is still worth
+   * managing" — the latter is what a relay with no listable catalogue needs.
+   */
+  allowUnverified: z.boolean().optional(),
   proxyUrl: z.union([z.string(), z.null()]).optional(),
 }).passthrough();
 
@@ -112,6 +122,9 @@ function formatAccountsPayloadError(error: z.ZodError): string {
   }
   if (firstPath === 'skipModelFetch') {
     return 'Invalid skipModelFetch. Expected boolean.';
+  }
+  if (firstPath === 'allowUnverified') {
+    return 'Invalid allowUnverified. Expected boolean.';
   }
   if (firstPath === 'isPinned') {
     return 'Invalid isPinned. Expected boolean.';

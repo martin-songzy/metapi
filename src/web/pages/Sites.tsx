@@ -242,6 +242,7 @@ const platformColors: Record<string, string> = {
   claude: 'badge-warning',
   gemini: 'badge-info',
   cliproxyapi: 'badge-info',
+  generic: 'badge-muted',
 };
 
 const SITE_PLATFORM_OPTIONS = [
@@ -258,6 +259,14 @@ const SITE_PLATFORM_OPTIONS = [
   { value: 'claude', label: 'claude', description: '通用 Claude / Anthropic 兼容接口' },
   { value: 'gemini', label: 'gemini', description: '通用 Gemini / Google AI 兼容接口' },
   { value: 'cliproxyapi', label: 'cliproxyapi', description: 'CPA接入口' },
+  // Last on purpose: this is the deliberate fallback for a site none of the
+  // adapters above can manage, not a choice to reach for first. Picking it for a
+  // site that HAS a real adapter silently gives up check-in and balance.
+  {
+    value: 'generic',
+    label: 'generic（通用站点）',
+    description: '面板类型未知时使用：不签到、余额显示未知，仅拉取模型与参与模型探测',
+  },
 ];
 
 export default function Sites() {

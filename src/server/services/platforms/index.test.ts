@@ -160,3 +160,58 @@ describe('getAdapter platform aliases', () => {
     });
   });
 });
+
+/**
+ * The generic adapter is reachable ONLY by an explicit operator choice.
+ *
+ * Both halves matter and they pull in opposite directions, which is why they are
+ * asserted together: it has to be resolvable by name (otherwise a `generic` site
+ * row is unusable and every account/probe path 400s on it), and it has to lose
+ * every auto-detection race (otherwise it would claim the New API / One API forks
+ * whose own adapters carry check-in and balance support).
+ */
+describe('generic platform adapter registration', () => {
+  it('resolves by name and through the spellings an operator might type', () => {
+    expect(getAdapter('generic')?.platformName).toBe('generic');
+    expect(getAdapter('Generic')?.platformName).toBe('generic');
+    expect(getAdapter('custom')?.platformName).toBe('generic');
+    expect(getAdapter('openai-compatible')?.platformName).toBe('generic');
+
+    // Deliberately NOT an alias. `standardApiProvider` is the shared BASE CLASS
+    // behind openai/claude/gemini/cliproxyapi, so `standard` reads as "that base",
+    // not "the generic site type" — aliasing it would make a typo in either
+    // direction resolve to something the operator did not mean.
+    expect(getAdapter('standard')).toBeUndefined();
+  });
+
+  it('is never chosen by auto-detection, even for a relay it could serve', async () => {
+    // This upstream answers `/v1/models` exactly as GenericAdapter.getModels
+    // expects, so an adapter ordered ahead of the real forks — or one whose
+    // `detect()` sniffed the endpoint — would claim it here.
+    await withHttpServer((req, res) => {
+      if (req.url === '/v1/models') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 'gpt-5.4' }] }));
+        return;
+      }
+      res.writeHead(404).end();
+    }, async (baseUrl) => {
+      const adapter = await detectPlatform(baseUrl);
+      expect(adapter?.platformName).not.toBe('generic');
+    });
+  });
+
+  it('reports detect() false for every URL shape, including its own', async () => {
+    const generic = getAdapter('generic');
+    expect(generic).toBeDefined();
+    for (const url of [
+      'https://relay.example.com',
+      'https://api.openai.com',
+      'http://127.0.0.1:8317',
+      '',
+    ]) {
+      await expect(generic!.detect(url)).resolves.toBe(false);
+    }
+  });
+});
+

@@ -87,6 +87,17 @@ function createTokenForm(credentialMode: "session" | "apikey" = "session") {
     proxyUrl: "",
     credentialMode,
     skipModelFetch: false,
+    /**
+     * Distinct from `skipModelFetch`, and the difference is the point.
+     *
+     * `skipModelFetch` does not even try: no catalogue request is made, so a site
+     * that WOULD have answered is never asked. `allowUnverified` still asks and
+     * still keeps whatever comes back — it only stops an empty answer from being
+     * read as "this key is dead". That is the right shape for a relay whose
+     * `/v1/models` is missing or gated but whose chat endpoint works, which is
+     * exactly what a generic site usually is.
+     */
+    allowUnverified: false,
   };
 }
 
@@ -455,7 +466,8 @@ export default function Accounts() {
     if (
       !isBatchApiKeyInput &&
       !verifyResult?.success &&
-      !tokenForm.skipModelFetch
+      !tokenForm.skipModelFetch &&
+      !tokenForm.allowUnverified
     ) {
       toast.error("请先验证 Token 成功后再添加账号");
       return;
@@ -483,6 +495,7 @@ export default function Accounts() {
         proxyUrl: tokenForm.proxyUrl.trim() || undefined,
         credentialMode,
         skipModelFetch: tokenForm.skipModelFetch,
+        allowUnverified: tokenForm.allowUnverified,
       });
       if (result?.batch) {
         closeAddPanel();
@@ -1245,12 +1258,18 @@ export default function Accounts() {
     ((activeSegment === "apikey" && verifyResult.tokenType === "apikey") ||
       (activeSegment === "session" && verifyResult.tokenType === "session")),
   );
+  // `allowUnverified` enables the button in BOTH segments, unlike
+  // `skipModelFetch` which is an api-key-only shortcut. A generic site has no
+  // management API, so `verifyToken` can only ever answer 'unknown' there — the
+  // session segment would stay permanently disabled otherwise, and the operator
+  // would have no way to bind a credential to such a site at all.
   const canSubmitApiKeyConnection =
     activeSegment === "apikey"
       ? isBatchApiKeyInput ||
         canAddVerifiedConnection ||
-        !!tokenForm.skipModelFetch
-      : canAddVerifiedConnection;
+        !!tokenForm.skipModelFetch ||
+        !!tokenForm.allowUnverified
+      : canAddVerifiedConnection || !!tokenForm.allowUnverified;
 
   return (
     <div className="animate-fade-in">
@@ -2287,6 +2306,41 @@ export default function Accounts() {
                   />
                   <span>跳过模型验证（直接添加 API Key）</span>
                 </label>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 13,
+                    cursor: "pointer",
+                    alignSelf: "flex-start",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!tokenForm.allowUnverified}
+                    onChange={(e) =>
+                      setTokenForm((f) => ({
+                        ...f,
+                        allowUnverified: e.target.checked,
+                      }))
+                    }
+                    style={{ width: 14, height: 14 }}
+                  />
+                  <span>验证失败也添加（用于无管理接口的站点）</span>
+                </label>
+                {tokenForm.allowUnverified && (
+                  <div
+                    style={{
+                      fontSize: 12,
+                      color: "var(--color-text-muted)",
+                      lineHeight: 1.6,
+                      alignSelf: "flex-start",
+                    }}
+                  >
+                    仍会尝试拉取模型，只是拉不到也照样保存连接。适用于只提供对话接口、没有模型列表或管理接口的站点。与上一项的区别：上一项完全不去拉取，这一项拉到就用。
+                  </div>
+                )}
                 {verifyResult &&
                   verifyResult.success &&
                   verifyResult.tokenType === "apikey" && (

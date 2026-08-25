@@ -571,8 +571,20 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (explicitInitializationPreset && explicitInitializationPreset.platform !== detectedPlatform) {
       return reply.code(400).send({ error: 'initializationPresetId does not match the selected platform.' });
     }
+    // Deliberately still a 400 rather than falling back to `generic`.
+    //
+    // A silent fallback looks like the friendlier behaviour and is the more
+    // damaging one: detection reaches the network, so a New API / One API fork that
+    // is merely slow, rate-limited or briefly down would be recorded as `generic`
+    // and permanently lose the check-in and balance support its real adapter
+    // carries — and nothing later re-detects it. Refusing keeps that a decision the
+    // operator makes knowingly, and the `generic` option in 平台类型 makes it a
+    // one-click decision rather than a dead end.
     if (!detectedPlatform) {
-      return reply.code(400).send({ error: 'Could not detect platform. Please specify manually.' });
+      return reply.code(400).send({
+        error: 'Could not detect platform. Please specify manually'
+          + '（无法自动识别时，可在「平台类型」中选择 generic 通用站点）.',
+      });
     }
     const conflictingSite = findExistingSiteBinding(existingSites, detectedPlatform, canonicalUrl);
     if (conflictingSite) {

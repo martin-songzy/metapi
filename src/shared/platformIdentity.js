@@ -31,6 +31,15 @@ export const PLATFORM_ALIASES = Object.assign(Object.create(null), {
   cliproxyapi: 'cliproxyapi',
   cpa: 'cliproxyapi',
   'cli-proxy-api': 'cliproxyapi',
+  // A site whose management API this app does not speak: no login, no check-in,
+  // balance unknown. Deliberately absent from `detectPlatformByUrlHint` below and
+  // from title detection — it is only ever reachable by an explicit choice, since
+  // it would otherwise shadow every OpenAI-compatible fork that has a real
+  // adapter. The spellings are the ones an operator would plausibly type.
+  generic: 'generic',
+  custom: 'generic',
+  'openai-compatible': 'generic',
+  compatible: 'generic',
 });
 
 function getPlatformAlias(raw) {

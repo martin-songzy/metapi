@@ -13,6 +13,7 @@ import { GeminiAdapter } from './gemini.js';
 import { GeminiCliAdapter } from './geminiCli.js';
 import { AntigravityAdapter } from './antigravity.js';
 import { CliProxyApiAdapter } from './cliproxyapi.js';
+import { GenericAdapter } from './generic.js';
 import { detectPlatformByTitle } from './titleHint.js';
 import { detectPlatformByUrlHint, normalizePlatformAlias } from '../../../shared/platformIdentity.js';
 
@@ -32,6 +33,13 @@ const adapters: PlatformAdapter[] = [
   new NewApiAdapter(),
   new Sub2ApiAdapter(),
   new OneApiAdapter(),
+  // Last, and inert during detection: `GenericAdapter.detect()` always returns
+  // false, so `detectPlatform`'s loop below can never select it. Position alone
+  // would not be enough — its `getModels` succeeds against nearly any
+  // OpenAI-compatible relay, so a truthy `detect` here would claim New API / One
+  // API forks and cost them their real adapter's check-in and balance support.
+  // Reachable only when an operator names `generic` explicitly.
+  new GenericAdapter(),
 ];
 
 function normalizePlatform(platform: string): string {

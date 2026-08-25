@@ -70,7 +70,10 @@ describe('sites proxy settings', () => {
     expect(payload.globalWeight).toBe(1.5);
   });
 
-  it('returns a client error when platform cannot be detected during site creation', async () => {
+  // 20s budget: this case drives REAL platform detection against an
+  // unresolvable domain, so its latency is the network's negative-DNS behaviour,
+  // not this app's. On some networks that alone exceeds vitest's 5s default.
+  it('returns a client error when platform cannot be detected during site creation', { timeout: 20_000 }, async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -81,7 +84,12 @@ describe('sites proxy settings', () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect((response.json() as { error?: string }).error).toBe('Could not detect platform. Please specify manually.');
+    // Asserted by parts rather than as one pinned string: the stable contract is
+    // "still refuses, and points at the manual/generic escape hatch" — not the
+    // exact sentence.
+    const error = (response.json() as { error?: string }).error || '';
+    expect(error).toContain('Could not detect platform');
+    expect(error).toContain('generic');
   });
 
   it('returns a conflict response when the same platform and url already exist', async () => {
