@@ -15,10 +15,13 @@ import ResponsiveBatchActionBar from '../components/ResponsiveBatchActionBar.js'
 import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import ModernSelect from '../components/ModernSelect.js';
+import { ProxyRefPicker } from '../components/ProxyRefPicker.js';
+import { useProxyPool } from '../components/useProxyPool.js';
 import { useToast } from '../components/Toast.js';
 import { useAnimatedVisibility } from '../components/useAnimatedVisibility.js';
 import { useIsMobile } from '../components/useIsMobile.js';
 import OAuthModelsModal, { type OAuthModelItem } from './oauth/OAuthModelsModal.js';
+import { PROXY_REF_INHERIT } from '../proxyRefWire.js';
 import {
   api,
   type OAuthConnectionInfo,
@@ -28,6 +31,7 @@ import {
   type OAuthQuotaInfo,
   type OAuthQuotaWindowInfo,
   type OAuthStartInstructions,
+  type ProxyPoolEntry,
 } from '../api.js';
 
 const POLL_INTERVAL_MS = 1500;
@@ -462,14 +466,27 @@ function resolveProxyProjectSummary(connection: OAuthConnectionInfo): string {
   return parts.join(' · ') || '--';
 }
 
-function resolveProxyDisplayText(connection: OAuthConnectionInfo): string {
-  if (connection.useSystemProxy) return '系统级代理';
-  if (connection.proxyUrl) return redactProxyUrl(connection.proxyUrl);
-  return '未设置代理';
+/**
+ * The connection's proxy, as a reference into the pool.
+ *
+ * `'inherit'` (or an absent value) means the connection follows its site, so the row
+ * shows the site's decision rather than claiming "未设置" — the request will be
+ * proxied in that case, and saying otherwise was the old page's most misleading label.
+ */
+function resolveProxyDisplayText(
+  connection: OAuthConnectionInfo,
+  entries: ProxyPoolEntry[],
+): string {
+  const ref = connection.proxyRef;
+  if (ref === null) return '不走代理';
+  if (!ref || ref === PROXY_REF_INHERIT) return '跟随站点';
+  const entry = entries.find((candidate) => candidate.id === ref);
+  return entry ? entry.name : '代理已删除（按不走处理）';
 }
 
 function hasOauthProxySelection(connection: OAuthConnectionInfo): boolean {
-  return !!connection.useSystemProxy || !!asTrimmedString(connection.proxyUrl);
+  const ref = connection.proxyRef;
+  return ref === null || (!!ref && ref !== PROXY_REF_INHERIT);
 }
 
 function resolveRouteUnitStrategyLabel(strategy?: OAuthRouteUnitStrategy | null): string {
@@ -651,16 +668,14 @@ export default function OAuthManagement() {
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [autoRefreshSeconds, setAutoRefreshSeconds] = useState<number>(0);
   const [autoRefreshCountdown, setAutoRefreshCountdown] = useState<number>(0);
-  const [runtimeSystemProxyConfigured, setRuntimeSystemProxyConfigured] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [importJsonText, setImportJsonText] = useState('');
   const [importDrafts, setImportDrafts] = useState<OAuthImportDraft[]>([]);
   const [importDragOver, setImportDragOver] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [importCustomProxyEnabled, setImportCustomProxyEnabled] = useState(false);
-  const [importSystemProxyEnabled, setImportSystemProxyEnabled] = useState(false);
-  const [importProxyUrl, setImportProxyUrl] = useState('');
+  const { entries: proxyPool } = useProxyPool();
+  const [importProxyRef, setImportProxyRef] = useState<string | null>(PROXY_REF_INHERIT);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerIntent, setDrawerIntent] = useState<DrawerIntent>({ mode: 'create' });
   const [selectedProviderKey, setSelectedProviderKey] = useState('');
@@ -669,9 +684,7 @@ export default function OAuthManagement() {
   const [manualCallbackVisible, setManualCallbackVisible] = useState(false);
   const [manualCallbackUrl, setManualCallbackUrl] = useState('');
   const [manualCallbackSubmitting, setManualCallbackSubmitting] = useState(false);
-  const [oauthCustomProxyEnabled, setOauthCustomProxyEnabled] = useState(false);
-  const [oauthSystemProxyEnabled, setOauthSystemProxyEnabled] = useState(false);
-  const [oauthProxyUrl, setOauthProxyUrl] = useState('');
+  const [oauthProxyRef, setOauthProxyRef] = useState<string | null>(PROXY_REF_INHERIT);
   const [modelsModal, setModelsModal] = useState<OAuthModelsModalState>({
     open: false,
     loading: false,
@@ -730,15 +743,11 @@ export default function OAuthManagement() {
   }, [setSessionMessage]);
 
   const resetOauthProxySettings = useCallback(() => {
-    setOauthCustomProxyEnabled(false);
-    setOauthSystemProxyEnabled(false);
-    setOauthProxyUrl('');
+    setOauthProxyRef(PROXY_REF_INHERIT);
   }, []);
 
-  const resetImportProxySettings = useCallback((defaultToSystem = false) => {
-    setImportCustomProxyEnabled(false);
-    setImportSystemProxyEnabled(defaultToSystem);
-    setImportProxyUrl('');
+  const resetImportProxySettings = useCallback(() => {
+    setImportProxyRef(PROXY_REF_INHERIT);
   }, []);
 
   const resetImportState = useCallback(() => {
@@ -750,14 +759,14 @@ export default function OAuthManagement() {
   const closeImportModal = useCallback(() => {
     setImportOpen(false);
     resetImportState();
-    resetImportProxySettings(false);
+    resetImportProxySettings();
   }, [resetImportProxySettings, resetImportState]);
 
   const openImportModal = useCallback(() => {
     resetImportState();
-    resetImportProxySettings(runtimeSystemProxyConfigured);
+    resetImportProxySettings();
     setImportOpen(true);
-  }, [resetImportProxySettings, resetImportState, runtimeSystemProxyConfigured]);
+  }, [resetImportProxySettings, resetImportState]);
 
   const loadConnections = useCallback(async () => {
     const response = await api.getOAuthConnections({
@@ -777,7 +786,6 @@ export default function OAuthManagement() {
         loadConnections(),
       ]);
       const nextProviders = Array.isArray(providersResponse?.providers) ? providersResponse.providers : [];
-      setRuntimeSystemProxyConfigured(providersResponse?.defaults?.systemProxyConfigured === true);
       setProviders(nextProviders);
       setSelectedProviderKey((current) => current || nextProviders[0]?.provider || '');
     } catch (error: any) {
@@ -997,7 +1005,10 @@ export default function OAuthManagement() {
     setDrawerIntent({ mode: 'rebind', account: connection });
     setSelectedProviderKey(connection.provider);
     setDrawerProjectId(connection.projectId || '');
-    resetOauthProxySettings();
+    // Seeded from the connection, not reset to the default: re-authorizing must not
+    // quietly move a connection off the proxy it was already using, and the drawer
+    // should show what the flow is about to use.
+    setOauthProxyRef(connection.proxyRef === undefined ? PROXY_REF_INHERIT : connection.proxyRef);
     setDrawerOpen(true);
     setShowColumnMenu(false);
   };
@@ -1006,9 +1017,7 @@ export default function OAuthManagement() {
     setDrawerIntent({ mode: 'proxy', account: connection });
     setSelectedProviderKey(connection.provider);
     setDrawerProjectId(connection.projectId || '');
-    setOauthSystemProxyEnabled(connection.useSystemProxy === true);
-    setOauthCustomProxyEnabled(connection.useSystemProxy !== true && !!asTrimmedString(connection.proxyUrl));
-    setOauthProxyUrl(connection.useSystemProxy ? '' : asTrimmedString(connection.proxyUrl));
+    setOauthProxyRef(connection.proxyRef === undefined ? PROXY_REF_INHERIT : connection.proxyRef);
     setDrawerOpen(true);
     setShowColumnMenu(false);
     setSessionInfo('已打开 OAuth 代理设置，修改后可直接保存代理，或保存后重新授权。');
@@ -1029,72 +1038,16 @@ export default function OAuthManagement() {
     }));
   };
 
-  const resolveProxySettingsPayload = ({
-    customEnabled,
-    systemEnabled,
-    proxyValue,
-    fallbackAccount,
-    clearToSiteFallback = false,
-  }: {
-    customEnabled: boolean;
-    systemEnabled: boolean;
-    proxyValue: string;
-    fallbackAccount?: OAuthConnectionInfo | null;
-    clearToSiteFallback?: boolean;
-  }): { proxyUrl?: string | null; useSystemProxy?: boolean } => {
-    const customProxyUrl = asTrimmedString(proxyValue);
-    if (customEnabled) {
-      return {
-        proxyUrl: customProxyUrl,
-        useSystemProxy: false,
-      };
-    }
-    if (systemEnabled) {
-      return {
-        proxyUrl: null,
-        useSystemProxy: true,
-      };
-    }
-    if (clearToSiteFallback) {
-      return {
-        proxyUrl: null,
-        useSystemProxy: false,
-      };
-    }
-    if (fallbackAccount?.useSystemProxy) {
-      return {
-        proxyUrl: null,
-        useSystemProxy: true,
-      };
-    }
-    if (fallbackAccount?.proxyUrl !== undefined) {
-      return {
-        proxyUrl: asTrimmedString(fallbackAccount.proxyUrl) || null,
-        useSystemProxy: false,
-      };
-    }
-    return {};
-  };
 
   const handleSaveProxy = async () => {
     if (drawerIntent.mode !== 'proxy') return;
-    const customProxyUrl = asTrimmedString(oauthProxyUrl);
-    if (oauthCustomProxyEnabled && !customProxyUrl) {
-      setSessionError('已开启代理，请先输入完整代理地址');
-      return;
-    }
 
     const actionKey = `save-proxy:${drawerIntent.account.accountId}`;
     setActionLoadingKey(actionKey);
     try {
       await api.updateOAuthConnectionProxy(
         drawerIntent.account.accountId,
-        resolveProxySettingsPayload({
-          customEnabled: oauthCustomProxyEnabled,
-          systemEnabled: oauthSystemProxyEnabled,
-          proxyValue: oauthProxyUrl,
-          clearToSiteFallback: true,
-        }),
+        { proxyRef: oauthProxyRef },
       );
       await loadConnections();
       setDrawerOpen(false);
@@ -1125,19 +1078,7 @@ export default function OAuthManagement() {
 
     const rebindAccount = drawerIntent.mode === 'create' ? null : drawerIntent.account;
     const accountId = rebindAccount?.accountId;
-    const customProxyUrl = asTrimmedString(oauthProxyUrl);
-    if (oauthCustomProxyEnabled && !customProxyUrl) {
-      setSessionError('已开启代理，请先输入完整代理地址');
-      return;
-    }
-
-    const proxySettings = resolveProxySettingsPayload({
-      customEnabled: oauthCustomProxyEnabled,
-      systemEnabled: oauthSystemProxyEnabled,
-      proxyValue: oauthProxyUrl,
-      fallbackAccount: rebindAccount,
-      clearToSiteFallback: drawerIntent.mode === 'proxy',
-    });
+    const proxySettings = { proxyRef: oauthProxyRef };
 
     const actionKey = `start:${provider.provider}:${accountId || 0}`;
     setActionLoadingKey(actionKey);
@@ -1409,30 +1350,20 @@ export default function OAuthManagement() {
       setSessionError('请先修正无效的 OAuth JSON');
       return;
     }
-    if (importCustomProxyEnabled && !asTrimmedString(importProxyUrl)) {
-      setSessionError('已开启代理，请先输入完整代理地址');
-      return;
-    }
 
     setImporting(true);
     try {
       const parsedItems = importPreviewSummary.items
         .filter((item) => item.valid && item.parsedData)
         .map((item) => item.parsedData as Record<string, unknown>);
-      const importProxySettings = importSystemProxyEnabled && !importCustomProxyEnabled
-        ? { useSystemProxy: true as const }
-        : resolveProxySettingsPayload({
-          customEnabled: importCustomProxyEnabled,
-          systemEnabled: importSystemProxyEnabled,
-          proxyValue: importProxyUrl,
-        });
-      const result = parsedItems.length === 1
-        && !('proxyUrl' in importProxySettings)
-        && !('useSystemProxy' in importProxySettings)
+      // "跟随站点" is the default, and sending it for a single item would be a
+      // no-op patch, so the one-item path stays on the plain import call.
+      const carriesProxyChoice = importProxyRef !== PROXY_REF_INHERIT;
+      const result = parsedItems.length === 1 && !carriesProxyChoice
         ? await api.importOAuthConnections(parsedItems[0]!)
         : await api.importOAuthConnections({
           items: parsedItems,
-          ...importProxySettings,
+          ...(carriesProxyChoice ? { proxyRef: importProxyRef } : {}),
         });
 
       await loadConnections();
@@ -1857,7 +1788,7 @@ export default function OAuthManagement() {
                   <div className="oauth-cell-stack">
                     <div className="oauth-cell-secondary">{resolveProxyProjectSummary(connection)}</div>
                     <div className="oauth-cell-secondary">{resolveRouteParticipationSummary(connection)}</div>
-                    <div className="oauth-cell-tertiary">{resolveProxyDisplayText(connection)}</div>
+                    <div className="oauth-cell-tertiary">{resolveProxyDisplayText(connection, proxyPool)}</div>
                     <button
                       type="button"
                       className="btn btn-link btn-link-info oauth-inline-trigger"
@@ -1939,7 +1870,7 @@ export default function OAuthManagement() {
               label="账号代理"
               value={(
                 <div className="oauth-cell-stack">
-                  <div className="oauth-cell-tertiary">{resolveProxyDisplayText(connection)}</div>
+                  <div className="oauth-cell-tertiary">{resolveProxyDisplayText(connection, proxyPool)}</div>
                   <button
                     type="button"
                     className="btn btn-link btn-link-info oauth-inline-trigger"
@@ -2190,7 +2121,7 @@ export default function OAuthManagement() {
                     {drawerIntent.account.provider}
                     {drawerIntent.account.projectId ? ` · Project ${drawerIntent.account.projectId}` : ''}
                     {drawerIntent.mode === 'proxy'
-                      ? ` · ${resolveProxyDisplayText(drawerIntent.account)}`
+                      ? ` · ${resolveProxyDisplayText(drawerIntent.account, proxyPool)}`
                       : ''}
                   </div>
                 </div>
@@ -2211,52 +2142,18 @@ export default function OAuthManagement() {
 
               <div className="oauth-form-note">
                 {drawerIntent.mode === 'proxy'
-                  ? '这里修改的是账号级 OAuth 代理。点击“保存代理”会立即落库并刷新列表；只有“保存并重新授权”才会重新走授权流程。若两项都不勾选，则回退到站点代理配置。'
-                  : '这里的设置会作用于下一次“连接”或“重新授权”。填写代理地址后，本次 OAuth 换 token 和后续生成的账号都会直接带上这份账号级代理配置；若不勾选，则回退到站点代理配置。'}
-              </div>
-
-              <div className="oauth-toggle-group">
-                <label className="oauth-toggle">
-                  <input
-                    type="checkbox"
-                    checked={oauthSystemProxyEnabled}
-                    data-oauth-setting="use-system-proxy"
-                    onChange={(event) => {
-                      const checked = !!event.target.checked;
-                      setOauthSystemProxyEnabled(checked);
-                      if (checked) {
-                        setOauthCustomProxyEnabled(false);
-                        setOauthProxyUrl('');
-                      }
-                    }}
-                  />
-                  <span>使用系统级代理</span>
-                </label>
-                <label className="oauth-toggle">
-                  <input
-                    type="checkbox"
-                    checked={oauthCustomProxyEnabled}
-                    data-oauth-setting="use-custom-proxy"
-                    onChange={(event) => {
-                      const checked = !!event.target.checked;
-                      setOauthCustomProxyEnabled(checked);
-                      if (checked) setOauthSystemProxyEnabled(false);
-                    }}
-                  />
-                  <span>使用自定义代理</span>
-                </label>
+                  ? '这里选择的是这条连接自己的代理。「保存代理」会立即落库并刷新列表；只有「保存并重新授权」才会重新走授权流程。代理地址统一在「设置 → 代理池」里维护，这里只做选择。'
+                  : '这里的选择会作用于下一次「连接」或「重新授权」，本次 OAuth 换 token 也会走它。代理地址统一在「设置 → 代理池」里维护，这里只做选择。'}
               </div>
 
               <div className="oauth-form-field">
-                <div className="oauth-field-label">代理地址</div>
-                <input
-                  type="text"
-                  className="oauth-input"
-                  value={oauthProxyUrl}
-                  data-oauth-setting="proxy-url"
-                  onChange={(event) => setOauthProxyUrl(event.target.value)}
-                  placeholder="如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
-                  disabled={!oauthCustomProxyEnabled}
+                <div className="oauth-field-label">代理</div>
+                <ProxyRefPicker
+                  idPrefix="oauth-proxy"
+                  entries={proxyPool}
+                  value={oauthProxyRef}
+                  onChange={setOauthProxyRef}
+                  allowInherit
                 />
               </div>
 
@@ -2458,49 +2355,16 @@ export default function OAuthManagement() {
           )}
         </div>
         <div className="oauth-form-note">
-          导入后的账号代理可在这里一次性指定；如果当前运行时已配置系统代理，会默认预选“使用系统级代理”。
-        </div>
-        <div className="oauth-toggle-group">
-          <label className="oauth-toggle">
-            <input
-              type="checkbox"
-              checked={importSystemProxyEnabled}
-              data-oauth-import-setting="use-system-proxy"
-              onChange={(event) => {
-                const checked = !!event.target.checked;
-                setImportSystemProxyEnabled(checked);
-                if (checked) {
-                  setImportCustomProxyEnabled(false);
-                  setImportProxyUrl('');
-                }
-              }}
-            />
-            <span>使用系统级代理</span>
-          </label>
-          <label className="oauth-toggle">
-            <input
-              type="checkbox"
-              checked={importCustomProxyEnabled}
-              data-oauth-import-setting="use-custom-proxy"
-              onChange={(event) => {
-                const checked = !!event.target.checked;
-                setImportCustomProxyEnabled(checked);
-                if (checked) setImportSystemProxyEnabled(false);
-              }}
-            />
-            <span>使用自定义代理</span>
-          </label>
+          导入进来的连接可以在这里一次性指定代理。地址统一在「设置 → 代理池」里维护，这里只做选择。
         </div>
         <div className="oauth-form-field">
-          <div className="oauth-field-label">代理地址</div>
-          <input
-            type="text"
-            className="oauth-input"
-            value={importProxyUrl}
-            data-oauth-import-setting="proxy-url"
-            onChange={(event) => setImportProxyUrl(event.target.value)}
-            placeholder="如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080"
-            disabled={!importCustomProxyEnabled}
+          <div className="oauth-field-label">代理</div>
+          <ProxyRefPicker
+            idPrefix="oauth-import-proxy"
+            entries={proxyPool}
+            value={importProxyRef}
+            onChange={setImportProxyRef}
+            allowInherit
           />
         </div>
         <div className="oauth-import-copy">或者手动粘贴单个 JSON 内容：</div>
@@ -2601,3 +2465,4 @@ export default function OAuthManagement() {
     </div>
   );
 }
+

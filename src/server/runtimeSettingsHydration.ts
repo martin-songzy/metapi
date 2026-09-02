@@ -3,6 +3,8 @@ import {
   normalizeTokenRouterFailureCooldownMaxSec,
 } from './config.js';
 import { normalizePayloadRulesConfig } from './services/payloadRules.js';
+import { coerceProxyPool, PROXY_POOL_SETTING_KEY } from './services/proxyPoolService.js';
+import { primeSiteProxyPool } from './services/siteProxy.js';
 import { normalizeLogCleanupRetentionDays } from './shared/logCleanupRetentionDays.js';
 
 export function parseSettingFromMap<T>(settingsMap: Map<string, string>, key: string): T | undefined {
@@ -45,8 +47,10 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const proxyToken = parseSettingFromMap<string>(settingsMap, 'proxy_token');
   if (typeof proxyToken === 'string' && proxyToken) config.proxyToken = proxyToken;
 
-  const systemProxyUrl = parseSettingFromMap<string>(settingsMap, 'system_proxy_url');
-  if (typeof systemProxyUrl === 'string') config.systemProxyUrl = systemProxyUrl;
+  // The proxy pool is published into the synchronous mirror at boot so the very
+  // first proxied request resolves references correctly — the request-path helpers
+  // are sync and would otherwise answer "no proxy" until something warmed the cache.
+  primeSiteProxyPool(coerceProxyPool(parseSettingFromMap<unknown>(settingsMap, PROXY_POOL_SETTING_KEY)));
 
   const modelAvailabilityProbeEnabled = parseSettingFromMap<boolean>(settingsMap, 'model_availability_probe_enabled');
   if (typeof modelAvailabilityProbeEnabled === 'boolean') {
@@ -258,8 +262,8 @@ export function applyRuntimeSettings(settingsMap: Map<string, string>) {
   const telegramChatId = parseSettingFromMap<string>(settingsMap, 'telegram_chat_id');
   if (typeof telegramChatId === 'string') config.telegramChatId = telegramChatId;
 
-  const telegramUseSystemProxy = parseSettingFromMap<boolean>(settingsMap, 'telegram_use_system_proxy');
-  if (typeof telegramUseSystemProxy === 'boolean') config.telegramUseSystemProxy = telegramUseSystemProxy;
+  const telegramProxyRef = parseSettingFromMap<string>(settingsMap, 'telegram_proxy_ref');
+  if (typeof telegramProxyRef === 'string') config.telegramProxyRef = telegramProxyRef.trim();
 
   const telegramMessageThreadId = parseSettingFromMap<string>(settingsMap, 'telegram_message_thread_id');
   if (typeof telegramMessageThreadId === 'string') config.telegramMessageThreadId = telegramMessageThreadId;

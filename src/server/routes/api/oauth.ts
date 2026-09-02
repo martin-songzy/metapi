@@ -24,6 +24,7 @@ import {
   updateOauthRouteUnit,
 } from '../../services/oauth/routeUnitService.js';
 import { parseSiteProxyUrlInput } from '../../services/siteProxy.js';
+import { validateConnectionProxyRefPayload } from '../../services/proxyPoolService.js';
 import {
   parseOauthConnectionBatchDeletePayload,
   parseOauthConnectionRebindPayload,
@@ -200,9 +201,9 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (body.projectId !== undefined && projectId === null) {
         return reply.code(400).send({ message: 'invalid project id' });
       }
-      const normalizedProxyUrl = parseSiteProxyUrlInput(body.proxyUrl);
-      if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
-        return reply.code(400).send({ message: 'invalid proxy url' });
+      const proxyRef = await validateConnectionProxyRefPayload(body.proxyRef);
+      if (!proxyRef.valid) {
+        return reply.code(400).send({ message: proxyRef.message });
       }
 
       try {
@@ -210,8 +211,7 @@ export async function oauthRoutes(app: FastifyInstance) {
           provider: request.params.provider,
           rebindAccountId: rebindAccountId ?? undefined,
           projectId: projectId ?? undefined,
-          proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
-          useSystemProxy: body.useSystemProxy,
+          proxyRef: proxyRef.value,
           requestOrigin: resolveRequestOrigin(request),
         });
       } catch (error: any) {
@@ -303,17 +303,16 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (accountId === null) {
         return reply.code(400).send({ message: 'invalid account id' });
       }
-      const normalizedProxyUrl = parseSiteProxyUrlInput(parsedBody.data.proxyUrl);
-      if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
-        return reply.code(400).send({ message: 'invalid proxy url' });
+      const proxyRef = await validateConnectionProxyRefPayload(parsedBody.data.proxyRef);
+      if (!proxyRef.valid) {
+        return reply.code(400).send({ message: proxyRef.message });
       }
       try {
         return await startOauthRebindFlow(
           accountId,
           {
             requestOrigin: resolveRequestOrigin(request),
-            proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
-            useSystemProxy: parsedBody.data.useSystemProxy,
+            proxyRef: proxyRef.value,
           },
         );
       } catch (error: any) {
@@ -341,15 +340,14 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (accountId === null) {
         return reply.code(400).send({ message: 'invalid account id' });
       }
-      const normalizedProxyUrl = parseSiteProxyUrlInput(parsedBody.data.proxyUrl);
-      if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
-        return reply.code(400).send({ message: 'invalid proxy url' });
+      const proxyRef = await validateConnectionProxyRefPayload(parsedBody.data.proxyRef);
+      if (!proxyRef.valid) {
+        return reply.code(400).send({ message: proxyRef.message });
       }
       try {
         return await updateOauthConnectionProxySettings({
           accountId,
-          proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
-          useSystemProxy: parsedBody.data.useSystemProxy,
+          proxyRef: proxyRef.value,
         });
       } catch (error: any) {
         const message = error?.message || 'oauth account not found';
@@ -455,16 +453,15 @@ export async function oauthRoutes(app: FastifyInstance) {
       if (!hasBatchItems && (!data || typeof data !== 'object' || Array.isArray(data))) {
         return reply.code(400).send({ message: 'data must be a native oauth json object' });
       }
-      const normalizedProxyUrl = parseSiteProxyUrlInput(parsedBody.data.proxyUrl);
-      if (normalizedProxyUrl.present && !normalizedProxyUrl.valid) {
-        return reply.code(400).send({ message: 'invalid proxy url' });
+      const proxyRef = await validateConnectionProxyRefPayload(parsedBody.data.proxyRef);
+      if (!proxyRef.valid) {
+        return reply.code(400).send({ message: proxyRef.message });
       }
       try {
         return await importOauthConnectionsFromNativeJson({
           data,
           items: hasBatchItems ? parsedBody.data.items : undefined,
-          proxyUrl: normalizedProxyUrl.present ? normalizedProxyUrl.proxyUrl : undefined,
-          useSystemProxy: parsedBody.data.useSystemProxy,
+          proxyRef: proxyRef.value,
         });
       } catch (error: any) {
         const message = error?.message || 'oauth import failed';

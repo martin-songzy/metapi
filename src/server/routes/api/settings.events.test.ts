@@ -42,7 +42,6 @@ describe('settings and auth events', () => {
 
     config.authToken = 'old-admin-token-123';
     config.proxyToken = 'sk-old-proxy-token-123';
-    config.systemProxyUrl = '';
     config.checkinCron = '0 8 * * *';
     (config as any).checkinScheduleMode = 'cron';
     (config as any).checkinIntervalHours = 6;
@@ -79,7 +78,7 @@ describe('settings and auth events', () => {
     (config as any).telegramApiBaseUrl = 'https://api.telegram.org';
     (config as any).telegramBotToken = '';
     (config as any).telegramChatId = '';
-    (config as any).telegramUseSystemProxy = false;
+    (config as any).telegramProxyRef = '';
     (config as any).telegramMessageThreadId = '';
     config.globalBlockedBrands = [];
     config.globalAllowedModels = [];
@@ -500,44 +499,58 @@ describe('settings and auth events', () => {
     expect(body.message).toContain('Telegram API Base URL');
   });
 
-  it('persists and returns telegram use system proxy from runtime settings', async () => {
+  it('persists and returns the telegram proxy reference from runtime settings', async () => {
     const updateResponse = await app.inject({
       method: 'PUT',
       url: '/api/settings/runtime',
       payload: {
-        telegramUseSystemProxy: true,
+        telegramProxyRef: 'px_hk',
       },
     });
 
     expect(updateResponse.statusCode).toBe(200);
-    const updated = updateResponse.json() as { telegramUseSystemProxy?: boolean };
-    expect(updated.telegramUseSystemProxy).toBe(true);
-    expect((config as any).telegramUseSystemProxy).toBe(true);
+    const updated = updateResponse.json() as { telegramProxyRef?: string };
+    expect(updated.telegramProxyRef).toBe('px_hk');
+    expect((config as any).telegramProxyRef).toBe('px_hk');
 
-    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'telegram_use_system_proxy')).get();
-    expect(saved?.value).toBe(JSON.stringify(true));
+    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'telegram_proxy_ref')).get();
+    expect(saved?.value).toBe(JSON.stringify('px_hk'));
 
     const getResponse = await app.inject({
       method: 'GET',
       url: '/api/settings/runtime',
     });
     expect(getResponse.statusCode).toBe(200);
-    const runtime = getResponse.json() as { telegramUseSystemProxy?: boolean };
-    expect(runtime.telegramUseSystemProxy).toBe(true);
+    const runtime = getResponse.json() as { telegramProxyRef?: string };
+    expect(runtime.telegramProxyRef).toBe('px_hk');
   });
 
-  it('rejects non-boolean telegram use system proxy payloads instead of coercing them', async () => {
+  // `null` is how the UI says 不走代理 for Telegram, and it has to be accepted as a
+  // value rather than read as "field absent" — otherwise the choice cannot be cleared.
+  it('accepts a null telegram proxy reference as "do not proxy"', async () => {
     const response = await app.inject({
       method: 'PUT',
       url: '/api/settings/runtime',
       payload: {
-        telegramUseSystemProxy: 'false',
+        telegramProxyRef: null,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((config as any).telegramProxyRef).toBe('');
+  });
+
+  it('rejects a non-string telegram proxy reference instead of coercing it', async () => {
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/settings/runtime',
+      payload: {
+        telegramProxyRef: 42,
       },
     });
 
     expect(response.statusCode).toBe(400);
-    expect((response.json() as { message?: string }).message).toContain('Telegram 使用系统代理');
-    expect((config as any).telegramUseSystemProxy).toBe(false);
+    expect((response.json() as { message?: string }).message).toContain('Telegram 代理选择');
   });
 
   it('persists and returns routing fallback unit cost from runtime settings', async () => {
@@ -664,33 +677,6 @@ describe('settings and auth events', () => {
     expect(getResponse.statusCode).toBe(200);
     const runtime = getResponse.json() as { disableCrossProtocolFallback?: boolean };
     expect(runtime.disableCrossProtocolFallback).toBe(true);
-  });
-
-  it('persists and returns system proxy url from runtime settings', async () => {
-    const updateResponse = await app.inject({
-      method: 'PUT',
-      url: '/api/settings/runtime',
-      payload: {
-        systemProxyUrl: 'http://127.0.0.1:7890',
-      },
-    });
-
-    expect(updateResponse.statusCode).toBe(200);
-    const updated = updateResponse.json() as { systemProxyUrl?: string };
-    expect(updated.systemProxyUrl).toBe('http://127.0.0.1:7890');
-    expect(config.systemProxyUrl).toBe('http://127.0.0.1:7890');
-
-    const saved = await db.select().from(schema.settings).where(eq(schema.settings.key, 'system_proxy_url')).get();
-    expect(saved).toBeTruthy();
-    expect(saved?.value).toBe(JSON.stringify('http://127.0.0.1:7890'));
-
-    const getResponse = await app.inject({
-      method: 'GET',
-      url: '/api/settings/runtime',
-    });
-    expect(getResponse.statusCode).toBe(200);
-    const runtime = getResponse.json() as { systemProxyUrl?: string };
-    expect(runtime.systemProxyUrl).toBe('http://127.0.0.1:7890');
   });
 
   it('splits proxy error keywords on newlines and commas when saving runtime settings', async () => {
@@ -847,35 +833,30 @@ describe('settings and auth events', () => {
     expect((invalidRetentionResponse.json() as { message?: string }).message).toContain('保留天数');
   });
 
-  it('invalidates cached site proxy resolution when system proxy url changes', async () => {
+  // The pool lives in one settings row and the resolver keeps a synchronous mirror of
+  // it, so an edit has to reach that mirror. Editing an entry IN PLACE is the case
+  // that matters: the site's reference does not change, only the address behind it.
+  it('re-resolves a site proxy after its pool entry is re-addressed', async () => {
+    const { addProxyPoolEntry, updateProxyPoolEntry } = await import('../../services/proxyPoolService.js');
+    const entry = await addProxyPoolEntry({ name: '香港', url: 'http://127.0.0.1:7890' });
+
     await db.insert(schema.sites).values({
       name: 'proxy-site',
       url: 'https://proxy-site.example.com',
       platform: 'new-api',
-      useSystemProxy: true,
+      proxyRef: entry.id,
     }).run();
 
-    const { resolveSiteProxyUrlByRequestUrl } = await import('../../services/siteProxy.js');
+    const { invalidateSiteProxyCache, resolveSiteProxyUrlByRequestUrl } = await import('../../services/siteProxy.js');
+    invalidateSiteProxyCache();
 
-    const firstUpdate = await app.inject({
-      method: 'PUT',
-      url: '/api/settings/runtime',
-      payload: {
-        systemProxyUrl: 'http://127.0.0.1:7890',
-      },
-    });
-    expect(firstUpdate.statusCode).toBe(200);
-    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7890');
+    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions'))
+      .toBe('http://127.0.0.1:7890');
 
-    const secondUpdate = await app.inject({
-      method: 'PUT',
-      url: '/api/settings/runtime',
-      payload: {
-        systemProxyUrl: 'http://127.0.0.1:7891',
-      },
-    });
-    expect(secondUpdate.statusCode).toBe(200);
-    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions')).toBe('http://127.0.0.1:7891');
+    await updateProxyPoolEntry(entry.id, { url: 'http://127.0.0.1:7891' });
+
+    expect(await resolveSiteProxyUrlByRequestUrl('https://proxy-site.example.com/v1/chat/completions'))
+      .toBe('http://127.0.0.1:7891');
   });
 
   it('rejects allowlist update that does not include current request IP', async () => {
@@ -1018,3 +999,4 @@ describe('settings and auth events', () => {
     });
   });
 });
+

@@ -7,7 +7,6 @@ import { estimateProxyCost } from '../../services/modelPricingService.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from '../../services/downstreamRoutingPolicy.js';
 import { withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
-import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { cloneFormDataWithOverrides, ensureMultipartBufferParser, parseMultipartFormData } from '../../services/multipartFormData.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
 import {
@@ -88,7 +87,6 @@ export async function videosProxyRoute(app: FastifyInstance) {
       try {
         const { upstream, text, baseUrl } = await runWithSiteApiEndpointPool(selected.site, async (target) => {
           const targetUrl = buildUpstreamUrl(target.baseUrl, '/v1/videos');
-          const accountProxy = getProxyUrlFromExtraConfig(selected.account.extraConfig);
           const requestInit = multipartForm
             ? withSiteRecordProxyRequestInit(selected.site, {
               method: 'POST',
@@ -98,7 +96,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
               body: cloneFormDataWithOverrides(multipartForm, {
                 model: upstreamModel,
               }) as any,
-            }, accountProxy)
+            }, selected.account)
             : withSiteRecordProxyRequestInit(selected.site, {
               method: 'POST',
               headers: {
@@ -109,7 +107,7 @@ export async function videosProxyRoute(app: FastifyInstance) {
                 ...(jsonBody || {}),
                 model: upstreamModel,
               }),
-            }, accountProxy);
+            }, selected.account);
           const response = await fetch(targetUrl, requestInit);
           const responseText = await response.text();
           if (!response.ok) {

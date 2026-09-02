@@ -39,6 +39,7 @@ type BackupSnapshot = {
     modelAvailability: Array<Record<string, unknown>>;
     tokenModelAvailability: Array<Record<string, unknown>>;
     modelProbeResults: Array<Record<string, unknown>>;
+    modelProbeKeyResults: Array<Record<string, unknown>>;
     tokenRoutes: Array<Record<string, unknown>>;
     routeChannels: Array<Record<string, unknown>>;
     routeGroupSources: Array<Record<string, unknown>>;
@@ -73,6 +74,7 @@ export interface DatabaseMigrationSummary {
     modelAvailability: number;
     tokenModelAvailability: number;
     modelProbeResults: number;
+    modelProbeKeyResults: number;
     proxyLogs: number;
     proxyVideoTasks: number;
     proxyFiles: number;
@@ -265,6 +267,7 @@ async function toBackupSnapshot(): Promise<BackupSnapshot> {
       modelAvailability: await db.select().from(schema.modelAvailability).all() as Array<Record<string, unknown>>,
       tokenModelAvailability: await db.select().from(schema.tokenModelAvailability).all() as Array<Record<string, unknown>>,
       modelProbeResults: await db.select().from(schema.modelProbeResults).all() as Array<Record<string, unknown>>,
+      modelProbeKeyResults: await db.select().from(schema.modelProbeKeyResults).all() as Array<Record<string, unknown>>,
       tokenRoutes: await db.select().from(schema.tokenRoutes).all() as Array<Record<string, unknown>>,
       routeChannels: await db.select().from(schema.routeChannels).all() as Array<Record<string, unknown>>,
       routeGroupSources: await db.select().from(schema.routeGroupSources).all() as Array<Record<string, unknown>>,
@@ -299,6 +302,7 @@ async function clearTargetData(client: SqlClient): Promise<void> {
     'token_model_availability',
     'model_availability',
     'model_probe_results',
+    'model_probe_key_results',
     'checkin_logs',
     'proxy_logs',
     'proxy_video_tasks',
@@ -328,15 +332,17 @@ function buildStatements(
   for (const row of snapshot.accounts.sites) {
     statements.push({
       table: 'sites',
-      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_url', 'use_system_proxy', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'post_refresh_probe_enabled', 'post_refresh_probe_model', 'post_refresh_probe_scope', 'post_refresh_probe_latency_threshold_ms', 'probe_endpoint_type', 'probe_user_agent', 'created_at', 'updated_at'],
+      columns: ['id', 'name', 'url', 'external_checkin_url', 'platform', 'proxy_ref', 'custom_headers', 'status', 'is_pinned', 'sort_order', 'global_weight', 'api_key', 'post_refresh_probe_enabled', 'post_refresh_probe_model', 'post_refresh_probe_scope', 'post_refresh_probe_latency_threshold_ms', 'probe_endpoint_type', 'probe_user_agent', 'created_at', 'updated_at'],
       values: [
         asNumber(row.id, 0),
         asNullableString(row.name),
         asNullableString(row.url),
         asNullableString(row.externalCheckinUrl),
         asNullableString(row.platform),
-        asNullableString(row.proxyUrl),
-        asBoolean(row.useSystemProxy, false),
+        // Nullable, and null is meaningful here rather than merely absent: it is
+        // "do not proxy". Dropping the column would move every proxied site onto a
+        // direct connection on the far side of a database migration.
+        asNullableString(row.proxyRef),
         serializeColumnValue('sites', 'custom_headers', row.customHeaders, contract),
         asNullableString(row.status) ?? 'active',
         asBoolean(row.isPinned, false),
@@ -553,6 +559,35 @@ function buildStatements(
         // Left as null instead of defaulted to 0: a probe that never picked an
         // account has no account, and 0 would fail the accounts foreign key.
         asNumber(row.accountId, null),
+        asNullableString(row.modelName),
+        asNullableString(row.status) ?? 'inconclusive',
+        asNumber(row.latencyMs, null),
+        asNumber(row.httpStatus, null),
+        asNullableString(row.failureKind),
+        asNullableString(row.reason),
+        asNullableString(row.endpointUsed),
+        asNullableString(row.promptUsed),
+        asNullableString(row.userAgentUsed),
+        asNullableString(row.checkedAt),
+      ],
+    });
+  }
+
+  for (const row of (snapshot.accounts.modelProbeKeyResults || [])) {
+    statements.push({
+      table: 'model_probe_key_results',
+      columns: ['id', 'site_id', 'account_id', 'token_id', 'token_name', 'model_name', 'status', 'latency_ms', 'http_status', 'failure_kind', 'reason', 'endpoint_used', 'prompt_used', 'user_agent_used', 'checked_at'],
+      values: [
+        asNumber(row.id, 0),
+        asNumber(row.siteId, 0),
+        // Defaulted to 0 rather than null, unlike the site-scoped table above:
+        // this column is NOT NULL and part of the unique key, so there is no
+        // "no account" value to fall back to.
+        asNumber(row.accountId, 0),
+        // 0 is the sentinel for the account's primary key, so it is also the
+        // correct fallback here rather than a placeholder.
+        asNumber(row.tokenId, 0),
+        asNullableString(row.tokenName) ?? '',
         asNullableString(row.modelName),
         asNullableString(row.status) ?? 'inconclusive',
         asNumber(row.latencyMs, null),
@@ -796,6 +831,7 @@ async function syncPostgresSequences(client: SqlClient): Promise<void> {
     'model_availability',
     'token_model_availability',
     'model_probe_results',
+    'model_probe_key_results',
     'token_routes',
     'route_channels',
     'route_group_sources',
@@ -868,6 +904,7 @@ export async function migrateCurrentDatabase(input: DatabaseMigrationInput): Pro
       modelAvailability: snapshot.accounts.modelAvailability.length,
       tokenModelAvailability: snapshot.accounts.tokenModelAvailability.length,
       modelProbeResults: snapshot.accounts.modelProbeResults.length,
+      modelProbeKeyResults: snapshot.accounts.modelProbeKeyResults.length,
       proxyLogs: snapshot.accounts.proxyLogs.length,
       proxyVideoTasks: snapshot.accounts.proxyVideoTasks.length,
       proxyFiles: snapshot.accounts.proxyFiles.length,

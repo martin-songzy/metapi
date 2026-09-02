@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { api } from '../api.js';
+import { api, type ProxyPoolEntry } from '../api.js';
 import { getAuthToken } from '../authSession.js';
 import { getBrand } from '../components/BrandIcon.js';
 import CenteredModal from '../components/CenteredModal.js';
@@ -13,6 +13,8 @@ import ResponsiveFilterPanel from '../components/ResponsiveFilterPanel.js';
 import ResponsiveBatchActionBar from '../components/ResponsiveBatchActionBar.js';
 import { useToast } from '../components/Toast.js';
 import ModernSelect from '../components/ModernSelect.js';
+import { ProxyRefPicker } from '../components/ProxyRefPicker.js';
+import { useProxyPool } from '../components/useProxyPool.js';
 import { MobileCard, MobileField } from '../components/MobileCard.js';
 import ResponsiveFormGrid from '../components/ResponsiveFormGrid.js';
 import { useIsMobile } from '../components/useIsMobile.js';
@@ -65,8 +67,7 @@ type SiteRow = {
   externalCheckinUrl?: string | null;
   platform?: string;
   status?: string;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  proxyRef?: string | null;
   customHeaders?: string | null;
   globalWeight?: number;
   isPinned?: boolean;
@@ -89,6 +90,22 @@ type SiteRow = {
     lastFailureReason?: string | null;
   }>;
 };
+
+/**
+ * The site's proxy, for the list columns. Reads a dangling reference the same way the
+ * server does — as "不走" — but says so explicitly, because a silently unproxied site
+ * looks identical to a deliberately direct one otherwise.
+ */
+function resolveSiteProxyBadge(
+  site: Pick<SiteRow, 'proxyRef'>,
+  entries: ProxyPoolEntry[] = [],
+): { text: string; tone: string } {
+  const ref = typeof site.proxyRef === 'string' ? site.proxyRef.trim() : '';
+  if (!ref) return { text: '不走', tone: 'badge-muted' };
+  const entry = entries.find((candidate) => candidate.id === ref);
+  if (!entry) return { text: '代理已删除', tone: 'badge-danger' };
+  return { text: entry.name, tone: 'badge-info' };
+}
 
 function hasConfiguredCustomHeaders(customHeaders?: string | null): boolean {
   return typeof customHeaders === 'string' && customHeaders.trim().length > 0;
@@ -316,6 +333,7 @@ export default function Sites() {
   const isMobile = useIsMobile();
   const [showMobileTools, setShowMobileTools] = useState(false);
   const [batchActionLoading, setBatchActionLoading] = useState(false);
+  const { entries: proxyPool } = useProxyPool();
   const [deleteConfirm, setDeleteConfirm] = useState<null | {
     mode: 'single' | 'batch';
     siteId?: number;
@@ -837,8 +855,7 @@ export default function Sites() {
       externalCheckinUrl: form.externalCheckinUrl.trim(),
       platform: form.platform.trim(),
       initializationPresetId: selectedInitializationPresetId,
-      proxyUrl: form.proxyUrl.trim(),
-      useSystemProxy: !!form.useSystemProxy,
+      proxyRef: form.proxyRef,
       apiEndpoints: serializedApiEndpoints.apiEndpoints,
       customHeaders: serializedCustomHeaders.customHeaders,
       globalWeight: Number(parsedGlobalWeight.toFixed(3)),
@@ -1159,7 +1176,11 @@ export default function Sites() {
     ));
   };
 
-  const runBatchAction = async (action: 'enable' | 'disable' | 'delete' | 'enableSystemProxy' | 'disableSystemProxy', skipDeleteConfirm = false) => {
+  const runBatchAction = async (
+    action: 'enable' | 'disable' | 'delete' | 'setProxyRef',
+    skipDeleteConfirm = false,
+    proxyRef?: string | null,
+  ) => {
     if (selectedSiteIds.length === 0) return;
     if (action === 'delete' && !skipDeleteConfirm) {
       setDeleteConfirm({ mode: 'batch', count: selectedSiteIds.length });
@@ -1171,6 +1192,7 @@ export default function Sites() {
       const result = await api.batchUpdateSites({
         ids: selectedSiteIds,
         action,
+        ...(action === 'setProxyRef' ? { proxyRef: proxyRef ?? null } : {}),
       });
       const successIds = Array.isArray(result?.successIds) ? result.successIds.map((id: unknown) => Number(id)) : [];
       const failedItems = Array.isArray(result?.failedItems) ? result.failedItems : [];
@@ -1303,23 +1325,30 @@ export default function Sites() {
           info={`已选 ${selectedSiteIds.length} 项`}
           desktopStyle={{ marginBottom: 12 }}
         >
-          <button
-            data-testid="sites-batch-enable-system-proxy"
-            onClick={() => runBatchAction('enableSystemProxy')}
+          {/*
+            A select, not a text field: batch-setting a proxy is still a CHOICE from
+            the pool. "不走代理" is one of the options rather than a separate button,
+            because it is a value like any other, not the absence of one.
+          */}
+          <select
+            data-testid="sites-batch-proxy-ref"
+            value=""
             disabled={batchActionLoading}
+            onChange={(event) => {
+              const raw = event.target.value;
+              if (!raw) return;
+              event.target.value = '';
+              void runBatchAction('setProxyRef', false, raw === '__direct__' ? null : raw);
+            }}
             className="btn btn-ghost"
             style={{ border: '1px solid var(--color-border)' }}
           >
-            批量开启系统代理
-          </button>
-          <button
-            onClick={() => runBatchAction('disableSystemProxy')}
-            disabled={batchActionLoading}
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-          >
-            批量关闭系统代理
-          </button>
+            <option value="">批量设置代理…</option>
+            <option value="__direct__">不走代理</option>
+            {proxyPool.map((entry) => (
+              <option key={entry.id} value={entry.id}>{entry.name}</option>
+            ))}
+          </select>
           <button onClick={() => runBatchAction('enable')} disabled={batchActionLoading} className="btn btn-ghost" style={{ border: '1px solid var(--color-border)' }}>
             批量启用
           </button>
@@ -2014,35 +2043,18 @@ export default function Sites() {
           )}
 
           <ResponsiveFormGrid>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <input
-                placeholder="站点代理（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
-                value={form.proxyUrl}
-                onChange={(e) => setForm((prev) => ({ ...prev, proxyUrl: e.target.value }))}
-                style={formInputStyle}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, gridColumn: '1 / -1' }}>
+              <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>站点代理</div>
+              <ProxyRefPicker
+                idPrefix="site-proxy"
+                entries={proxyPool}
+                value={form.proxyRef}
+                onChange={(next) => setForm((prev) => ({ ...prev, proxyRef: next }))}
               />
               <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
-                这里只是 HTTP/SOCKS 代理地址，不是上游 API 请求地址。填写后优先使用站点代理；留空则使用系统代理或直连(取决于设置开关状态)。
+                代理地址统一在「设置 → 代理池」里维护，这里只做选择。这是 HTTP/SOCKS 代理，不是上游 API 请求地址。
               </div>
             </div>
-            <label style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 14px',
-              border: '1px solid var(--color-border)',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 13,
-              background: 'var(--color-bg)',
-              color: 'var(--color-text-primary)',
-            }}>
-              <input
-                type="checkbox"
-                checked={form.useSystemProxy}
-                onChange={(e) => setForm((prev) => ({ ...prev, useSystemProxy: e.target.checked }))}
-              />
-              使用系统代理
-            </label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <input
                 placeholder="站点全局权重（默认 1）"
@@ -2202,10 +2214,10 @@ export default function Sites() {
                           )}
                         />
                         <MobileField
-                          label="系统代理"
+                          label="代理"
                           value={(
-                            <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
-                              {site.useSystemProxy ? '已开启' : '未开启'}
+                            <span className={`badge ${resolveSiteProxyBadge(site, proxyPool).tone}`} style={{ fontSize: 11 }}>
+                              {resolveSiteProxyBadge(site, proxyPool).text}
                             </span>
                           )}
                         />
@@ -2293,7 +2305,7 @@ export default function Sites() {
                   <th>外部签到站URL</th>
                   <th>总余额</th>
                   <th>状态</th>
-                  <th>系统代理</th>
+                  <th>代理</th>
                   <th>权重</th>
                   <th>平台</th>
                   <th>创建时间</th>
@@ -2374,8 +2386,8 @@ export default function Sites() {
                       </span>
                     </td>
                     <td>
-                      <span className={`badge ${site.useSystemProxy ? 'badge-info' : 'badge-muted'}`} style={{ fontSize: 11 }}>
-                        {site.useSystemProxy ? '已开启' : '未开启'}
+                      <span className={`badge ${resolveSiteProxyBadge(site, proxyPool).tone}`} style={{ fontSize: 11 }}>
+                        {resolveSiteProxyBadge(site, proxyPool).text}
                       </span>
                     </td>
                     <td style={{ fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>
@@ -2482,3 +2494,4 @@ export default function Sites() {
     </div>
   );
 }
+

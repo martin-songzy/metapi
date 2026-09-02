@@ -12,7 +12,6 @@ import {
   getSub2ApiAuthFromExtraConfig,
   guessPlatformUserIdFromUsername,
   mergeAccountExtraConfig,
-  resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
@@ -23,7 +22,7 @@ import {
 import { refreshSub2ApiManagedSessionSingleflight } from './sub2apiRefreshSingleflight.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { formatUtcSqlDateTime } from './localTimeService.js';
-import { withAccountProxyOverride } from './siteProxy.js';
+import { resolveChannelProxyUrl, withAccountProxyOverride } from './siteProxy.js';
 
 type CheckinExecutionStatus = 'success' | 'failed' | 'skipped';
 
@@ -109,7 +108,7 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   if (!password) return null;
 
   const result = await withAccountProxyOverride(
-    resolveProxyUrlFromExtraConfig(account.extraConfig),
+    await resolveChannelProxyUrl(site, account.extraConfig),
     () => adapter.login(site.url, relogin.username, password),
   );
   if (!result.success || !result.accessToken) return null;
@@ -183,7 +182,7 @@ export async function checkinAccount(accountId: number, options?: { skipEvent?: 
     : guessPlatformUserIdFromUsername(account.username);
   const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
 
-  const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
+  const accountProxyUrl = await resolveChannelProxyUrl(site, account.extraConfig);
   let activeAccessToken = account.accessToken;
   let activeExtraConfig = account.extraConfig;
 

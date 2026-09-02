@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api, type RuntimeSettingsPayload } from '../api.js';
+import { ProxyRefPicker } from '../components/ProxyRefPicker.js';
+import { useProxyPool } from '../components/useProxyPool.js';
 import { useToast } from '../components/Toast.js';
 import { tr } from '../i18n.js';
 
@@ -12,7 +14,7 @@ type RuntimeSettings = {
     telegramEnabled: boolean;
     telegramApiBaseUrl: string;
     telegramChatId: string;
-    telegramUseSystemProxy: boolean;
+    telegramProxyRef: string;
     telegramMessageThreadId: string;
     smtpEnabled: boolean;
     smtpHost: string;
@@ -37,7 +39,7 @@ export default function NotificationSettings() {
         telegramEnabled: false,
         telegramApiBaseUrl: 'https://api.telegram.org',
         telegramChatId: '',
-        telegramUseSystemProxy: false,
+        telegramProxyRef: '',
         telegramMessageThreadId: '',
         smtpEnabled: false,
         smtpHost: '',
@@ -53,6 +55,7 @@ export default function NotificationSettings() {
     const [telegramBotToken, setTelegramBotToken] = useState('');
     const [smtpPass, setSmtpPass] = useState('');
     const [loading, setLoading] = useState(true);
+    const { entries: proxyPool } = useProxyPool();
     const [savingNotify, setSavingNotify] = useState(false);
     const [testingNotify, setTestingNotify] = useState(false);
     const toast = useToast();
@@ -82,7 +85,7 @@ export default function NotificationSettings() {
                 telegramEnabled: !!runtimeInfo.telegramEnabled,
                 telegramApiBaseUrl: runtimeInfo.telegramApiBaseUrl || 'https://api.telegram.org',
                 telegramChatId: runtimeInfo.telegramChatId || '',
-                telegramUseSystemProxy: !!runtimeInfo.telegramUseSystemProxy,
+                telegramProxyRef: typeof runtimeInfo.telegramProxyRef === 'string' ? runtimeInfo.telegramProxyRef : '',
                 telegramMessageThreadId: runtimeInfo.telegramMessageThreadId || '',
                 smtpEnabled: !!runtimeInfo.smtpEnabled,
                 smtpHost: runtimeInfo.smtpHost || '',
@@ -121,7 +124,7 @@ export default function NotificationSettings() {
                 telegramEnabled: runtime.telegramEnabled,
                 telegramApiBaseUrl: runtime.telegramApiBaseUrl,
                 telegramChatId: runtime.telegramChatId,
-                telegramUseSystemProxy: runtime.telegramUseSystemProxy,
+                telegramProxyRef: runtime.telegramProxyRef,
                 telegramMessageThreadId: runtime.telegramMessageThreadId,
                 smtpEnabled: runtime.smtpEnabled,
                 smtpHost: runtime.smtpHost,
@@ -327,15 +330,6 @@ export default function NotificationSettings() {
 
                         <div style={{ display: 'flex', gap: 16 }}>
                             <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                                <span style={{ fontSize: 13, fontWeight: 500, color: runtime.telegramUseSystemProxy ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>使用系统代理</span>
-                                <input
-                                    type="checkbox"
-                                    style={{ width: 16, height: 16, cursor: 'pointer' }}
-                                    checked={runtime.telegramUseSystemProxy}
-                                    onChange={(e) => setRuntime((prev) => ({ ...prev, telegramUseSystemProxy: e.target.checked }))}
-                                />
-                            </label>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
                                 <span style={{ fontSize: 13, fontWeight: 500, color: runtime.telegramEnabled ? 'var(--color-primary)' : 'var(--color-text-muted)' }}>启用 Telegram</span>
                                 <input
                                     type="checkbox"
@@ -360,6 +354,16 @@ export default function NotificationSettings() {
                             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--color-text-muted)' }}>
                                 留空或使用默认值时直连官方 Telegram API；如需国内反代，可填写反代前缀。
                             </div>
+                        </div>
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>发送代理</div>
+                            <ProxyRefPicker
+                                idPrefix="telegram-proxy"
+                                entries={proxyPool}
+                                value={runtime.telegramProxyRef ? runtime.telegramProxyRef : null}
+                                onChange={(next) => setRuntime((prev) => ({ ...prev, telegramProxyRef: next ?? '' }))}
+                                disabled={!runtime.telegramEnabled}
+                            />
                         </div>
                         <div>
                             <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8, color: 'var(--color-text-secondary)' }}>Telegram Chat ID</div>
@@ -513,3 +517,4 @@ export default function NotificationSettings() {
         </div>
     );
 }
+

@@ -3,7 +3,6 @@ import { db, schema } from '../db/index.js';
 import {
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
-  resolveProxyUrlFromExtraConfig,
 } from './accountExtraConfig.js';
 import { withSiteRecordProxyRequestInit } from './siteProxy.js';
 
@@ -144,7 +143,7 @@ export async function refreshSub2ApiManagedSession(params: {
       method: 'POST',
       headers,
       body: JSON.stringify({ refresh_token: refreshToken }),
-    }, resolveProxyUrlFromExtraConfig(params.currentExtraConfig)));
+    }, { extraConfig: params.currentExtraConfig }));
     status = response.status;
     if (typeof response.text === 'function') {
       rawText = await response.text().catch(() => '');

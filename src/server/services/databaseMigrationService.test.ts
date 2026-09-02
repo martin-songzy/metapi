@@ -23,6 +23,7 @@ function createDbSchemaMock() {
     modelAvailability: { __table: 'modelAvailability' },
     tokenModelAvailability: { __table: 'tokenModelAvailability' },
     modelProbeResults: { __table: 'modelProbeResults' },
+    modelProbeKeyResults: { __table: 'modelProbeKeyResults' },
     tokenRoutes: { __table: 'tokenRoutes' },
     routeChannels: { __table: 'routeChannels' },
     routeGroupSources: { __table: 'routeGroupSources' },
@@ -144,10 +145,12 @@ describe('databaseMigrationService', () => {
     expect(normalized.ssl).toBe(false);
   });
 
-  it.each(['postgres', 'mysql', 'sqlite'] as const)('creates or patches sites schema with use_system_proxy and custom_headers for %s', async (dialect) => {
+  // `proxy_ref` on purpose: it is the column a deployed instance is actually missing
+  // right now, so this covers the real patch rather than a hypothetical one.
+  it.each(['postgres', 'mysql', 'sqlite'] as const)('creates or patches sites schema with proxy_ref and custom_headers for %s', async (dialect) => {
     const executedSql: string[] = [];
     const liveContract = cloneContract(currentContract);
-    delete liveContract.tables.sites.columns.use_system_proxy;
+    delete liveContract.tables.sites.columns.proxy_ref;
     delete liveContract.tables.sites.columns.custom_headers;
 
     await __databaseMigrationServiceTestUtils.ensureSchema({
@@ -168,10 +171,10 @@ describe('databaseMigrationService', () => {
       liveContract,
     });
 
-    const useSystemProxySql = executedSql.find((sqlText) => sqlText.includes('use_system_proxy'));
+    const proxyRefSql = executedSql.find((sqlText) => sqlText.includes('proxy_ref'));
     const customHeadersSql = executedSql.find((sqlText) => sqlText.includes('custom_headers'));
 
-    expect(useSystemProxySql).toContain('use_system_proxy');
+    expect(proxyRefSql).toContain('proxy_ref');
     expect(customHeadersSql).toContain('custom_headers');
   });
 
@@ -366,14 +369,17 @@ describe('databaseMigrationService', () => {
     } as any);
 
     const statement = statements.find((item) => item.table === 'sites');
-    const contractColumns = Object.keys(currentContract.tables.sites.columns).sort();
+    // The two superseded proxy columns are excluded on purpose — see KNOWN_COLUMN_DRIFT.
+    const contractColumns = Object.keys(currentContract.tables.sites.columns)
+      .filter((column) => column !== 'proxy_url' && column !== 'use_system_proxy')
+      .sort();
     // This hand-maintained list has already drifted behind the schema once, and
     // the only symptom was users quietly losing configuration on a database
     // migration. Adding a sites column now fails here instead.
     expect([...(statement?.columns ?? [])].sort()).toEqual(contractColumns);
   });
 
-  it('includes useSystemProxy and customHeaders when building site migration statements', () => {
+  it('carries the site proxy reference and custom headers into migration statements', () => {
     const statements = __databaseMigrationServiceTestUtils.buildStatements({
       version: 'test',
       timestamp: Date.now(),
@@ -383,7 +389,7 @@ describe('databaseMigrationService', () => {
           name: 'demo',
           url: 'https://example.com',
           platform: 'openai',
-          useSystemProxy: true,
+          proxyRef: 'px_hk',
           customHeaders: '{"x-site-scope":"internal"}',
           status: 'active',
         }],
@@ -408,11 +414,11 @@ describe('databaseMigrationService', () => {
     });
 
     const siteStatement = statements.find((statement) => statement.table === 'sites');
-    const useSystemProxyIndex = siteStatement?.columns.indexOf('use_system_proxy') ?? -1;
+    const proxyRefIndex = siteStatement?.columns.indexOf('proxy_ref') ?? -1;
     const customHeadersIndex = siteStatement?.columns.indexOf('custom_headers') ?? -1;
 
-    expect(useSystemProxyIndex).toBeGreaterThanOrEqual(0);
-    expect(siteStatement?.values[useSystemProxyIndex]).toBe(true);
+    expect(proxyRefIndex).toBeGreaterThanOrEqual(0);
+    expect(siteStatement?.values[proxyRefIndex]).toBe('px_hk');
     expect(customHeadersIndex).toBeGreaterThanOrEqual(0);
     expect(siteStatement?.values[customHeadersIndex]).toBe('{"x-site-scope":"internal"}');
   });
@@ -1345,6 +1351,14 @@ describe('databaseMigrationService', () => {
       'first_byte_latency_ms',
     ],
     route_channels: ['oauth_route_unit_id'],
+    /**
+     * Deliberately NOT copied. Both columns were superseded by `proxy_ref` and nothing
+     * reads them; they stay DECLARED only because the artifact generator emits additive
+     * upgrade SQL and dropping them would withhold every other pending change from a
+     * deployed Postgres. Copying dead values across a database migration would keep
+     * re-seeding them forever.
+     */
+    sites: ['proxy_url', 'use_system_proxy'],
   };
 
   // The column guard above cannot see a table that is missing outright, and that
@@ -1353,7 +1367,8 @@ describe('databaseMigrationService', () => {
   const MIGRATED_TABLES = [
     'sites', 'site_api_endpoints', 'site_announcements', 'site_disabled_models', 'accounts',
     'account_tokens', 'checkin_logs', 'model_availability', 'token_model_availability',
-    'model_probe_results', 'token_routes', 'route_channels', 'route_group_sources', 'proxy_logs',
+    'model_probe_results', 'model_probe_key_results', 'token_routes', 'route_channels',
+    'route_group_sources', 'proxy_logs',
     'proxy_video_tasks', 'proxy_files', 'downstream_api_keys', 'events', 'settings',
   ];
 
@@ -1378,7 +1393,8 @@ describe('databaseMigrationService', () => {
     const tableKeys = [
       'sites', 'siteApiEndpoints', 'siteAnnouncements', 'siteDisabledModels', 'accounts',
       'accountTokens', 'checkinLogs', 'modelAvailability', 'tokenModelAvailability',
-      'modelProbeResults', 'tokenRoutes', 'routeChannels', 'routeGroupSources', 'proxyLogs',
+      'modelProbeResults', 'modelProbeKeyResults', 'tokenRoutes', 'routeChannels',
+      'routeGroupSources', 'proxyLogs',
       'proxyVideoTasks', 'proxyFiles', 'downstreamApiKeys', 'events',
     ];
     const statements = __databaseMigrationServiceTestUtils.buildStatements({
@@ -1416,7 +1432,8 @@ describe('databaseMigrationService', () => {
     const tableKeys = [
       'sites', 'siteApiEndpoints', 'siteAnnouncements', 'siteDisabledModels', 'accounts',
       'accountTokens', 'checkinLogs', 'modelAvailability', 'tokenModelAvailability',
-      'modelProbeResults', 'tokenRoutes', 'routeChannels', 'routeGroupSources', 'proxyLogs',
+      'modelProbeResults', 'modelProbeKeyResults', 'tokenRoutes', 'routeChannels',
+      'routeGroupSources', 'proxyLogs',
       'proxyVideoTasks', 'proxyFiles', 'downstreamApiKeys', 'events',
     ];
     const statements = __databaseMigrationServiceTestUtils.buildStatements({

@@ -61,7 +61,6 @@ describe('Settings model availability probe confirmation', () => {
       routingFallbackUnitCost: 1,
       routingWeights: {},
       adminIpAllowlist: [],
-      systemProxyUrl: '',
     });
     apiMock.getDownstreamApiKeys.mockResolvedValue({ items: [] });
     apiMock.getRoutesLite.mockResolvedValue([]);

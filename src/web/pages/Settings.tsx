@@ -19,6 +19,7 @@ import {
   visualRulesToPayloadRules,
 } from './settings/payloadRulesVisual.js';
 import { PAYLOAD_RULE_PROTOCOL_OPTIONS } from './settings/payloadRuleProtocolOptions.js';
+import ProxyPoolPanel from './settings/ProxyPoolPanel.js';
 import UpdateCenterSection from './settings/UpdateCenterSection.js';
 import {
   applyRoutingProfilePreset,
@@ -78,7 +79,6 @@ type RuntimeSettings = {
   routeFailureCooldownMaxValue: number;
   routeFailureCooldownMaxUnit: RouteCooldownUnit;
   routingWeights: RoutingWeights;
-  systemProxyUrl: string;
   proxyErrorKeywords: string[];
   proxyEmptyContentFailEnabled: boolean;
   proxyTokenMasked?: string;
@@ -87,11 +87,6 @@ type RuntimeSettings = {
   globalBlockedBrands?: string[];
   globalAllowedModels?: string[];
 };
-
-type SystemProxyTestState =
-  | { kind: 'success'; text: string }
-  | { kind: 'error'; text: string }
-  | null;
 
 type DatabaseMigrationSummary = {
   dialect: DbDialect;
@@ -360,7 +355,6 @@ export default function Settings() {
     routeFailureCooldownMaxValue: 30,
     routeFailureCooldownMaxUnit: 'day',
     routingWeights: defaultWeights,
-    systemProxyUrl: '',
     proxyErrorKeywords: [],
     proxyEmptyContentFailEnabled: false,
   });
@@ -371,11 +365,8 @@ export default function Settings() {
   const [savingSchedule, setSavingSchedule] = useState(false);
   const [testingCheckin, setTestingCheckin] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
-  const [savingSystemProxy, setSavingSystemProxy] = useState(false);
   const [savingModelAvailabilityProbe, setSavingModelAvailabilityProbe] = useState(false);
   const [savingProxyTransport, setSavingProxyTransport] = useState(false);
-  const [testingSystemProxy, setTestingSystemProxy] = useState(false);
-  const [systemProxyTestState, setSystemProxyTestState] = useState<SystemProxyTestState>(null);
   const [savingProxyFailureRules, setSavingProxyFailureRules] = useState(false);
   const [payloadVisualRules, setPayloadVisualRules] = useState<VisualPayloadRule[]>([]);
   const [payloadRuleDrafts, setPayloadRuleDrafts] = useState<PayloadRulesEditorDrafts>(createEmptyPayloadRuleDrafts());
@@ -696,7 +687,6 @@ export default function Settings() {
           ...defaultWeights,
           ...(runtimeInfo.routingWeights || {}),
         },
-        systemProxyUrl: typeof runtimeInfo.systemProxyUrl === 'string' ? runtimeInfo.systemProxyUrl : '',
         proxyErrorKeywords: Array.isArray(runtimeInfo.proxyErrorKeywords)
           ? runtimeInfo.proxyErrorKeywords.filter((item: unknown) => typeof item === 'string')
           : [],
@@ -831,26 +821,6 @@ export default function Settings() {
     }
   };
 
-  const saveSystemProxy = async () => {
-    setSavingSystemProxy(true);
-    try {
-      const res = await api.updateRuntimeSettings({
-        systemProxyUrl: runtime.systemProxyUrl.trim(),
-      });
-      setRuntime((prev) => ({
-        ...prev,
-        systemProxyUrl: typeof res?.systemProxyUrl === 'string'
-          ? res.systemProxyUrl
-          : prev.systemProxyUrl,
-      }));
-      toast.success('系统代理已保存');
-    } catch (err: any) {
-      toast.error(err?.message || '保存失败');
-    } finally {
-      setSavingSystemProxy(false);
-    }
-  };
-
   const persistModelAvailabilityProbeSetting = async (enabled: boolean) => {
     setSavingModelAvailabilityProbe(true);
     try {
@@ -916,31 +886,6 @@ export default function Settings() {
       toast.error(err?.message || '保存失败');
     } finally {
       setSavingProxyTransport(false);
-    }
-  };
-
-  const testSystemProxy = async () => {
-    const proxyUrl = runtime.systemProxyUrl.trim();
-    if (!proxyUrl) {
-      const message = '请先填写系统代理地址';
-      setSystemProxyTestState({ kind: 'error', text: message });
-      toast.info(message);
-      return;
-    }
-
-    setTestingSystemProxy(true);
-    setSystemProxyTestState(null);
-    try {
-      const res = await api.testSystemProxy({ proxyUrl });
-      const summary = `连通成功，延迟 ${res.latencyMs} ms`;
-      setSystemProxyTestState({ kind: 'success', text: summary });
-      toast.success(`系统代理测试成功（${res.latencyMs} ms）`);
-    } catch (err: any) {
-      const message = err?.message || '系统代理测试失败';
-      setSystemProxyTestState({ kind: 'error', text: message });
-      toast.error(message);
-    } finally {
-      setTestingSystemProxy(false);
     }
   };
 
@@ -1452,47 +1397,17 @@ export default function Settings() {
           </div>
         </div>
 
-        <div className="card animate-slide-up stagger-3" style={{ padding: 20 }}>
-          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>系统代理</div>
-          <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginBottom: 12 }}>
-            配置一个全局出站代理地址，站点页可按站点决定是否启用系统代理。
-          </div>
-          <input
-            value={runtime.systemProxyUrl}
-            onChange={(e) => {
-              setRuntime((prev) => ({ ...prev, systemProxyUrl: e.target.value }));
-              setSystemProxyTestState(null);
-            }}
-            placeholder="系统代理 URL（可选，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）"
-            style={{ ...inputStyle, fontFamily: 'var(--font-mono)', marginBottom: 10 }}
-          />
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button onClick={saveSystemProxy} disabled={savingSystemProxy} className="btn btn-primary">
-              {savingSystemProxy ? <><span className="spinner spinner-sm" style={{ borderTopColor: 'white', borderColor: 'rgba(255,255,255,0.3)' }} /> 保存中...</> : '保存系统代理'}
-            </button>
-            <button
-              onClick={testSystemProxy}
-              disabled={testingSystemProxy}
-              className="btn btn-ghost"
-              style={{ border: '1px solid var(--color-border)' }}
-            >
-              {testingSystemProxy ? <><span className="spinner spinner-sm" /> 测试中...</> : '测试系统代理'}
-            </button>
-          </div>
-          {systemProxyTestState && (
-            <div
-              style={{
-                fontSize: 12,
-                marginTop: 10,
-                color: systemProxyTestState.kind === 'success'
-                  ? 'var(--color-success)'
-                  : 'var(--color-danger)',
-              }}
-            >
-              {systemProxyTestState.text}
-            </div>
-          )}
-        </div>
+        {/*
+          Replaces the old single 系统代理 address field. That field could only hold
+          one proxy, and it only reached a site that had separately ticked
+          「使用系统代理」 — a checkbox that read like an on/off switch but actually
+          meant "borrow the global value", so an address saved here silently did
+          nothing for every site that had not ticked it.
+        */}
+        <ProxyPoolPanel
+          inputStyle={inputStyle}
+          onToast={(kind, message) => (kind === 'success' ? toast.success(message) : toast.error(message))}
+        />
 
         <div className="card animate-slide-up stagger-4" style={{ padding: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>代理失败判定</div>

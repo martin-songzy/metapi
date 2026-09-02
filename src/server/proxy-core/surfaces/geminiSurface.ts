@@ -11,7 +11,7 @@ import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { getOauthInfoFromAccount } from '../../services/oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
-import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { resolveChannelProxyUrl, withResolvedProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import * as routeRefreshWorkflow from '../../services/routeRefreshWorkflow.js';
 import { getDownstreamRoutingPolicy } from '../../services/downstreamRoutingPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
@@ -671,7 +671,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             ? buildGeminiCliActionPath({ action: internalGeminiAction })
             : resolveUpstreamPath(apiVersion, actualModelAction);
           const query = new URLSearchParams(request.query as Record<string, string>).toString();
-          const channelProxyUrl = resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
+          const channelProxyUrl = await resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
           const buildDirectDispatchState = () => {
             const requestBody = isInternalGemini
               ? (
@@ -734,11 +734,11 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                         action: internalGeminiAction,
                       },
                     },
-                    buildInit: async (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
+                    buildInit: async (_requestUrl, requestForFetch) => withResolvedProxyRequestInit(selected.site, channelProxyUrl, {
                       method: 'POST',
                       headers: requestForFetch.headers,
                       body: JSON.stringify(requestForFetch.body),
-                    }, channelProxyUrl),
+                    }),
                   })
                   : fetch(targetUrl, {
                     method: 'POST',
@@ -1238,7 +1238,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             runtime: endpointRequest.runtime,
           };
         };
-        const channelProxyUrl = resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
+        const channelProxyUrl = await resolveChannelProxyUrl(selected.site, selected.account.extraConfig);
         const dispatchRequest = (
           compatibilityRequest: BuiltEndpointRequest,
           targetUrl?: string,
@@ -1249,11 +1249,11 @@ export async function geminiProxyRoute(app: FastifyInstance) {
             targetUrl,
             signal,
             request: compatibilityRequest,
-            buildInit: async (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(selected.site, {
+            buildInit: async (_requestUrl, requestForFetch) => withResolvedProxyRequestInit(selected.site, channelProxyUrl, {
               method: 'POST',
               headers: requestForFetch.headers,
               body: JSON.stringify(requestForFetch.body),
-            }, channelProxyUrl),
+            }),
           })
         );
         const endpointStrategy = createChatEndpointStrategy({

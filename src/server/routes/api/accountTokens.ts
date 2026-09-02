@@ -16,9 +16,9 @@ import {
   setDefaultToken,
 } from '../../services/accountTokenService.js';
 import { getAdapter } from '../../services/platforms/index.js';
-import { getCredentialModeFromExtraConfig, getProxyUrlFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
+import { getCredentialModeFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
-import { withAccountProxyOverride } from '../../services/siteProxy.js';
+import { resolveChannelProxyUrl, withAccountProxyOverride } from '../../services/siteProxy.js';
 import { type ModelRefreshResult } from '../../services/modelService.js';
 import {
   type CoverageBatchRebuildResult,
@@ -298,7 +298,7 @@ async function executeAccountTokenSync(row: AccountWithSiteRow): Promise<SyncExe
 
   try {
     const platformUserId = resolvePlatformUserId(row.accounts.extraConfig, row.accounts.username);
-    const accountProxyUrl = getProxyUrlFromExtraConfig(row.accounts.extraConfig);
+    const accountProxyUrl = await resolveChannelProxyUrl(row.sites, row.accounts.extraConfig);
     let tokens = await withTimeout(
       () => withAccountProxyOverride(accountProxyUrl,
         () => adapter.getApiTokens(row.sites.url, row.accounts.accessToken, platformUserId)),
@@ -471,6 +471,43 @@ function buildCoverageRefreshFailureItem(
   };
 }
 
+/**
+ * Keyname uniqueness is enforced in the route rather than by a unique index
+ * (Q17=A): rows synced from upstream can already carry duplicate names, and a
+ * `CREATE UNIQUE INDEX` in the generated upgrade SQL would then fail at BOOT on
+ * such a database — taking a whole deployment down over a cosmetic constraint.
+ * Validating here constrains new writes only and leaves existing rows readable.
+ *
+ * Compared trimmed and case-insensitively: `Key A` and `key a ` name the same
+ * thing to an operator reading a per-key results table, which is the only reason
+ * this constraint exists.
+ */
+function conflictsWithExistingTokenName(input: {
+  rows: ReadonlyArray<{ id: number; name: string | null }>;
+  name: string;
+  excludeTokenId?: number;
+}): boolean {
+  const name = input.name.trim().toLowerCase();
+  if (!name) return false;
+  return input.rows.some((row) => row.id !== input.excludeTokenId
+    && (row.name || '').trim().toLowerCase() === name);
+}
+
+/**
+ * Keeps the historical `default` / `token-N` shape but counts PAST the highest
+ * occupied index instead of using `length + 1`. Deleting a middle row makes
+ * `length + 1` land on a name that already exists, which the uniqueness check
+ * above would then reject on an otherwise valid create.
+ */
+function nextAvailableTokenName(existing: ReadonlyArray<{ name: string | null }>): string {
+  if (existing.length === 0) return 'default';
+  const taken = new Set(existing.map((row) => (row.name || '').trim().toLowerCase()));
+  for (let index = existing.length + 1; ; index += 1) {
+    const candidate = `token-${index}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 export async function accountTokensRoutes(app: FastifyInstance) {
   app.get<{ Querystring: { accountId?: string } }>('/api/account-tokens', async (request) => {
     const accountId = request.query.accountId ? Number.parseInt(request.query.accountId, 10) : undefined;
@@ -513,12 +550,20 @@ export async function accountTokensRoutes(app: FastifyInstance) {
         ? (body.isDefault ?? false)
         : false;
 
+      const requestedName = (body.name || '').trim();
+      if (conflictsWithExistingTokenName({ rows: existing, name: requestedName })) {
+        return reply.code(400).send({
+          success: false,
+          message: `该账号下已存在名为「${requestedName}」的 Key，请换一个名称`,
+        });
+      }
+
       let created = await insertAndGetById<typeof schema.accountTokens.$inferSelect>({
         table: schema.accountTokens,
         idColumn: schema.accountTokens.id,
         values: {
           accountId: body.accountId,
-          name: (body.name || '').trim() || (existing.length === 0 ? 'default' : `token-${existing.length + 1}`),
+          name: requestedName || nextAvailableTokenName(existing),
           token: tokenValue,
           tokenGroup: (body.group || '').trim() || null,
           valueStatus,
@@ -594,7 +639,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
 
     const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
     const createdViaUpstream = await withAccountProxyOverride(
-      getProxyUrlFromExtraConfig(account.extraConfig),
+      await resolveChannelProxyUrl(site, account.extraConfig),
       () => adapter.createApiToken(
         site.url,
         account.accessToken,
@@ -670,7 +715,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     if (shouldDeleteUpstream) {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
       const upstreamDeleted = await withAccountProxyOverride(
-        getProxyUrlFromExtraConfig(account.extraConfig),
+        await resolveChannelProxyUrl(site, account.extraConfig),
         () => adapter!.deleteApiToken(
           site.url,
           account.accessToken,
@@ -684,6 +729,20 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     }
 
     await db.delete(schema.accountTokens).where(eq(schema.accountTokens.id, tokenId)).run();
+
+    // Application-level cascade (Q18). `model_probe_key_results.token_id` holds a
+    // sentinel for account-level primary keys, so it cannot be a real foreign key
+    // and the database will not clean up after this delete. Left behind, those rows
+    // would keep showing probe verdicts for a Key that no longer exists — and the
+    // (account_id, token_id, model_name) unique key means a future key reusing the
+    // id would inherit them.
+    await db.delete(schema.modelProbeKeyResults)
+      .where(and(
+        eq(schema.modelProbeKeyResults.accountId, existing.accountId),
+        eq(schema.modelProbeKeyResults.tokenId, tokenId),
+      ))
+      .run();
+
     if (existing.isDefault) {
       repairDefaultToken(existing.accountId);
     }
@@ -792,7 +851,22 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     let nextValueStatus = resolveAccountTokenValueStatus(existing);
 
     if (body.name !== undefined) {
-      updates.name = (body.name || '').trim() || existing.name;
+      const requestedName = (body.name || '').trim() || existing.name;
+      const siblings = await db.select()
+        .from(schema.accountTokens)
+        .where(eq(schema.accountTokens.accountId, existing.accountId))
+        .all();
+      if (conflictsWithExistingTokenName({
+        rows: siblings,
+        name: requestedName,
+        excludeTokenId: tokenId,
+      })) {
+        return reply.code(400).send({
+          success: false,
+          message: `该账号下已存在名为「${requestedName}」的 Key，请换一个名称`,
+        });
+      }
+      updates.name = requestedName;
     }
 
     if (body.token !== undefined) {
@@ -940,7 +1014,7 @@ export async function accountTokensRoutes(app: FastifyInstance) {
     try {
       const platformUserId = resolvePlatformUserId(account.extraConfig, account.username);
       const groups = await withAccountProxyOverride(
-        getProxyUrlFromExtraConfig(account.extraConfig),
+        await resolveChannelProxyUrl(site, account.extraConfig),
         () => adapter.getUserGroups(site.url, account.accessToken, platformUserId),
       );
       const normalized = Array.from(new Set((groups || []).map((item) => String(item || '').trim()).filter(Boolean)));

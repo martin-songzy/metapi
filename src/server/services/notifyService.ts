@@ -1,6 +1,6 @@
 import { fetch } from 'undici';
 import { config } from '../config.js';
-import { withExplicitProxyRequestInit } from './siteProxy.js';
+import { resolveProxyRefFromPrimedPool, withExplicitProxyRequestInit } from './siteProxy.js';
 import nodemailer, { type Transporter } from 'nodemailer';
 import {
   createNotificationSignature,
@@ -272,7 +272,7 @@ export async function sendNotification(
       channel: 'telegram',
       run: async () => {
         const telegramRequestInit = withExplicitProxyRequestInit(
-          config.telegramUseSystemProxy ? config.systemProxyUrl : null,
+          resolveProxyRefFromPrimedPool(config.telegramProxyRef),
           {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

@@ -81,9 +81,24 @@ describe('refreshModelsForAccount credential discovery', () => {
     await db.delete(schema.settings).run();
     await db.delete(schema.sites).run();
     const { config } = await import('../config.js');
-    config.systemProxyUrl = '';
-    const { invalidateSiteProxyCache } = await import('./siteProxy.js');
+    const { invalidateSiteProxyCache, primeSiteProxyPool } = await import('./siteProxy.js');
     invalidateSiteProxyCache();
+    // Sites and connections reference the pool by id, so a proxy test needs an entry
+    // to point at. Primed rather than only written to the DB so the synchronous
+    // resolvers see it too.
+    await db.insert(schema.settings).values({
+      key: 'proxy_pool_v1',
+      value: JSON.stringify([
+        { id: 'px_a', name: 'A', url: 'http://127.0.0.1:7890' },
+        { id: 'px_b', name: 'B', url: 'http://127.0.0.1:1080' },
+        { id: 'px_c', name: 'C', url: 'http://127.0.0.1:1081' },
+      ]),
+    }).run();
+    primeSiteProxyPool([
+      { id: 'px_a', url: 'http://127.0.0.1:7890' },
+      { id: 'px_b', url: 'http://127.0.0.1:1080' },
+      { id: 'px_c', url: 'http://127.0.0.1:1081' },
+    ]);
   });
 
   afterAll(() => {
@@ -1393,7 +1408,7 @@ describe('refreshModelsForAccount credential discovery', () => {
       status: 'active',
       extraConfig: JSON.stringify({
         credentialMode: 'session',
-        proxyUrl: 'http://127.0.0.1:7890',
+        proxyRef: 'px_a',
         oauth: {
           provider: 'codex',
           accountId: 'chatgpt-account-proxy',
@@ -1447,7 +1462,7 @@ describe('refreshModelsForAccount credential discovery', () => {
       status: 'active',
       extraConfig: JSON.stringify({
         credentialMode: 'session',
-        proxyUrl: 'http://127.0.0.1:1080',
+        proxyRef: 'px_b',
         oauth: {
           provider: 'gemini-cli',
           projectId: 'project-proxy-demo',
@@ -1473,7 +1488,7 @@ describe('refreshModelsForAccount credential discovery', () => {
     });
   });
 
-  it('inherits site system proxy for gemini oauth validation requests', async () => {
+  it('inherits the site proxy for gemini oauth validation requests', async () => {
     getApiTokenMock.mockResolvedValue(null);
     getModelsMock.mockRejectedValue(new Error('gemini oauth validation should not call adapter.getModels'));
     undiciFetchMock.mockResolvedValue({
@@ -1486,14 +1501,13 @@ describe('refreshModelsForAccount credential discovery', () => {
     });
 
     const { config } = await import('../config.js');
-    config.systemProxyUrl = 'http://127.0.0.1:1081';
 
     const site = await db.insert(schema.sites).values({
       name: 'gemini-site-proxy-site',
       url: 'https://cloudcode-pa.googleapis.com',
       platform: 'gemini-cli',
       status: 'active',
-      useSystemProxy: true,
+      proxyRef: 'px_c',
     }).returning().get();
 
     const account = await db.insert(schema.accounts).values({
@@ -2230,3 +2244,4 @@ describe('refreshModelsForAccount credential discovery', () => {
     });
   });
 });
+

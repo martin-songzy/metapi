@@ -90,7 +90,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     fetchMock.mockReset();
     undiciAgentCtorMock.mockReset();
     undiciProxyAgentCtorMock.mockReset();
-    config.systemProxyUrl = '';
     const { resetRequestRateLimitStore } = await import('../../middleware/requestRateLimit.js');
     const { resetOauthSensitiveRouteLimiterForTests } = await import('./oauth.js');
     resetRequestRateLimitStore();
@@ -103,8 +102,19 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.settings).run();
     await db.delete(schema.sites).run();
-    const { invalidateSiteProxyCache } = await import('../../services/siteProxy.js');
+    const { invalidateSiteProxyCache, primeSiteProxyPool } = await import('../../services/siteProxy.js');
     invalidateSiteProxyCache();
+    // Sites and connections reference the pool by id, and the routes now REFUSE an id
+    // that is not in it, so the pool is part of the baseline rather than per-test setup.
+    const pool = [
+      { id: 'px_hk', name: '香港', url: 'http://127.0.0.1:7890' },
+      { id: 'px_other', name: '备用', url: 'http://127.0.0.1:9999' },
+    ];
+    await db.insert(schema.settings).values({
+      key: 'proxy_pool_v1',
+      value: JSON.stringify(pool),
+    }).run();
+    primeSiteProxyPool(pool);
   });
 
   afterAll(async () => {
@@ -120,9 +130,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      defaults: {
-        systemProxyConfigured: false,
-      },
       providers: expect.arrayContaining([
         expect.objectContaining({
           provider: 'codex',
@@ -151,54 +158,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
           requiresProjectId: false,
         }),
       ]),
-    });
-  });
-
-  it('exposes system proxy defaults in oauth provider metadata when configured', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
-
-    const response = await app.inject({
-      method: 'GET',
-      url: '/api/oauth/providers',
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      defaults: {
-        systemProxyConfigured: true,
-      },
-    });
-  });
-
-  it('reports when runtime system proxy is configured in oauth provider defaults', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
-
-    const response = await app.inject({
-      method: 'GET',
-      url: '/api/oauth/providers',
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      defaults: {
-        systemProxyConfigured: true,
-      },
-    });
-  });
-
-  it('reports when the runtime system proxy is configured', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
-
-    const response = await app.inject({
-      method: 'GET',
-      url: '/api/oauth/providers',
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      defaults: {
-        systemProxyConfigured: true,
-      },
     });
   });
 
@@ -242,36 +201,36 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       method: 'POST',
       url: '/api/oauth/connections/1/rebind',
       payload: {
-        proxyUrl: 123,
+        proxyRef: 123,
       },
     });
     expect(invalidRebindResponse.statusCode).toBe(400);
     expect(invalidRebindResponse.json()).toMatchObject({
-      message: 'Invalid proxyUrl. Expected string or null.',
+      message: 'Invalid proxyRef. Expected a proxy pool id or null.',
     });
 
-    const invalidUseSystemProxyResponse = await app.inject({
+    const invalidProxyRefResponse = await app.inject({
       method: 'POST',
       url: '/api/oauth/providers/antigravity/start',
       payload: {
-        useSystemProxy: 'yes',
+        proxyRef: 123,
       },
     });
-    expect(invalidUseSystemProxyResponse.statusCode).toBe(400);
-    expect(invalidUseSystemProxyResponse.json()).toMatchObject({
-      message: 'Invalid useSystemProxy. Expected boolean.',
+    expect(invalidProxyRefResponse.statusCode).toBe(400);
+    expect(invalidProxyRefResponse.json()).toMatchObject({
+      message: 'Invalid proxyRef. Expected a proxy pool id or null.',
     });
 
     const invalidProxyPatchResponse = await app.inject({
       method: 'PATCH',
       url: '/api/oauth/connections/1/proxy',
       payload: {
-        useSystemProxy: 'yes',
+        proxyRef: 123,
       },
     });
     expect(invalidProxyPatchResponse.statusCode).toBe(400);
     expect(invalidProxyPatchResponse.json()).toMatchObject({
-      message: 'Invalid useSystemProxy. Expected boolean.',
+      message: 'Invalid proxyRef. Expected a proxy pool id or null.',
     });
   });
 
@@ -537,7 +496,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         'x-forwarded-proto': 'https',
       },
       payload: {
-        proxyUrl: 'http://127.0.0.1:7890',
+        proxyRef: 'px_hk',
       },
     });
     const startBody = startResponse.json() as { state: string };
@@ -593,7 +552,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
     expect(JSON.parse(accounts[0]?.extraConfig || '{}')).toMatchObject({
       credentialMode: 'session',
-      proxyUrl: 'http://127.0.0.1:7890',
+      proxyRef: 'px_hk',
       oauth: {
         email: 'codex-user@example.com',
         planType: 'plus',
@@ -636,7 +595,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       oauthAccountKey: 'chatgpt-account-refresh',
       extraConfig: JSON.stringify({
         credentialMode: 'session',
-        proxyUrl: 'http://127.0.0.1:7890',
+        proxyRef: 'px_hk',
         oauth: {
           email: 'codex-existing@example.com',
           refreshToken: 'oauth-refresh-token-old',
@@ -666,7 +625,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     const updated = await db.select().from(schema.accounts).where(eq(schema.accounts.id, existing.id)).get();
     expect(updated?.accessToken).toBe('oauth-access-token-new');
     expect(JSON.parse(updated?.extraConfig || '{}')).toMatchObject({
-      proxyUrl: 'http://127.0.0.1:7890',
+      proxyRef: 'px_hk',
       oauth: {
         refreshToken: 'oauth-refresh-token-new',
       },
@@ -681,16 +640,12 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         chatgpt_plan_type: 'plus',
       },
     });
-    await db.insert(schema.settings).values({
-      key: 'system_proxy_url',
-      value: JSON.stringify('http://127.0.0.1:7890'),
-    }).run();
     await db.insert(schema.sites).values({
       name: 'ChatGPT Codex OAuth',
       url: 'https://chatgpt.com/backend-api/codex',
       platform: 'codex',
       status: 'active',
-      useSystemProxy: true,
+      proxyRef: 'px_hk',
     }).run();
 
     fetchMock
@@ -749,7 +704,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         chatgpt_plan_type: 'plus',
       },
     });
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
 
     fetchMock
       .mockResolvedValueOnce({
@@ -781,7 +735,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         'x-forwarded-proto': 'https',
       },
       payload: {
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       },
     });
     expect(startResponse.statusCode).toBe(200);
@@ -805,14 +759,23 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toHaveLength(1);
     expect(JSON.parse(accounts[0]?.extraConfig || '{}')).toMatchObject({
-      useSystemProxy: true,
+      proxyRef: 'px_hk',
       oauth: {
         email: 'codex-system-proxy@example.com',
       },
     });
   });
 
-  it('falls back to the site proxy during rebind exchange when clearing an account proxy override', async () => {
+  /**
+   * The behaviour this feature exists to add: a connection saying 不走代理 OVERRIDES
+   * its site rather than falling back to it.
+   *
+   * Under the old address/opt-in columns an empty value meant "ask the layer above",
+   * so a connection could never refuse a proxy its site had set — clearing the
+   * override here used to re-apply the site's proxy. The site-fallback path is still
+   * covered by the plain start flow above, which sends no reference at all.
+   */
+  it('honours a connection refusing a proxy during rebind exchange, overriding its site', async () => {
     const originalJwt = buildJwt({
       email: 'codex-clear@example.com',
       'https://api.openai.com/auth': {
@@ -827,16 +790,12 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         chatgpt_plan_type: 'team',
       },
     });
-    await db.insert(schema.settings).values({
-      key: 'system_proxy_url',
-      value: JSON.stringify('http://127.0.0.1:7890'),
-    }).run();
     const site = await db.insert(schema.sites).values({
       name: 'ChatGPT Codex OAuth',
       url: 'https://chatgpt.com/backend-api/codex',
       platform: 'codex',
       status: 'active',
-      useSystemProxy: true,
+      proxyRef: 'px_hk',
     }).returning().get();
     const existing = await db.insert(schema.accounts).values({
       siteId: site.id,
@@ -849,7 +808,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       oauthAccountKey: 'chatgpt-account-clear-existing',
       extraConfig: JSON.stringify({
         credentialMode: 'session',
-        proxyUrl: 'http://127.0.0.1:9999',
+        proxyRef: 'px_other',
         oauth: {
           provider: 'codex',
           accountId: 'chatgpt-account-clear-existing',
@@ -892,7 +851,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         'x-forwarded-proto': 'https',
       },
       payload: {
-        proxyUrl: null,
+        proxyRef: null,
       },
     });
     expect(startResponse.statusCode).toBe(200);
@@ -909,15 +868,14 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     const codexTokenCall = fetchMock.mock.calls.find((call) => String(call[0] || '') === 'https://auth.openai.com/oauth/token');
     const codexTokenFetchInit = codexTokenCall?.[1] as Record<string, unknown> | undefined;
-    expect(codexTokenFetchInit).toEqual(expect.objectContaining({
-      dispatcher: expect.anything(),
-    }));
+    expect(codexTokenFetchInit).toBeDefined();
+    expect(codexTokenFetchInit).not.toHaveProperty('dispatcher');
 
     const stored = await db.select().from(schema.accounts).where(eq(schema.accounts.id, existing.id)).get();
     expect(stored?.accessToken).toBe('rebound-access-token');
     expect(stored?.oauthAccountKey).toBe('chatgpt-account-clear-rebound');
     expect(JSON.parse(stored?.extraConfig || '{}')).toMatchObject({
-      proxyUrl: null,
+      proxyRef: null,
       oauth: {
         refreshToken: 'rebound-refresh-token',
         idToken: reboundJwt,
@@ -926,7 +884,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
   });
 
   it('updates oauth account proxy settings without starting reauthorization and refreshes route coverage', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -968,8 +925,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       method: 'PATCH',
       url: `/api/oauth/connections/${account.id}/proxy`,
       payload: {
-        proxyUrl: null,
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       },
     });
 
@@ -983,8 +939,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     const stored = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(JSON.parse(stored?.extraConfig || '{}')).toMatchObject({
-      useSystemProxy: true,
-      proxyUrl: null,
+      proxyRef: 'px_hk',
     });
 
     const modelRows = await db.select().from(schema.modelAvailability).all();
@@ -1008,7 +963,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       items: [
         expect.objectContaining({
           accountId: account.id,
-          useSystemProxy: true,
+          proxyRef: 'px_hk',
           routeChannelCount: 1,
         }),
       ],
@@ -1016,7 +971,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
   });
 
   it('updates oauth account proxy settings without creating a new oauth session and rebuilds routes', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -1057,8 +1011,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       method: 'PATCH',
       url: `/api/oauth/connections/${account.id}/proxy`,
       payload: {
-        proxyUrl: null,
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       },
     });
 
@@ -1067,16 +1020,14 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     expect(body).toMatchObject({
       success: true,
       accountId: account.id,
-      useSystemProxy: true,
-      proxyUrl: null,
+      proxyRef: 'px_hk',
     });
     expect(body).not.toHaveProperty('state');
     expect(body).not.toHaveProperty('authorizationUrl');
 
     const updated = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(JSON.parse(updated?.extraConfig || '{}')).toMatchObject({
-      useSystemProxy: true,
-      proxyUrl: null,
+      proxyRef: 'px_hk',
       oauth: {
         email: 'proxy-update@example.com',
       },
@@ -2661,7 +2612,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
   });
 
   it('imports multiple native oauth json objects with shared proxy settings in one request', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
     fetchMock
       .mockResolvedValueOnce({
         ok: true,
@@ -2700,8 +2650,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
             account_id: 'chatgpt-imported-b',
           },
         ],
-        useSystemProxy: true,
-        proxyUrl: null,
+        proxyRef: 'px_hk',
       },
     });
 
@@ -2717,12 +2666,10 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     expect(accounts).toHaveLength(2);
     expect(accounts.map((row) => JSON.parse(row.extraConfig || '{}'))).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        useSystemProxy: true,
-        proxyUrl: null,
+        proxyRef: 'px_hk',
       }),
       expect.objectContaining({
-        useSystemProxy: true,
-        proxyUrl: null,
+        proxyRef: 'px_hk',
       }),
     ]));
 
@@ -3465,7 +3412,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
   });
 
   it('imports multiple oauth json objects in one batch and applies the explicit system proxy setting', async () => {
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
     fetchMock.mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -3496,7 +3442,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
             disabled: true,
           },
         ],
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       },
     });
 
@@ -3511,7 +3457,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     expect(accounts).toHaveLength(2);
     expect(accounts.map((account) => JSON.parse(account.extraConfig || '{}'))).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       }),
     ]));
 
@@ -3678,23 +3624,20 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       method: 'PATCH',
       url: `/api/oauth/connections/${account.id}/proxy`,
       payload: {
-        useSystemProxy: true,
-        proxyUrl: null,
+        proxyRef: 'px_hk',
       },
     });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       success: true,
-      useSystemProxy: true,
-      proxyUrl: null,
+      proxyRef: 'px_hk',
       refreshedRoutes: true,
     });
 
     const stored = await db.select().from(schema.accounts).where(eq(schema.accounts.id, account.id)).get();
     expect(JSON.parse(stored?.extraConfig || '{}')).toMatchObject({
-      useSystemProxy: true,
-      proxyUrl: null,
+      proxyRef: 'px_hk',
     });
 
     const modelRows = await db.select().from(schema.modelAvailability).all();
@@ -3765,7 +3708,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
             }),
           },
         ],
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       },
     });
 
@@ -3778,7 +3721,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     const accounts = await db.select().from(schema.accounts).all();
     expect(accounts).toHaveLength(2);
-    expect(accounts.map((row) => JSON.parse(row.extraConfig || '{}').useSystemProxy)).toEqual([true, true]);
+    expect(accounts.map((row) => JSON.parse(row.extraConfig || '{}').proxyRef)).toEqual(['px_hk', 'px_hk']);
 
     const modelRows = await db.select().from(schema.modelAvailability).all();
     expect(modelRows).toEqual(expect.arrayContaining([
@@ -4148,7 +4091,6 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       url: 'https://codex.example.com',
       platform: 'codex',
       status: 'active',
-      useSystemProxy: false,
       isPinned: false,
       globalWeight: 1,
       sortOrder: 0,
@@ -4230,3 +4172,9 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
   });
 });
+
+
+
+
+
+

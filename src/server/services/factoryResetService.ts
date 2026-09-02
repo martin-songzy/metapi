@@ -1,10 +1,13 @@
+import { eq } from 'drizzle-orm';
+
 import { buildConfig, config } from '../config.js';
 import { db, schema, switchRuntimeDatabase } from '../db/index.js';
 import { upsertSetting } from '../db/upsertSetting.js';
+import { coerceProxyPool, PROXY_POOL_SETTING_KEY } from './proxyPoolService.js';
 import { updateBalanceRefreshCron, updateCheckinCron, updateLogCleanupSettings } from './checkinScheduler.js';
 import { ensureDefaultSitesSeeded } from './defaultSiteSeedService.js';
 import { startProxyLogRetentionService } from './proxyLogRetentionService.js';
-import { invalidateSiteProxyCache } from './siteProxy.js';
+import { invalidateSiteProxyCache, primeSiteProxyPool } from './siteProxy.js';
 
 export const FACTORY_RESET_ADMIN_TOKEN = 'change-me-admin-token';
 
@@ -17,10 +20,20 @@ type FactoryResetDependencies = {
 type PreservedInfrastructureState = {
   authToken: string;
   proxyToken: string;
-  systemProxyUrl: string;
   dbType: 'sqlite' | 'mysql' | 'postgres';
   dbUrl: string;
   dbSsl: boolean;
+  /**
+   * The proxy pool, preserved on the operator's explicit ruling: a proxy is
+   * infrastructure, not business data, and an instance that loses it may be unable
+   * to reach any upstream to be reconfigured — including the upstream it would need
+   * to fix itself.
+   *
+   * Read from the database rather than from `config`, unlike every field above:
+   * this one has no runtime mirror, it lives only in `settings`. So it has to be
+   * captured BEFORE the wipe, which is why `captureInfrastructureState` is async.
+   */
+  proxyPool: unknown;
 };
 
 async function clearAllBusinessData() {
@@ -42,14 +55,27 @@ async function clearAllBusinessData() {
   });
 }
 
-function captureInfrastructureState(): PreservedInfrastructureState {
+async function readSettingValue(key: string): Promise<unknown> {
+  try {
+    const row = await db.select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(eq(schema.settings.key, key))
+      .get();
+    if (!row?.value) return undefined;
+    return JSON.parse(row.value);
+  } catch {
+    return undefined;
+  }
+}
+
+async function captureInfrastructureState(): Promise<PreservedInfrastructureState> {
   return {
     authToken: config.authToken,
     proxyToken: config.proxyToken,
-    systemProxyUrl: config.systemProxyUrl,
     dbType: config.dbType,
     dbUrl: config.dbUrl,
     dbSsl: config.dbSsl,
+    proxyPool: await readSettingValue(PROXY_POOL_SETTING_KEY),
   };
 }
 
@@ -62,7 +88,6 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
   Object.assign(config, baseline);
   config.authToken = preserved.authToken || baseline.authToken || FACTORY_RESET_ADMIN_TOKEN;
   config.proxyToken = preserved.proxyToken || baseline.proxyToken;
-  config.systemProxyUrl = preserved.systemProxyUrl || baseline.systemProxyUrl;
   if (shouldPreserveExternalRuntime(preserved)) {
     config.dbType = preserved.dbType;
     config.dbUrl = preserved.dbUrl;
@@ -87,7 +112,16 @@ function resetRuntimeConfigToInitialState(preserved: PreservedInfrastructureStat
 async function restoreInfrastructureSettings(preserved: PreservedInfrastructureState): Promise<void> {
   await upsertSetting('auth_token', preserved.authToken || FACTORY_RESET_ADMIN_TOKEN);
   await upsertSetting('proxy_token', preserved.proxyToken);
-  await upsertSetting('system_proxy_url', preserved.systemProxyUrl);
+
+  if (Array.isArray(preserved.proxyPool) && preserved.proxyPool.length > 0) {
+    await upsertSetting(PROXY_POOL_SETTING_KEY, preserved.proxyPool);
+    // Republish into the synchronous mirror: the wipe left it holding entries that
+    // no longer exist in the DB, and the reset itself must not leave the request
+    // path resolving against a pool nobody stored.
+    primeSiteProxyPool(coerceProxyPool(preserved.proxyPool));
+  } else {
+    primeSiteProxyPool([]);
+  }
 
   if (shouldPreserveExternalRuntime(preserved)) {
     await upsertSetting('db_type', preserved.dbType);
@@ -110,7 +144,9 @@ export async function performFactoryReset(deps: FactoryResetDependencies = {}): 
   const switchRuntimeDatabaseImpl = deps.switchRuntimeDatabase ?? switchRuntimeDatabase;
   const runSqliteMigrationsImpl = deps.runSqliteMigrations ?? runDefaultSqliteMigrations;
   const ensureDefaultSitesSeededImpl = deps.ensureDefaultSitesSeeded ?? ensureDefaultSitesSeeded;
-  const preserved = captureInfrastructureState();
+  // Awaited before the first wipe: the proxy pool has no runtime mirror to read
+  // back from once the settings table is gone.
+  const preserved = await captureInfrastructureState();
 
   await clearAllBusinessData();
   resetRuntimeConfigToInitialState(preserved);

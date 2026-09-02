@@ -32,8 +32,7 @@ const siteCreatePayloadSchema = z.object({
   url: requiredTrimmedString,
   platform: z.string().trim().optional(),
   initializationPresetId: z.union([z.string(), z.null()]).optional(),
-  proxyUrl: unknownField,
-  useSystemProxy: unknownField,
+  proxyRef: unknownField,
   customHeaders: unknownField,
   externalCheckinUrl: unknownField,
   status: unknownField,
@@ -47,8 +46,7 @@ const siteUpdatePayloadSchema = z.object({
   name: requiredTrimmedString.optional(),
   url: requiredTrimmedString.optional(),
   platform: requiredTrimmedString.optional(),
-  proxyUrl: unknownField,
-  useSystemProxy: unknownField,
+  proxyRef: unknownField,
   customHeaders: unknownField,
   externalCheckinUrl: unknownField,
   status: unknownField,
@@ -61,6 +59,7 @@ const siteUpdatePayloadSchema = z.object({
 const siteBatchPayloadSchema = z.object({
   ids: z.array(z.number().int().positive()).optional(),
   action: z.string().optional(),
+  proxyRef: unknownField,
 }).passthrough();
 
 const siteDisabledModelsPayloadSchema = z.object({

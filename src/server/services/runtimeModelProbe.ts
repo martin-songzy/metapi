@@ -1,6 +1,6 @@
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { buildOauthProviderHeaders } from './oauth/service.js';
-import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { withSiteRecordProxyRequestInit } from './siteProxy.js';
 import { dispatchRuntimeRequest } from './runtimeDispatch.js';
 import {
   classifySuccessfulProbeResponse,
@@ -282,7 +282,6 @@ export async function probeRuntimeModel(input: {
       downstreamHeaders,
     });
     const openaiBody = buildProbeBody(input.modelName, input.prompt, input.maxTokens);
-    const channelProxyUrl = resolveChannelProxyUrl(input.site, input.account.extraConfig);
     const abortController = new AbortController();
     const remainingExecutionTimeoutMs = resolveRemainingTimeoutMs(
       deadlineAtMs,
@@ -334,7 +333,7 @@ export async function probeRuntimeModel(input: {
               body: JSON.stringify(requestForFetch.body),
               signal: abortController.signal,
             },
-            channelProxyUrl,
+            input.account,
           );
           const probeUserAgent = input.userAgent?.trim();
           if (!probeUserAgent) return init;

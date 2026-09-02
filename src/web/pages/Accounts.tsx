@@ -1,7 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { api } from "../api.js";
+import { api, type ProxyPoolEntry } from "../api.js";
+import { PROXY_REF_INHERIT } from "../proxyRefWire.js";
 import CenteredModal from "../components/CenteredModal.js";
+import { ProxyRefPicker, resolveEffectiveProxy } from "../components/ProxyRefPicker.js";
+import { useProxyPool } from "../components/useProxyPool.js";
 import ResponsiveFilterPanel from "../components/ResponsiveFilterPanel.js";
 import ResponsiveFormGrid from "../components/ResponsiveFormGrid.js";
 import ResponsiveBatchActionBar from "../components/ResponsiveBatchActionBar.js";
@@ -84,7 +87,7 @@ function createTokenForm(credentialMode: "session" | "apikey" = "session") {
     platformUserId: "",
     refreshToken: "",
     tokenExpiresAt: "",
-    proxyUrl: "",
+    proxyRef: PROXY_REF_INHERIT as string | null,
     credentialMode,
     skipModelFetch: false,
     /**
@@ -168,9 +171,10 @@ export default function Accounts() {
     isPinned: false,
     refreshToken: "",
     tokenExpiresAt: "",
-    proxyUrl: "",
+    proxyRef: PROXY_REF_INHERIT as string | null,
   });
   const [savingEdit, setSavingEdit] = useState(false);
+  const { entries: proxyPool } = useProxyPool();
   const [rebindTarget, setRebindTarget] = useState<any | null>(null);
   const [rebindForm, setRebindForm] = useState(() => createRebindForm());
   const [rebindVerifyResult, setRebindVerifyResult] = useState<any>(null);
@@ -241,6 +245,19 @@ export default function Accounts() {
   const selectedTokenSite = useMemo(
     () => sites.find((item) => item.id === tokenForm.siteId) || null,
     [sites, tokenForm.siteId],
+  );
+  /**
+   * The address the edit form's choice actually resolves to, site fallback included.
+   * Shown read-only next to the picker so the layered answer is never a guess — the
+   * old three-input arrangement is exactly what made it one.
+   */
+  const editProxyEffective = useMemo(
+    () => resolveEffectiveProxy({
+      entries: proxyPool,
+      connectionRef: editForm.proxyRef,
+      siteRef: sites.find((item) => item.id === editingAccount?.siteId)?.proxyRef ?? null,
+    }),
+    [proxyPool, editForm.proxyRef, sites, editingAccount?.siteId],
   );
   const parsedApiKeys = useMemo(
     () =>
@@ -435,7 +452,7 @@ export default function Accounts() {
           ? parseInt(tokenForm.platformUserId)
           : undefined,
         credentialMode,
-        proxyUrl: tokenForm.proxyUrl.trim() || undefined,
+        proxyRef: tokenForm.proxyRef,
       });
       setVerifyResult(result);
       if (result.success) {
@@ -492,7 +509,7 @@ export default function Accounts() {
           isSub2ApiSelected && tokenForm.tokenExpiresAt.trim()
             ? Number.parseInt(tokenForm.tokenExpiresAt.trim(), 10)
             : undefined,
-        proxyUrl: tokenForm.proxyUrl.trim() || undefined,
+        proxyRef: tokenForm.proxyRef,
         credentialMode,
         skipModelFetch: tokenForm.skipModelFetch,
         allowUnverified: tokenForm.allowUnverified,
@@ -937,6 +954,17 @@ export default function Accounts() {
     }
   };
 
+  /**
+   * Whether this connection has an opinion of its own, i.e. whether the 代理 badge
+   * means anything. An absent key is "跟随站点" and gets no badge; an explicit null is
+   * a real decision (不走代理) and does.
+   */
+  const hasConnectionProxyChoice = (extraConfig: Record<string, any>): boolean => {
+    if (!("proxyRef" in extraConfig)) return false;
+    const ref = extraConfig.proxyRef;
+    return ref === null || (typeof ref === "string" && !!ref.trim());
+  };
+
   const extractManagedSub2ApiAuth = (account: any) => {
     const parsed = parseAccountExtraConfig(account);
     const auth = parsed?.sub2apiAuth || {};
@@ -949,7 +977,7 @@ export default function Accounts() {
 
   const openEditPanel = (account: any) => {
     const managedAuth = extractManagedSub2ApiAuth(account);
-    const proxyUrl = parseAccountExtraConfig(account)?.proxyUrl || "";
+    const storedProxyRef = parseAccountExtraConfig(account)?.proxyRef;
     closeAddPanel();
     setRebindTarget(null);
     setEditingAccount(account);
@@ -966,7 +994,7 @@ export default function Accounts() {
       isPinned: !!account?.isPinned,
       refreshToken: managedAuth.refreshToken,
       tokenExpiresAt: managedAuth.tokenExpiresAt,
-      proxyUrl,
+      proxyRef: storedProxyRef === undefined ? PROXY_REF_INHERIT : storedProxyRef,
     });
   };
 
@@ -993,7 +1021,7 @@ export default function Accounts() {
         tokenExpiresAt: editForm.tokenExpiresAt.trim()
           ? Number.parseInt(editForm.tokenExpiresAt.trim(), 10)
           : null,
-        proxyUrl: editForm.proxyUrl.trim() || null,
+        proxyRef: editForm.proxyRef,
       });
       toast.success("账号已更新");
       closeEditPanel();
@@ -1787,26 +1815,23 @@ export default function Accounts() {
                         gap: 4,
                       }}
                     >
-                      <input
-                        placeholder="代理地址（可选，如 http://127.0.0.1:7890）"
-                        value={tokenForm.proxyUrl}
-                        onChange={(e) =>
-                          setTokenForm((f) => ({
-                            ...f,
-                            proxyUrl: e.target.value,
-                          }))
-                        }
-                        style={inputStyle}
-                      />
                       <div
                         style={{
                           fontSize: 12,
                           color: "var(--color-text-muted)",
                         }}
                       >
-                        覆盖站点和系统代理，留空则使用站点设置。支持 http/https/socks5
-                        协议。
+                        代理
                       </div>
+                      <ProxyRefPicker
+                        idPrefix="account-add-proxy"
+                        entries={proxyPool}
+                        value={tokenForm.proxyRef}
+                        onChange={(next) =>
+                          setTokenForm((f) => ({ ...f, proxyRef: next }))
+                        }
+                        allowInherit
+                      />
                     </div>
                     {isSub2ApiSelected && (
                       <>
@@ -2264,24 +2289,24 @@ export default function Accounts() {
                 <div
                   style={{ display: "flex", flexDirection: "column", gap: 4 }}
                 >
-                  <input
-                    placeholder="代理地址（可选，如 http://127.0.0.1:7890）"
-                    value={tokenForm.proxyUrl}
-                    onChange={(e) =>
-                      setTokenForm((f) => ({
-                        ...f,
-                        proxyUrl: e.target.value,
-                        credentialMode: "apikey",
-                      }))
-                    }
-                    style={inputStyle}
-                  />
                   <div
                     style={{ fontSize: 12, color: "var(--color-text-muted)" }}
                   >
-                    覆盖站点和系统代理，留空则使用站点设置。支持 http/https/socks5
-                    协议。
+                    代理
                   </div>
+                  <ProxyRefPicker
+                    idPrefix="account-apikey-proxy"
+                    entries={proxyPool}
+                    value={tokenForm.proxyRef}
+                    onChange={(next) =>
+                      setTokenForm((f) => ({
+                        ...f,
+                        proxyRef: next,
+                        credentialMode: "apikey",
+                      }))
+                    }
+                    allowInherit
+                  />
                 </div>
                 <label
                   style={{
@@ -2794,27 +2819,22 @@ export default function Accounts() {
                   }
                   style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
                 />
-                <input
-                  placeholder="代理地址（可选，如 http://127.0.0.1:7890）"
-                  value={editForm.proxyUrl}
-                  onChange={(e) =>
-                    setEditForm((prev) => ({
-                      ...prev,
-                      proxyUrl: e.target.value,
-                    }))
-                  }
-                  style={inputStyle}
-                />
                 <div
-                  style={{
-                    fontSize: 12,
-                    color: "var(--color-text-muted)",
-                    marginTop: -4,
-                  }}
+                  style={{ fontSize: 12, color: "var(--color-text-muted)" }}
                 >
-                  覆盖站点和系统代理，留空则使用站点设置。支持 http/https/socks5
-                  协议。
+                  代理
                 </div>
+                <ProxyRefPicker
+                  idPrefix="account-edit-proxy"
+                  entries={proxyPool}
+                  value={editForm.proxyRef}
+                  onChange={(next) =>
+                    setEditForm((prev) => ({ ...prev, proxyRef: next }))
+                  }
+                  allowInherit
+                  effectiveUrl={editProxyEffective.url}
+                  effectiveSource={editProxyEffective.source}
+                />
                 {(editingAccount?.site?.platform || "").toLowerCase() ===
                   "sub2api" && (
                   <>
@@ -2890,7 +2910,7 @@ export default function Accounts() {
                                 ? "API Key"
                                 : "Session"}
                             </span>
-                            {parseAccountExtraConfig(a)?.proxyUrl && (
+                            {hasConnectionProxyChoice(parseAccountExtraConfig(a)) && (
                               <span
                                 className="badge badge-purple"
                                 style={{ fontSize: 10 }}
@@ -3259,7 +3279,7 @@ export default function Accounts() {
                                   ? "API Key"
                                   : "Session"}
                               </span>
-                              {parseAccountExtraConfig(a)?.proxyUrl && (
+                              {hasConnectionProxyChoice(parseAccountExtraConfig(a)) && (
                                 <span
                                   className="badge badge-purple"
                                   style={{ fontSize: 10 }}
@@ -3588,3 +3608,4 @@ export default function Accounts() {
     </div>
   );
 }
+

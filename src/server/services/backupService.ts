@@ -5,6 +5,12 @@ import { requireInsertedRowId } from '../db/insertHelpers.js';
 import { upsertSetting } from '../db/upsertSetting.js';
 import { mergeAccountExtraConfig } from './accountExtraConfig.js';
 import { getOauthInfoFromAccount } from './oauth/oauthAccount.js';
+import {
+  coerceProxyPool,
+  loadProxyPool,
+  PROXY_POOL_SETTING_KEY,
+} from './proxyPoolService.js';
+import { invalidateSiteProxyCache } from './siteProxy.js';
 import { PLATFORM_ALIASES, detectPlatformByUrlHint } from '../../shared/platformIdentity.js';
 import { normalizeModelProbeEndpointType } from '../../shared/modelProbeEndpointTypes.js';
 import { MAX_PROBE_USER_AGENT_LENGTH } from '../contracts/modelProbePayloads.js';
@@ -39,7 +45,16 @@ export interface BackupWebdavState {
   lastError: string | null;
 }
 
-type SiteRow = typeof schema.sites.$inferSelect;
+/**
+ * The two legacy proxy columns are omitted on purpose.
+ *
+ * They are still DECLARED in the schema (the artifact generator only emits additive
+ * upgrade SQL, so dropping them there would withhold every other pending change from
+ * a deployed Postgres), but nothing reads them any more and a backup that carried
+ * them would keep re-seeding dead values into every restore. `proxyRef` is the whole
+ * of a site's proxy decision now.
+ */
+type SiteRow = Omit<typeof schema.sites.$inferSelect, 'proxyUrl' | 'useSystemProxy'>;
 type SiteApiEndpointRow = typeof schema.siteApiEndpoints.$inferSelect;
 type AccountRow = typeof schema.accounts.$inferSelect;
 type AccountTokenRow = typeof schema.accountTokens.$inferSelect;
@@ -50,6 +65,7 @@ type SiteDisabledModelRow = typeof schema.siteDisabledModels.$inferSelect;
 type ModelAvailabilityRow = typeof schema.modelAvailability.$inferSelect;
 type TokenModelAvailabilityRow = typeof schema.tokenModelAvailability.$inferSelect;
 type ModelProbeResultRow = typeof schema.modelProbeResults.$inferSelect;
+type ModelProbeKeyResultRow = typeof schema.modelProbeKeyResults.$inferSelect;
 type ProxyLogRow = typeof schema.proxyLogs.$inferSelect;
 type CheckinLogRow = typeof schema.checkinLogs.$inferSelect;
 type DownstreamApiKeyRow = typeof schema.downstreamApiKeys.$inferSelect;
@@ -86,6 +102,11 @@ type BackupSiteDisabledModelRow = Pick<SiteDisabledModelRow, 'siteId' | 'modelNa
 // The row id is dropped: results are keyed by (siteId, modelName) and the
 // restore re-inserts them under the imported site ids.
 type BackupModelProbeResultRow = Omit<ModelProbeResultRow, 'id'>;
+// Same reasoning as above, keyed by (accountId, tokenId, modelName). `tokenId` is
+// carried verbatim rather than remapped: it is not a real foreign key (the
+// primary key uses sentinel 0), and the restore re-inserts `account_tokens` with
+// their original ids, so the reference stays consistent.
+type BackupModelProbeKeyResultRow = Omit<ModelProbeKeyResultRow, 'id'>;
 type BackupManualModelRow = {
   accountId: number;
   modelName: string;
@@ -120,7 +141,22 @@ interface AccountsBackupSection {
   // Optional: files written before this table existed carry no key, and the
   // restore then leaves the table empty rather than failing.
   modelProbeResults?: BackupModelProbeResultRow[];
+  // Optional for the same reason as `modelProbeResults`.
+  modelProbeKeyResults?: BackupModelProbeKeyResultRow[];
   downstreamApiKeys?: BackupDownstreamApiKeyRow[];
+  /**
+   * The proxy pool, carried in the ACCOUNTS section even though it lives in
+   * `settings` — which the preferences section otherwise owns.
+   *
+   * It has to be here because `sites.proxy_ref` is here. An accounts-only export
+   * would otherwise ship site rows referencing pool entries whose definitions were
+   * left behind, and every one of those references would resolve to "no proxy" on
+   * restore: a silent, error-free un-proxying of the whole instance.
+   *
+   * Duplicated rather than moved: a full export legitimately contains it twice, and
+   * the two copies are identical, so import order cannot matter.
+   */
+  proxyPool?: Array<{ id: string; name: string; url: string }>;
 }
 
 interface PreferencesBackupSection {
@@ -759,8 +795,10 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       url: normalizedUrl,
       externalCheckinUrl: null,
       platform: input.platform,
-      proxyUrl: null,
-      useSystemProxy: false,
+      // Legacy files predate the proxy pool, so there is no reference to carry
+      // over. Null is "do not proxy", which matches what these rows did before:
+      // with no address and no system-proxy opt-in, they were never proxied.
+      proxyRef: null,
       customHeaders: null,
       status: 'active',
       isPinned: false,
@@ -1008,8 +1046,9 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         url: siteUrl,
         externalCheckinUrl: null,
         platform,
-        proxyUrl: null,
-        useSystemProxy: false,
+        // Same as the v2 legacy path above: no pool reference exists in these
+        // files, and null preserves their original unproxied behaviour.
+        proxyRef: null,
         customHeaders: null,
         status: 'active',
         isPinned: false,
@@ -1344,6 +1383,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
     siteDisabledModels,
     manualModels,
     modelProbeResults,
+    modelProbeKeyResults,
     downstreamApiKeys,
   ] = await Promise.all([
     db.select().from(schema.sites).orderBy(asc(schema.sites.id)).all(),
@@ -1368,6 +1408,13 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
       .all(),
     db.select().from(schema.modelProbeResults)
       .orderBy(asc(schema.modelProbeResults.siteId), asc(schema.modelProbeResults.modelName))
+      .all(),
+    db.select().from(schema.modelProbeKeyResults)
+      .orderBy(
+        asc(schema.modelProbeKeyResults.accountId),
+        asc(schema.modelProbeKeyResults.tokenId),
+        asc(schema.modelProbeKeyResults.modelName),
+      )
       .all(),
     db.select().from(schema.downstreamApiKeys).orderBy(asc(schema.downstreamApiKeys.id)).all(),
   ]);
@@ -1401,6 +1448,7 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
       modelName: row.modelName,
     })),
     modelProbeResults: modelProbeResults.map(({ id: _id, ...row }) => row),
+    modelProbeKeyResults: modelProbeKeyResults.map(({ id: _id, ...row }) => row),
     downstreamApiKeys: downstreamApiKeys.map(({
       id: _id,
       usedCost: _usedCost,
@@ -1410,6 +1458,9 @@ async function exportAccountsSection(): Promise<AccountsBackupSection> {
       updatedAt: _updatedAt,
       ...row
     }) => row),
+    // Travels WITH the site rows that reference it. See the field's doc comment:
+    // without this, an accounts-only restore silently un-proxies every site.
+    proxyPool: await loadProxyPool(),
   };
 }
 
@@ -1475,11 +1526,22 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
   const modelProbeResults = Array.isArray(input.modelProbeResults)
     ? input.modelProbeResults as BackupModelProbeResultRow[]
     : undefined;
+  const modelProbeKeyResults = Array.isArray(input.modelProbeKeyResults)
+    ? input.modelProbeKeyResults as BackupModelProbeKeyResultRow[]
+    : undefined;
   const downstreamApiKeys = Array.isArray(input.downstreamApiKeys)
     ? input.downstreamApiKeys as BackupDownstreamApiKeyRow[]
     : undefined;
 
   if (!sites || !accounts || !accountTokens || !tokenRoutes || !routeChannels) return null;
+
+  // Shape-checked here, content-validated by `coerceProxyPool` at write time: this
+  // layer only decides whether the key was present at all, so a file from before
+  // the pool existed restores with the sites' refs intact but no pool — which the
+  // resolver already treats as "no proxy" rather than as an error.
+  const proxyPool = Array.isArray(input.proxyPool)
+    ? input.proxyPool as Array<{ id: string; name: string; url: string }>
+    : undefined;
 
   return {
     sites,
@@ -1492,7 +1554,9 @@ function coerceAccountsSection(input: unknown): AccountsBackupSection | null {
     siteDisabledModels,
     manualModels,
     modelProbeResults,
+    modelProbeKeyResults,
     downstreamApiKeys,
+    ...(proxyPool ? { proxyPool } : {}),
   };
 }
 
@@ -1632,6 +1696,77 @@ export async function upsertRestoredModelProbeResult(
     .run();
 }
 
+/**
+ * Upserts one restored `model_probe_key_results` row on the
+ * (account_id, token_id, model_name) unique key.
+ *
+ * Same dialect branching and same duplicate-tolerance reasoning as
+ * `upsertRestoredModelProbeResult` above; only the conflict target differs. It
+ * has to: this table's key leads with `account_id` because `token_id` 0 is the
+ * shared sentinel for every account's primary key, so conflicting on
+ * (token_id, model_name) alone would make two accounts' primary-key verdicts
+ * collide into one row.
+ *
+ * `siteId` and `accountId` are excluded from the update set — they are part of
+ * the identity being matched on (site_id transitively, since an account belongs
+ * to one site), so rewriting them on conflict could move a row to a different
+ * account than the one it conflicted with.
+ *
+ * Exported for the MySQL builder test, for the same reason as the sibling.
+ */
+export async function upsertRestoredModelProbeKeyResult(
+  tx: { insert: (table: unknown) => any },
+  values: {
+    siteId: number;
+    accountId: number;
+    tokenId: number;
+    tokenName: string;
+    modelName: string;
+    status: string;
+    latencyMs: number | null;
+    httpStatus: number | null;
+    failureKind: string | null;
+    reason: string | null;
+    endpointUsed: string | null;
+    promptUsed: string | null;
+    userAgentUsed: string | null;
+    // Nullable for the same reason as the sibling: the column carries a database
+    // default and a hand-edited backup can omit it.
+    checkedAt: string | null;
+  },
+): Promise<void> {
+  const updateSet = {
+    tokenName: values.tokenName,
+    status: values.status,
+    latencyMs: values.latencyMs,
+    httpStatus: values.httpStatus,
+    failureKind: values.failureKind,
+    reason: values.reason,
+    endpointUsed: values.endpointUsed,
+    promptUsed: values.promptUsed,
+    userAgentUsed: values.userAgentUsed,
+    checkedAt: values.checkedAt,
+  };
+
+  if (runtimeDbDialect === 'mysql') {
+    await (tx.insert(schema.modelProbeKeyResults).values(values) as any)
+      .onDuplicateKeyUpdate({ set: updateSet })
+      .run();
+    return;
+  }
+
+  await (tx.insert(schema.modelProbeKeyResults).values(values) as any)
+    .onConflictDoUpdate({
+      target: [
+        schema.modelProbeKeyResults.accountId,
+        schema.modelProbeKeyResults.tokenId,
+        schema.modelProbeKeyResults.modelName,
+      ],
+      set: updateSet,
+    })
+    .run();
+}
+
 async function importAccountsSection(section: AccountsBackupSection): Promise<void> {
   const runtimeState = await collectCurrentRuntimeStateSnapshot();
   const importedIndexes = buildRuntimeIdentityIndexesFromSection(section);
@@ -1653,6 +1788,10 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
     // predates this table would otherwise keep stale verdicts alive on any
     // dialect or connection where foreign keys are not being enforced.
     await tx.delete(schema.modelProbeResults).run();
+    // Same reasoning, and additionally: this table's `token_id` is not a real
+    // foreign key (sentinel 0), so nothing would clear the primary-key rows even
+    // where cascades do run.
+    await tx.delete(schema.modelProbeKeyResults).run();
     await tx.delete(schema.accountTokens).run();
     await tx.delete(schema.accounts).run();
     await tx.delete(schema.sites).run();
@@ -1664,8 +1803,12 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         url: row.url,
         externalCheckinUrl: row.externalCheckinUrl ?? null,
         platform: row.platform,
-        proxyUrl: row.proxyUrl ?? null,
-        useSystemProxy: row.useSystemProxy ?? false,
+        // Restored explicitly. Omitting it would drop every site's proxy selection
+        // on import while the file plainly contained it — and because a null ref
+        // reads as "do not proxy", the result would look deliberate rather than
+        // lost. A file predating this column has no value, and null is the correct
+        // answer there: those sites were resolved from the legacy columns above.
+        proxyRef: row.proxyRef ?? null,
         customHeaders: row.customHeaders ?? null,
         status: row.status || 'active',
         isPinned: row.isPinned ?? false,
@@ -1835,6 +1978,30 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
       await upsertRestoredModelProbeResult(tx, values);
     }
 
+    for (const row of section.modelProbeKeyResults || []) {
+      if (!importedSiteIds.has(row.siteId)) continue;
+      // Skipped rather than nulled, unlike the site-scoped loop above: this
+      // table's `account_id` is NOT NULL and part of the unique key, so a row
+      // whose account did not come back has nowhere to land.
+      if (!importedAccountIds.has(row.accountId)) continue;
+      await upsertRestoredModelProbeKeyResult(tx, {
+        siteId: row.siteId,
+        accountId: row.accountId,
+        tokenId: row.tokenId,
+        tokenName: row.tokenName ?? '',
+        modelName: row.modelName,
+        status: row.status,
+        latencyMs: row.latencyMs ?? null,
+        httpStatus: row.httpStatus ?? null,
+        failureKind: row.failureKind ?? null,
+        reason: row.reason ?? null,
+        endpointUsed: row.endpointUsed ?? null,
+        promptUsed: row.promptUsed ?? null,
+        userAgentUsed: row.userAgentUsed ?? null,
+        checkedAt: row.checkedAt,
+      });
+    }
+
     const importedManualModelKeys = new Set<string>();
     if (shouldReplaceManualModels) {
       const checkedAt = new Date().toISOString();
@@ -1992,7 +2159,18 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         createdAt: row.createdAt,
       }).run();
     }
+
+    // Written INSIDE the same transaction as the sites that reference it, so a
+    // failure cannot commit sites whose refs point at entries that were never
+    // stored. Only written when the file carried a pool: an older file leaves the
+    // current pool alone rather than wiping it.
+    if (Array.isArray(section.proxyPool)) {
+      await upsertSetting(PROXY_POOL_SETTING_KEY, coerceProxyPool(section.proxyPool), tx);
+    }
   });
+
+  // The cached pool is now stale in-process; the next resolve must refetch.
+  invalidateSiteProxyCache();
 }
 
 async function importPreferencesSection(section: PreferencesBackupSection): Promise<Array<{ key: string; value: unknown }>> {

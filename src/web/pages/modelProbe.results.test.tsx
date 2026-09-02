@@ -215,7 +215,10 @@ describe('ModelProbe results table', () => {
       expect(row).not.toContain('0.00');
       expect(row).not.toContain('1970');
       expect(row).not.toContain('Invalid Date');
-      expect(row.match(/—/g)).toHaveLength(6);
+      // Seven, not six, since the per-key column joined: this fixture sends no
+      // `keyItems`, and an absent key breakdown is a placeholder like any other
+      // null cell — it must not read as "one key, no verdict".
+      expect(row.match(/—/g)).toHaveLength(7);
     } finally {
       root.unmount();
     }
@@ -937,6 +940,168 @@ describe('ModelProbe results clearing', () => {
       }
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+});
+
+/**
+ * The per-key column and its filter.
+ *
+ * `keyItems` rides along with the results page rather than having its own endpoint,
+ * and it is scoped to exactly the site×model pairs the page returned — so these
+ * fixtures pair each key row with a `SUPPORTED_ROW`-shaped parent by (siteId,
+ * modelName).
+ */
+describe('ModelProbe per-key results', () => {
+  const PRIMARY_KEY_ROW = {
+    id: 501,
+    siteId: 4,
+    accountId: 21,
+    tokenId: 0,
+    tokenName: '',
+    isPrimary: true,
+    modelName: 'gpt-4o',
+    status: 'unsupported' as const,
+    latencyMs: null,
+    httpStatus: 404,
+    failureKind: 'model_missing',
+    reason: '无可用渠道',
+    endpointUsed: null,
+    checkedAt: '2026-08-21T02:30:00.000Z',
+  };
+
+  const BACKUP_KEY_ROW = {
+    ...PRIMARY_KEY_ROW,
+    id: 502,
+    tokenId: 77,
+    tokenName: 'group-b',
+    isPrimary: false,
+    status: 'supported' as const,
+    latencyMs: 412,
+    httpStatus: 200,
+    failureKind: null,
+    reason: null,
+  };
+
+  function withKeys(items: unknown[], keyItems: unknown[]) {
+    return {
+      ...resultsResponse(items),
+      keyItems,
+    };
+  }
+
+  it('names every key beside its own verdict, and labels the primary key', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(
+      withKeys([SUPPORTED_ROW], [PRIMARY_KEY_ROW, BACKUP_KEY_ROW]),
+    );
+    const root = await renderPage();
+    try {
+      const primary = collectText(findByTestId(root.root, 'model-probe-key-result-501'));
+      // The primary key stores an empty name — it lives on the account row — so the
+      // panel must label it rather than render a blank cell.
+      expect(primary).toContain('主 Key');
+      expect(primary).toContain('不支持');
+
+      const backup = collectText(findByTestId(root.root, 'model-probe-key-result-502'));
+      expect(backup).toContain('group-b');
+      expect(backup).toContain('可用');
+      expect(backup).toContain('412');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('distinguishes a key that was never probed from one that reached nothing', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(withKeys([SUPPORTED_ROW], [
+      PRIMARY_KEY_ROW,
+      { ...BACKUP_KEY_ROW, id: 503, tokenId: 78, tokenName: 'switched-off', status: 'disabled', latencyMs: null },
+      { ...BACKUP_KEY_ROW, id: 504, tokenId: 79, tokenName: 'masked', status: 'unavailable', latencyMs: null },
+    ]));
+    const root = await renderPage();
+    try {
+      // Both states are the point of Q21=B: without them a key that was switched
+      // off is simply absent, which reads as 「这个 key 探不到任何模型」 — a claim no
+      // probe ever tested.
+      expect(collectText(findByTestId(root.root, 'model-probe-key-result-503'))).toContain('已停用');
+      expect(collectText(findByTestId(root.root, 'model-probe-key-result-504'))).toContain('密钥不可用');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('falls back to the row id for an unnamed additional key', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(withKeys([SUPPORTED_ROW], [
+      PRIMARY_KEY_ROW,
+      { ...BACKUP_KEY_ROW, tokenName: '' },
+    ]));
+    const root = await renderPage();
+    try {
+      // Two nameless keys must stay tellable apart, so the id is shown rather than
+      // an empty label.
+      expect(collectText(findByTestId(root.root, 'model-probe-key-result-502'))).toContain('#77');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('shows the placeholder when the server sent no key breakdown at all', async () => {
+    // An older server omits `keyItems` entirely. That must read as "no breakdown
+    // available", never as "one key".
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW]));
+    const root = await renderPage();
+    try {
+      const cell = collectText(findByTestId(root.root, 'model-probe-result-cell-keys-1'));
+      expect(cell).toContain('—');
+      expect(cell).not.toContain('主 Key');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('filters to rows only a backup key can serve, and counts them per page', async () => {
+    const otherRow = { ...SUPPORTED_ROW, id: 3, modelName: 'gpt-5' };
+    apiMock.getModelProbeResults.mockResolvedValue(withKeys([SUPPORTED_ROW, otherRow], [
+      PRIMARY_KEY_ROW,
+      BACKUP_KEY_ROW,
+      // gpt-5: the primary key serves it, so it is NOT backup-only.
+      { ...PRIMARY_KEY_ROW, id: 505, modelName: 'gpt-5', status: 'supported' },
+      { ...BACKUP_KEY_ROW, id: 506, modelName: 'gpt-5', status: 'supported' },
+    ]));
+    const root = await renderPage();
+    try {
+      const box = findByTestId(root.root, 'model-probe-results-backup-only');
+      // Labelled 本页, not a total: the comparison is over the returned page only.
+      expect(collectText(box.parent!)).toContain('本页 1');
+
+      await act(async () => {
+        box.props.onChange({ target: { checked: true } });
+      });
+      await flushMicrotasks();
+
+      const rows = root.root.findAll((node) => (
+        node.props['data-testid']?.toString().startsWith('model-probe-result-row-')
+      ));
+      expect(rows).toHaveLength(1);
+      expect(collectText(rows[0]!)).toContain('gpt-4o');
+      // Filtered client-side, so it must not have refetched with a new query.
+      expect(lastResultsQuery()).not.toHaveProperty('backupOnly');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('does not mark a row backup-only when there is no primary verdict to compare', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(withKeys([SUPPORTED_ROW], [
+      // Only an additional key reported. Calling this 「仅备用 Key 可用」 would claim
+      // a comparison against the primary key that never happened.
+      BACKUP_KEY_ROW,
+    ]));
+    const root = await renderPage();
+    try {
+      expect(collectText(findByTestId(root.root, 'model-probe-results-backup-only').parent!))
+        .toContain('本页 0');
+    } finally {
+      root.unmount();
     }
   });
 });

@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/index.js';
 import { insertAndGetById } from '../db/insertHelpers.js';
 import { getCredentialModeFromExtraConfig, mergeAccountExtraConfig } from './accountExtraConfig.js';
@@ -89,6 +89,18 @@ export async function migrateSiteApiKeysToAccounts(): Promise<SiteApiKeyMigratio
 
       if (childTokens.length === 1 && normalizeTokenValue(childTokens[0]?.token) === siteApiKey) {
         await db.delete(schema.accountTokens).where(eq(schema.accountTokens.id, childTokens[0]!.id)).run();
+        // Application-level cascade (Q18), and unlike the sync path's placeholder
+        // cleanup this one really can orphan rows: the mirror token holds a usable
+        // value identical to the site's API key, so a probe would have accepted it
+        // and written per-key verdicts under this id. `token_id` is not a real
+        // foreign key (it carries a sentinel for account-level keys), so the delete
+        // above leaves them behind.
+        await db.delete(schema.modelProbeKeyResults)
+          .where(and(
+            eq(schema.modelProbeKeyResults.accountId, targetAccount.id),
+            eq(schema.modelProbeKeyResults.tokenId, childTokens[0]!.id),
+          ))
+          .run();
         summary.removedMirrorTokens += 1;
       } else if (childTokens.length > 1) {
         summary.warned += 1;

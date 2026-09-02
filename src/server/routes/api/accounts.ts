@@ -10,13 +10,14 @@ import {
 } from "../../services/accountMutationWorkflow.js";
 import {
   getCredentialModeFromExtraConfig,
-  getProxyUrlFromExtraConfig,
   guessPlatformUserIdFromUsername,
   hasOauthProvider,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   normalizeCredentialMode as normalizeCredentialModeInput,
+  parseConnectionProxyRefInput,
   resolvePlatformUserId,
+  withProxyRefInExtraConfig,
   type AccountCredentialMode,
 } from "../../services/accountExtraConfig.js";
 import { encryptAccountPassword } from "../../services/accountCredentialService.js";
@@ -33,9 +34,13 @@ import {
 import { appendSessionTokenRebindHint } from "../../services/alertRules.js";
 import {
   parseSiteProxyUrlInput,
+  resolveChannelProxyUrl,
+  resolveProxyUrlForConnectionChoice,
   withAccountProxyOverride,
+  withResolvedProxyRequestInit,
   withSiteRecordProxyRequestInit,
 } from "../../services/siteProxy.js";
+import { validateConnectionProxyRefPayload } from "../../services/proxyPoolService.js";
 import { createRateLimitGuard } from "../../middleware/requestRateLimit.js";
 import { getAccountsSnapshot } from "../../services/accountsOverviewService.js";
 import {
@@ -679,9 +684,9 @@ export async function accountsRoutes(app: FastifyInstance) {
       const credentialMode = resolveRequestedCredentialMode(
         parsedBody.data.credentialMode,
       );
-      const parsedProxyUrl = parseSiteProxyUrlInput(parsedBody.data.proxyUrl);
-      if (parsedProxyUrl.present && !parsedProxyUrl.valid) {
-        return reply.code(400).send({ success: false, message: "Invalid proxy URL format" });
+      const requestedProxyRef = await validateConnectionProxyRefPayload(parsedBody.data.proxyRef);
+      if (!requestedProxyRef.valid) {
+        return reply.code(400).send({ success: false, message: requestedProxyRef.message });
       }
       const site = await db
         .select()
@@ -689,6 +694,13 @@ export async function accountsRoutes(app: FastifyInstance) {
         .where(eq(schema.sites.id, siteId))
         .get();
       if (!site) return { success: false, message: "site not found" };
+
+      // Verification runs against the proxy the FORM currently shows, not a stored
+      // one: the operator is testing a connection that may not exist yet.
+      const verifyProxyUrl = await resolveProxyUrlForConnectionChoice(
+        site,
+        requestedProxyRef.value,
+      );
 
       if (!accessToken) {
         return { success: false, message: "Token 不能为空" };
@@ -792,14 +804,10 @@ export async function accountsRoutes(app: FastifyInstance) {
               try {
                 const testRes = await fetch(
                   `${baseUrl.replace(/\/+$/, "")}/api/user/self`,
-                  withSiteRecordProxyRequestInit(
-                    site,
-                    {
-                      headers,
-                      signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
-                    },
-                    parsedProxyUrl.proxyUrl,
-                  ),
+                  withResolvedProxyRequestInit(site, verifyProxyUrl, {
+                    headers,
+                    signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
+                  }),
                 );
                 sawResponse = true;
                 const bodyText = await testRes.text();
@@ -874,7 +882,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       if (credentialMode === "apikey") {
         try {
           const models = await withAccountProxyOverride(
-            parsedProxyUrl.proxyUrl,
+            verifyProxyUrl,
             () => getModelsWithSiteApiEndpointPool(
               site,
               adapter,
@@ -918,7 +926,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       let result: any;
       try {
         result = await withAccountProxyOverride(
-          parsedProxyUrl.proxyUrl,
+          verifyProxyUrl,
           () => withTimeout(
             () =>
               adapter.verifyToken(site.url, accessToken, parsedPlatformUserId),
@@ -1042,14 +1050,10 @@ export async function accountsRoutes(app: FastifyInstance) {
               try {
                 const testRes = await fetch(
                   `${site.url}/api/user/self`,
-                  withSiteRecordProxyRequestInit(
-                    site,
-                    {
-                      headers,
-                      signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
-                    },
-                    parsedProxyUrl.proxyUrl,
-                  ),
+                  withResolvedProxyRequestInit(site, verifyProxyUrl, {
+                    headers,
+                    signal: AbortSignal.timeout(ACCOUNT_VERIFY_DIAG_TIMEOUT_MS),
+                  }),
                 );
                 const bodyText = await testRes.text();
                 const contentType = testRes.headers.get("content-type") || "";
@@ -1158,7 +1162,7 @@ export async function accountsRoutes(app: FastifyInstance) {
       let verifyResult: any;
       try {
         verifyResult = await withAccountProxyOverride(
-          getProxyUrlFromExtraConfig(account.extraConfig),
+          await resolveChannelProxyUrl(site, account.extraConfig),
           () =>
             adapter.verifyToken(
               site.url,
@@ -1515,22 +1519,19 @@ export async function accountsRoutes(app: FastifyInstance) {
         updates.sortOrder = normalizedSortOrder;
       }
 
-      if (Object.prototype.hasOwnProperty.call(body, "proxyUrl")) {
+      if (Object.prototype.hasOwnProperty.call(body, "proxyRef")) {
         const baseExtraConfig =
           typeof updates.extraConfig === "string"
             ? updates.extraConfig
             : account.extraConfig;
-        const {
-          present,
-          valid,
-          proxyUrl: normalizedProxy,
-        } = parseSiteProxyUrlInput(body.proxyUrl);
-        if (present && !valid) {
-          return reply.code(400).send({ message: "Invalid proxy URL format" });
+        const patchedProxyRef = await validateConnectionProxyRefPayload(body.proxyRef);
+        if (!patchedProxyRef.valid) {
+          return reply.code(400).send({ message: patchedProxyRef.message });
         }
-        updates.extraConfig = mergeAccountExtraConfig(baseExtraConfig, {
-          proxyUrl: normalizedProxy ?? undefined,
-        });
+        updates.extraConfig = withProxyRefInExtraConfig(
+          baseExtraConfig,
+          parseConnectionProxyRefInput(patchedProxyRef.value ?? null),
+        );
       }
 
       const nextAccessToken =
@@ -1563,7 +1564,7 @@ export async function accountsRoutes(app: FastifyInstance) {
         Object.prototype.hasOwnProperty.call(body, "accessToken") ||
         Object.prototype.hasOwnProperty.call(body, "apiToken") ||
         Object.prototype.hasOwnProperty.call(body, "extraConfig") ||
-        Object.prototype.hasOwnProperty.call(body, "proxyUrl") ||
+        Object.prototype.hasOwnProperty.call(body, "proxyRef") ||
         wantsManagedSub2ApiAuthPatch;
       const isExpiredApiKeyAccount =
         account.status === "expired" &&

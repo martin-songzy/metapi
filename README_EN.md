@@ -35,7 +35,7 @@ into <strong>one API Key, one endpoint</strong>, with automatic model discovery,
 --><a href="LICENSE">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-brightgreen?style=flat">
 </a><!--
---><img alt="Node.js" src="https://img.shields.io/badge/Node.js-22.15%2B-339933?logo=node.js&style=flat"><!--
+--><img alt="Node.js" src="https://img.shields.io/badge/Node.js-25%2B-339933?logo=node.js&style=flat"><!--
 --><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat"><!--
 --><a href="https://zeabur.com/templates/DOX5PR">
   <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
@@ -219,8 +219,11 @@ The AI ecosystem is seeing a growing number of aggregation relay stations based 
 | **Veloera** | `veloera` | API gateway platform |
 | **AnyRouter** | `anyrouter` | Universal routing platform |
 | **Sub2API** | `sub2api` | Subscription-based relay |
+| **Generic** | `generic` | Relays with no manageable API |
 
 Adapters cover shared capabilities such as model discovery, balance access, token management, and proxy integration; login, check-in, and user-info flows vary by platform.
+
+`generic` is the fallback type for sites that expose nothing but an OpenAI-compatible endpoint. It is reachable only by **picking it explicitly** in the platform dropdown — its auto-detection never matches, so a merely slow New API fork can't be silently demoted to it. Such sites have no login and no check-in, and report a balance of zero rather than a lookup error (the platform genuinely has no such concept). When adding a connection you can tick **allow unverified**: the model catalogue is still fetched, an empty answer just stops counting as fatal, and the credential is stored as an API key with check-in off. The flag does not swallow real adapter failures and never records fabricated models.
 
 ### Account & Token Management
 
@@ -229,6 +232,22 @@ Adapters cover shared capabilities such as model discovery, balance access, toke
 - **Encrypted credential storage**: All sensitive credentials are encrypted in the local database
 - **Auto-renewal**: Tokens are automatically re-authenticated when expired
 - **Cascading control**: Disabling a site automatically disables all associated accounts
+
+### Outbound Proxy
+
+A proxy address is entered in exactly **one** place: Settings → Proxy Pool. Sites, connections and Telegram notifications no longer carry addresses of their own — they **pick** an entry from that list, so re-addressing a proxy is a single edit that every referrer follows.
+
+| Layer | Choices | Notes |
+| --- | --- | --- |
+| **Site** | a pool entry / no proxy | the site-level default |
+| **Connection** | follow the site / no proxy / a pool entry | "no proxy" **overrides** the site rather than falling back to it |
+| **Telegram** | a pool entry / no proxy | chosen separately for notifications |
+
+- Sites and connections store the entry's **id**, never its address. Renaming or re-addressing never breaks a reference.
+- **Deleting** an entry first lists the sites and connections that will be reset to "no proxy" and asks for confirmation. A reference to a deleted entry always reads as "no proxy" — never as a substitute entry — and is flagged in the site list.
+- Factory reset **keeps the proxy pool**: an instance that cannot reach any upstream cannot be reconfigured.
+
+> **Upgrading from before v1.3**: the old global system proxy and the per-site / per-connection proxy addresses are not migrated. After upgrading, all proxying is off until you add pool entries and re-select them.
 
 ### Model Marketplace
 
@@ -258,9 +277,10 @@ Three verdicts, separating "the model is missing" from "the account has a proble
 
 `site_disabled_models` is keyed by **site**, not by account, and never auto-clears — so one wrong verdict costs every account on that site the use of that model. The default keyword list therefore carries model-absence wording only; account-level failures (insufficient balance, rate limits, invalid key) all land on Inconclusive. To make a particular error phrasing count as unsupported, add it to the keyword list.
 
-- **Configuration**: interest patterns, a randomized probe-word table (avoids the fixed `hi`/`hello` that sites flag as liveness probing), User-Agent (Claude Code and Codex built in, custom supported), endpoint type (chat / messages / responses), proxy, concurrency and timeout. Endpoint type and User-Agent are configurable per site.
+- **Configuration**: interest patterns, a randomized probe-word table (avoids the fixed `hi`/`hello` that sites flag as liveness probing), User-Agent (Claude Code and Codex built in, custom supported), endpoint type (chat / messages / responses), proxy, timeout. Endpoint type and User-Agent are configurable per site.
+- **Two concurrency axes**: sites at once (default 5, cap 10) and models within one site (default 1, cap 8). They are separate because parallel traffic to *different* relays is normally fine, while a **burst against a single relay** is what gets a token throttled. Worst-case in-flight requests is the product of the two, and every one of them is billed.
 - **Running**: past a threshold it asks for confirmation and states how many real requests it will send; a hard cap of 300 refuses outright and tells you to narrow the regex. A sweep can be cancelled mid-run — finished results are kept and marked cancelled rather than presented as a complete sweep.
-- **Results**: filter by model or site, sort by response time or site balance, persisted and included in backup/restore. Unmeasured rows (timeouts, unknown balance) sort last in **both** directions.
+- **Results**: filter by model or site, sort by response time or site balance, persisted and included in backup/restore. Unmeasured rows (timeouts, unknown balance) sort last in **both** directions. Results have no TTL; a "clear all" action wipes them in one step (**every site, every model** — it deliberately ignores the active filter).
 
 ### Auto Check-in
 

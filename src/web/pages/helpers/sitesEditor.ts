@@ -24,8 +24,8 @@ export type SiteForm = {
   url: string;
   externalCheckinUrl: string;
   platform: string;
-  proxyUrl: string;
-  useSystemProxy: boolean;
+  /** Reference into the proxy pool; `null` = 不走代理. Never an address. */
+  proxyRef: string | null;
   apiEndpoints: SiteApiEndpointField[];
   customHeaders: SiteCustomHeaderField[];
   globalWeight: string;
@@ -43,8 +43,7 @@ export type SiteSavePayload = {
   externalCheckinUrl: string;
   platform: string;
   initializationPresetId?: string | null;
-  proxyUrl: string;
-  useSystemProxy: boolean;
+  proxyRef: string | null;
   apiEndpoints: Array<{
     url: string;
     enabled: boolean;
@@ -89,8 +88,7 @@ export function emptySiteForm(): SiteForm {
     url: '',
     externalCheckinUrl: '',
     platform: '',
-    proxyUrl: '',
-    useSystemProxy: false,
+    proxyRef: null,
     apiEndpoints: [emptySiteApiEndpoint()],
     customHeaders: [emptySiteCustomHeader()],
     globalWeight: '1',
@@ -147,10 +145,9 @@ function parseApiEndpointsForEditor(raw: unknown): SiteApiEndpointField[] {
   return ensureSiteApiEndpointRows(rows);
 }
 
-export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyUrl' | 'useSystemProxy' | 'probeEndpointType' | 'probeUserAgent'>> & {
+export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | 'customHeaders' | 'globalWeight' | 'externalCheckinUrl' | 'proxyRef' | 'probeEndpointType' | 'probeUserAgent'>> & {
   externalCheckinUrl?: string | null;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean | null;
+  proxyRef?: string | null;
   apiEndpoints?: Array<{
     url?: string | null;
     enabled?: boolean | null;
@@ -171,8 +168,7 @@ export function siteFormFromSite(site: Partial<Omit<SiteForm, 'apiEndpoints' | '
     url: site.url ?? '',
     externalCheckinUrl: site.externalCheckinUrl ?? '',
     platform: site.platform ?? '',
-    proxyUrl: site.proxyUrl ?? '',
-    useSystemProxy: !!site.useSystemProxy,
+    proxyRef: site.proxyRef ?? null,
     apiEndpoints: parseApiEndpointsForEditor(site.apiEndpoints),
     customHeaders: parseCustomHeadersForEditor(site.customHeaders),
     globalWeight,

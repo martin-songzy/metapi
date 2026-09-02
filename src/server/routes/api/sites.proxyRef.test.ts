@@ -13,7 +13,7 @@ describe('sites proxy settings', () => {
   let dataDir = '';
 
   beforeAll(async () => {
-    dataDir = mkdtempSync(join(tmpdir(), 'metapi-sites-proxy-url-'));
+    dataDir = mkdtempSync(join(tmpdir(), 'metapi-sites-proxy-ref-'));
     process.env.DATA_DIR = dataDir;
 
     await import('../../db/migrate.js');
@@ -29,6 +29,14 @@ describe('sites proxy settings', () => {
   beforeEach(async () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+    await db.delete(schema.settings).run();
+    // A site references a pool entry by id, so the pool has to exist before a site can
+    // point at one. Written straight to the settings row rather than through the
+    // service, so this file stays a route test.
+    await db.insert(schema.settings).values({
+      key: 'proxy_pool_v1',
+      value: JSON.stringify([{ id: 'px_hk', name: '香港', url: 'socks5://127.0.0.1:1080' }]),
+    }).run();
   });
 
   afterAll(async () => {
@@ -36,7 +44,7 @@ describe('sites proxy settings', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('stores proxy settings, external checkin url, and custom headers when creating a site', async () => {
+  it('stores the proxy reference, external checkin url, and custom headers when creating a site', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -44,8 +52,7 @@ describe('sites proxy settings', () => {
         name: 'proxy-site',
         url: 'https://proxy-site.example.com',
         platform: 'new-api',
-        proxyUrl: 'socks5://127.0.0.1:1080',
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
         customHeaders: JSON.stringify({
           'cf-access-client-id': 'site-client-id',
           'x-site-scope': 'internal',
@@ -57,14 +64,14 @@ describe('sites proxy settings', () => {
 
     expect(response.statusCode).toBe(200);
     const payload = response.json() as {
-      proxyUrl?: string | null;
-      useSystemProxy?: boolean;
+      proxyRef?: string | null;
       customHeaders?: string | null;
       externalCheckinUrl?: string | null;
       globalWeight?: number;
     };
-    expect(payload.proxyUrl).toBe('socks5://127.0.0.1:1080');
-    expect(payload.useSystemProxy).toBe(true);
+    // The id is stored, never the address: that is what lets one edit in the pool
+    // move every site that references it.
+    expect(payload.proxyRef).toBe('px_hk');
     expect(payload.customHeaders).toBe('{"cf-access-client-id":"site-client-id","x-site-scope":"internal"}');
     expect(payload.externalCheckinUrl).toBe('https://checkin.example.com/welfare');
     expect(payload.globalWeight).toBe(1.5);
@@ -144,7 +151,7 @@ describe('sites proxy settings', () => {
     expect((duplicate.json() as { error?: string }).error).toContain('already exists');
   });
 
-  it('rejects invalid useSystemProxy flag', async () => {
+  it('rejects a proxyRef that is not a string', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -152,15 +159,21 @@ describe('sites proxy settings', () => {
         name: 'proxy-site',
         url: 'https://proxy-site.example.com',
         platform: 'new-api',
-        useSystemProxy: 'not-a-boolean',
+        proxyRef: 42,
       },
     });
 
     expect(response.statusCode).toBe(400);
-    expect((response.json() as { error?: string }).error).toContain('Invalid useSystemProxy');
+    expect((response.json() as { error?: string }).error).toContain('Invalid proxyRef');
   });
 
-  it('rejects invalid proxy url', async () => {
+  /**
+   * Refused on write even though a dangling reference READS as "no proxy".
+   *
+   * Accepting it would store a site that looks proxied in the UI and is not, which is
+   * the failure this whole consolidation exists to remove.
+   */
+  it('rejects a proxyRef that is not in the pool', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -168,12 +181,12 @@ describe('sites proxy settings', () => {
         name: 'proxy-site',
         url: 'https://proxy-site.example.com',
         platform: 'new-api',
-        proxyUrl: 'not-a-proxy',
+        proxyRef: 'px_does_not_exist',
       },
     });
 
     expect(response.statusCode).toBe(400);
-    expect((response.json() as { error?: string }).error).toContain('Invalid proxyUrl');
+    expect((response.json() as { error?: string }).error).toContain('Unknown proxyRef');
   });
 
   it('rejects invalid site global weight', async () => {
@@ -208,7 +221,7 @@ describe('sites proxy settings', () => {
     expect((response.json() as { error?: string }).error).toContain('Invalid externalCheckinUrl');
   });
 
-  it('updates per-site proxy settings for an existing site', async () => {
+  it('updates the per-site proxy reference for an existing site', async () => {
     const created = await app.inject({
       method: 'POST',
       url: '/api/sites',
@@ -216,7 +229,6 @@ describe('sites proxy settings', () => {
         name: 'toggle-site',
         url: 'https://toggle-site.example.com',
         platform: 'new-api',
-        useSystemProxy: false,
       },
     });
     expect(created.statusCode).toBe(200);
@@ -226,15 +238,40 @@ describe('sites proxy settings', () => {
       method: 'PUT',
       url: `/api/sites/${site.id}`,
       payload: {
-        proxyUrl: 'http://127.0.0.1:8080',
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
       },
     });
 
     expect(response.statusCode).toBe(200);
-    const payload = response.json() as { proxyUrl?: string | null; useSystemProxy?: boolean };
-    expect(payload.proxyUrl).toBe('http://127.0.0.1:8080');
-    expect(payload.useSystemProxy).toBe(true);
+    expect((response.json() as { proxyRef?: string | null }).proxyRef).toBe('px_hk');
+  });
+
+  // `null` is a real answer for a site, not an absent one: 不走代理 has to be storable,
+  // or a site could never refuse a proxy.
+  it('stores an explicit null proxyRef as "do not proxy"', async () => {
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/sites',
+      payload: {
+        name: 'direct-site',
+        url: 'https://direct-site.example.com',
+        platform: 'new-api',
+        proxyRef: 'px_hk',
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const site = created.json() as { id: number };
+
+    const response = await app.inject({
+      method: 'PUT',
+      url: `/api/sites/${site.id}`,
+      payload: {
+        proxyRef: null,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as { proxyRef?: string | null }).proxyRef).toBeNull();
   });
 
   it('clears optional editor fields when updating a site with empty strings', async () => {
@@ -245,8 +282,7 @@ describe('sites proxy settings', () => {
         name: 'editable-site',
         url: 'https://editable-site.example.com',
         platform: 'new-api',
-        proxyUrl: 'http://127.0.0.1:8080',
-        useSystemProxy: true,
+        proxyRef: 'px_hk',
         customHeaders: JSON.stringify({
           'x-site-scope': 'internal',
         }),
@@ -260,8 +296,7 @@ describe('sites proxy settings', () => {
       method: 'PUT',
       url: `/api/sites/${site.id}`,
       payload: {
-        proxyUrl: '',
-        useSystemProxy: false,
+        proxyRef: '',
         customHeaders: '',
         externalCheckinUrl: '',
       },
@@ -269,13 +304,11 @@ describe('sites proxy settings', () => {
 
     expect(response.statusCode).toBe(200);
     const payload = response.json() as {
-      proxyUrl?: string | null;
-      useSystemProxy?: boolean;
+      proxyRef?: string | null;
       customHeaders?: string | null;
       externalCheckinUrl?: string | null;
     };
-    expect(payload.proxyUrl).toBeNull();
-    expect(payload.useSystemProxy).toBe(false);
+    expect(payload.proxyRef).toBeNull();
     expect(payload.customHeaders).toBeNull();
     expect(payload.externalCheckinUrl).toBeNull();
   });
@@ -739,3 +772,4 @@ describe('sites proxy settings', () => {
     });
   });
 });
+

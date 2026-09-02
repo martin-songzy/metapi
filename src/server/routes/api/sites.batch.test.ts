@@ -29,6 +29,11 @@ describe('sites batch routes', () => {
   beforeEach(async () => {
     await db.delete(schema.accounts).run();
     await db.delete(schema.sites).run();
+    await db.delete(schema.settings).run();
+    await db.insert(schema.settings).values({
+      key: 'proxy_pool_v1',
+      value: JSON.stringify([{ id: 'px_hk', name: '香港', url: 'socks5://127.0.0.1:1080' }]),
+    }).run();
   });
 
   afterAll(async () => {
@@ -36,21 +41,21 @@ describe('sites batch routes', () => {
     delete process.env.DATA_DIR;
   });
 
-  it('enables system proxy for selected sites and reports failures', async () => {
+  it('sets the proxy reference for selected sites and reports failures', async () => {
     await db.insert(schema.sites).values([
       {
         id: 1,
         name: 'site-1',
         url: 'https://site-1.example.com',
         platform: 'new-api',
-        useSystemProxy: false,
+        proxyRef: null,
       },
       {
         id: 2,
         name: 'site-2',
         url: 'https://site-2.example.com',
         platform: 'new-api',
-        useSystemProxy: false,
+        proxyRef: null,
       },
     ]).run();
 
@@ -59,7 +64,8 @@ describe('sites batch routes', () => {
       url: '/api/sites/batch',
       payload: {
         ids: [1, 2, 999],
-        action: 'enableSystemProxy',
+        action: 'setProxyRef',
+        proxyRef: 'px_hk',
       },
     });
 
@@ -73,7 +79,84 @@ describe('sites batch routes', () => {
     expect(body.failedItems?.[0]?.id).toBe(999);
 
     const rows = await db.select().from(schema.sites).all();
-    expect(rows.every((row) => row.useSystemProxy === true)).toBe(true);
+    expect(rows.every((row) => row.proxyRef === 'px_hk')).toBe(true);
+  });
+
+  /**
+   * A batch action with no target is a mistake, not a no-op.
+   *
+   * Defaulting an absent `proxyRef` to null would silently unproxy every selected
+   * site, which is the most damaging thing this endpoint can do by accident.
+   */
+  it('rejects setProxyRef when the payload carries no reference', async () => {
+    await db.insert(schema.sites).values({
+      id: 1,
+      name: 'site-1',
+      url: 'https://site-1.example.com',
+      platform: 'new-api',
+      proxyRef: 'px_hk',
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1],
+        action: 'setProxyRef',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { message?: string }).message).toContain('proxyRef is required');
+
+    const rows = await db.select().from(schema.sites).all();
+    expect(rows[0]?.proxyRef).toBe('px_hk');
+  });
+
+  it('rejects setProxyRef when the reference is not in the pool', async () => {
+    await db.insert(schema.sites).values({
+      id: 1,
+      name: 'site-1',
+      url: 'https://site-1.example.com',
+      platform: 'new-api',
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1],
+        action: 'setProxyRef',
+        proxyRef: 'px_gone',
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect((response.json() as { message?: string }).message).toContain('Unknown proxyRef');
+  });
+
+  it('clears the proxy reference for selected sites when given an explicit null', async () => {
+    await db.insert(schema.sites).values({
+      id: 1,
+      name: 'site-1',
+      url: 'https://site-1.example.com',
+      platform: 'new-api',
+      proxyRef: 'px_hk',
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/sites/batch',
+      payload: {
+        ids: [1],
+        action: 'setProxyRef',
+        proxyRef: null,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const rows = await db.select().from(schema.sites).all();
+    expect(rows[0]?.proxyRef).toBeNull();
   });
 
   it('rejects invalid sites batch action', async () => {
@@ -106,3 +189,4 @@ describe('sites batch routes', () => {
     });
   });
 });
+

@@ -24,8 +24,13 @@ const withExplicitProxyRequestInitMock = vi.fn(
   },
 );
 
+const resolveProxyRefFromPrimedPoolMock = vi.fn((ref: unknown) => (
+  ref === 'px_hk' ? 'http://127.0.0.1:7890' : null
+));
+
 vi.mock('./siteProxy.js', () => ({
   withExplicitProxyRequestInit: (...args: unknown[]) => withExplicitProxyRequestInitMock(...args),
+  resolveProxyRefFromPrimedPool: (ref: unknown) => resolveProxyRefFromPrimedPoolMock(ref),
 }));
 
 describe('notifyService', () => {
@@ -47,8 +52,7 @@ describe('notifyService', () => {
     (config as any).telegramEnabled = false;
     (config as any).telegramBotToken = '';
     (config as any).telegramChatId = '';
-    (config as any).telegramUseSystemProxy = false;
-    config.systemProxyUrl = '';
+    (config as any).telegramProxyRef = '';
     (config as any).telegramMessageThreadId = '';
     config.smtpEnabled = true;
     config.smtpHost = 'smtp.example.com';
@@ -261,13 +265,12 @@ describe('notifyService', () => {
     );
   });
 
-  it('applies system proxy dispatcher when telegramUseSystemProxy is enabled', async () => {
+  it('routes telegram through the pool entry its proxyRef names', async () => {
     const { config } = await import('../config.js');
     (config as any).telegramEnabled = true;
     (config as any).telegramBotToken = '123456:telegram-token';
     (config as any).telegramChatId = '-1001234567890';
-    (config as any).telegramUseSystemProxy = true;
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
+    (config as any).telegramProxyRef = 'px_hk';
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({ ok: true, status: 200 });
@@ -285,13 +288,12 @@ describe('notifyService', () => {
     );
   });
 
-  it('does not apply proxy dispatcher when telegramUseSystemProxy is disabled', async () => {
+  it('sends telegram direct when no proxyRef is set', async () => {
     const { config } = await import('../config.js');
     (config as any).telegramEnabled = true;
     (config as any).telegramBotToken = '123456:telegram-token';
     (config as any).telegramChatId = '-1001234567890';
-    (config as any).telegramUseSystemProxy = false;
-    config.systemProxyUrl = 'http://127.0.0.1:7890';
+    (config as any).telegramProxyRef = '';
     config.smtpEnabled = false;
 
     fetchMock.mockResolvedValue({ ok: true, status: 200 });

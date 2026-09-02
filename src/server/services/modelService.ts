@@ -12,7 +12,6 @@ import {
 import {
   getCredentialModeFromExtraConfig,
   mergeAccountExtraConfig,
-  resolveProxyUrlFromExtraConfig,
   requiresManagedAccountTokens,
   resolvePlatformUserId,
   supportsDirectAccountRoutingConnection,
@@ -22,7 +21,7 @@ import { getBlockedBrandRules, isModelBlockedByBrand } from './brandMatcher.js';
 import { config } from '../config.js';
 import { setAccountRuntimeHealth } from './accountHealthService.js';
 import { clearAllRouteDecisionSnapshots } from './routeDecisionSnapshotStore.js';
-import { withAccountProxyOverride } from './siteProxy.js';
+import { resolveChannelProxyUrl, withAccountProxyOverride } from './siteProxy.js';
 import { isCodexPlatform } from './oauth/codexAccount.js';
 import { buildStoredOauthStateFromAccount, getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from './oauth/refreshSingleflight.js';
@@ -942,7 +941,7 @@ export async function refreshModelsForAccount(
   const site = row.sites;
   const oauth = getOauthInfoFromAccount(account);
   const adapter = getAdapter(site.platform);
-  const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
+  const accountProxyUrl = await resolveChannelProxyUrl(site, account.extraConfig);
 
   const restoreAvailabilityOnFailure = options?.allowInactive === true;
   const previousAccountTokens = restoreAvailabilityOnFailure

@@ -37,7 +37,6 @@ describe('settings system proxy test route', () => {
 
   beforeEach(() => {
     fetchMock.mockReset();
-    config.systemProxyUrl = '';
   });
 
   afterAll(async () => {
@@ -77,21 +76,10 @@ describe('settings system proxy test route', () => {
     expect(requestInit.dispatcher).toBeTruthy();
   });
 
-  it('uses the saved system proxy url when request body is empty', async () => {
-    config.systemProxyUrl = 'socks5://127.0.0.1:1080';
-    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
-
-    const response = await app.inject({
-      method: 'POST',
-      url: '/api/settings/system-proxy/test',
-      payload: {},
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect((response.json() as { proxyUrl?: string }).proxyUrl).toBe('socks5://127.0.0.1:1080');
-  });
-
-  it('rejects missing system proxy url', async () => {
+  // There is no global address to fall back to any more: the pool panel always sends
+  // the entry it is testing, so an empty body is a caller mistake rather than a request
+  // to test "whatever is configured".
+  it('rejects a request with no proxy url', async () => {
     const response = await app.inject({
       method: 'POST',
       url: '/api/settings/system-proxy/test',
@@ -99,7 +87,7 @@ describe('settings system proxy test route', () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect((response.json() as { message?: string }).message).toContain('请先填写系统代理地址');
+    expect((response.json() as { message?: string }).message).toContain('请先填写代理地址');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -147,3 +135,4 @@ describe('settings system proxy test route', () => {
     expect((response.json() as { message?: string }).message).not.toContain('fetch failed');
   });
 });
+

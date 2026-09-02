@@ -1,8 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { getOAuthProviderDefinition } from './providers.js';
-import { resolveProxyUrlFromExtraConfig } from '../accountExtraConfig.js';
-import { resolveSiteProxyUrlByRequestUrl } from '../siteProxy.js';
+import { resolveChannelProxyUrl, resolveSiteProxyUrlByRequestUrl } from '../siteProxy.js';
 
 export async function resolveOauthProviderProxyUrl(provider: string): Promise<string | null> {
   const definition = getOAuthProviderDefinition(provider);
@@ -10,16 +9,21 @@ export async function resolveOauthProviderProxyUrl(provider: string): Promise<st
   return resolveSiteProxyUrlByRequestUrl(definition.site.url);
 }
 
+/**
+ * The proxy for one OAuth connection: its own choice, or its site's.
+ *
+ * Resolved against the site RECORD rather than by request URL, so a connection that
+ * explicitly refused a proxy is honoured — the URL-based path cannot see that answer.
+ */
 export async function resolveOauthAccountProxyUrl(input: {
   siteId?: number | null;
   extraConfig?: string | null;
 }): Promise<string | null> {
-  const accountProxyUrl = resolveProxyUrlFromExtraConfig(input.extraConfig);
-  if (accountProxyUrl) return accountProxyUrl;
-  if (!input.siteId || input.siteId <= 0) return null;
+  if (!input.siteId || input.siteId <= 0) {
+    return resolveChannelProxyUrl(null, input.extraConfig);
+  }
   const site = await db.select({
-    url: schema.sites.url,
+    proxyRef: schema.sites.proxyRef,
   }).from(schema.sites).where(eq(schema.sites.id, input.siteId)).get();
-  if (!site?.url) return null;
-  return resolveSiteProxyUrlByRequestUrl(site.url);
+  return resolveChannelProxyUrl(site ?? null, input.extraConfig);
 }

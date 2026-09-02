@@ -9,7 +9,7 @@ const runtimeSettingsPayloadSchema = z.object({
   barkEnabled: z.boolean().optional(),
   serverChanEnabled: z.boolean().optional(),
   telegramEnabled: z.boolean().optional(),
-  telegramUseSystemProxy: z.boolean().optional(),
+  telegramProxyRef: z.union([z.string(), z.null()]).optional(),
   smtpEnabled: z.boolean().optional(),
   smtpSecure: z.boolean().optional(),
   logCleanupUsageLogsEnabled: z.boolean().optional(),
@@ -18,6 +18,25 @@ const runtimeSettingsPayloadSchema = z.object({
 
 const systemProxyTestPayloadSchema = z.object({
   proxyUrl: z.string().optional(),
+}).passthrough();
+
+/**
+ * `url` is required on create and optional on patch, so the two are separate
+ * schemas rather than one with everything optional — a create that silently
+ * accepted a missing address would store an entry no site can use.
+ *
+ * Address VALIDITY is not checked here: `normalizeSiteProxyUrl` in the service
+ * owns the protocol allow-list, and duplicating it in Zod would let the two
+ * disagree about what a usable proxy is.
+ */
+const proxyPoolCreatePayloadSchema = z.object({
+  name: z.string().optional(),
+  url: z.string().trim().min(1),
+}).passthrough();
+
+const proxyPoolUpdatePayloadSchema = z.object({
+  name: z.string().optional(),
+  url: z.string().trim().min(1).optional(),
 }).passthrough();
 
 const databaseMigrationPayloadSchema = z.object({
@@ -52,6 +71,8 @@ export type BackupImportPayload = z.output<typeof backupImportPayloadSchema>;
 export type DatabaseMigrationPayload = z.output<typeof databaseMigrationPayloadSchema>;
 export type RuntimeSettingsPayload = z.output<typeof runtimeSettingsPayloadSchema>;
 export type SystemProxyTestPayload = z.output<typeof systemProxyTestPayloadSchema>;
+export type ProxyPoolCreatePayload = z.output<typeof proxyPoolCreatePayloadSchema>;
+export type ProxyPoolUpdatePayload = z.output<typeof proxyPoolUpdatePayloadSchema>;
 
 function normalizeSettingsPayloadInput(input: unknown): unknown {
   return input === undefined ? {} : input;
@@ -99,8 +120,8 @@ function formatSettingsPayloadError(error: z.ZodError): string {
   if (firstPath === 'telegramEnabled') {
     return 'Telegram 开关格式无效：需要 boolean';
   }
-  if (firstPath === 'telegramUseSystemProxy') {
-    return 'Telegram 使用系统代理格式无效：需要 boolean';
+  if (firstPath === 'telegramProxyRef') {
+    return 'Telegram 代理选择格式无效：需要代理池 id 或 null';
   }
   if (firstPath === 'smtpEnabled') {
     return 'SMTP 开关格式无效：需要 boolean';
@@ -135,6 +156,36 @@ export function parseRuntimeSettingsPayload(input: unknown):
 export function parseSystemProxyTestPayload(input: unknown):
 { success: true; data: SystemProxyTestPayload } | { success: false; error: string } {
   const result = systemProxyTestPayloadSchema.safeParse(normalizeSettingsPayloadInput(input));
+  if (!result.success) {
+    return {
+      success: false,
+      error: formatSettingsPayloadError(result.error),
+    };
+  }
+  return {
+    success: true,
+    data: result.data,
+  };
+}
+
+export function parseProxyPoolCreatePayload(input: unknown):
+{ success: true; data: ProxyPoolCreatePayload } | { success: false; error: string } {
+  const result = proxyPoolCreatePayloadSchema.safeParse(normalizeSettingsPayloadInput(input));
+  if (!result.success) {
+    return {
+      success: false,
+      error: formatSettingsPayloadError(result.error),
+    };
+  }
+  return {
+    success: true,
+    data: result.data,
+  };
+}
+
+export function parseProxyPoolUpdatePayload(input: unknown):
+{ success: true; data: ProxyPoolUpdatePayload } | { success: false; error: string } {
+  const result = proxyPoolUpdatePayloadSchema.safeParse(normalizeSettingsPayloadInput(input));
   if (!result.success) {
     return {
       success: false,

@@ -4,9 +4,10 @@ import {
   getCredentialModeFromExtraConfig,
   hasOauthProvider,
   getPlatformUserIdFromExtraConfig,
-  getProxyUrlFromExtraConfig,
-  getUseSystemProxyFromExtraConfig,
-  resolveProxyUrlFromExtraConfig,
+  getProxyRefFromExtraConfig,
+  parseConnectionProxyRefInput,
+  PROXY_REF_INHERIT,
+  withProxyRefInExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   getSub2ApiSubscriptionFromExtraConfig,
   guessPlatformUserIdFromUsername,
@@ -16,7 +17,6 @@ import {
   requiresManagedAccountTokens,
   supportsDirectAccountRoutingConnection,
 } from './accountExtraConfig.js';
-import { config } from '../config.js';
 
 describe('accountExtraConfig', () => {
   it('reads platformUserId from extra config when present', () => {
@@ -99,43 +99,40 @@ describe('accountExtraConfig', () => {
     }))).toBeNull();
   });
 
-  it('reads proxyUrl from extra config', () => {
-    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: 'http://127.0.0.1:7890' }))).toBe('http://127.0.0.1:7890');
-    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: '  socks5://proxy.local:1080  ' }))).toBe('socks5://proxy.local:1080');
+  /**
+   * The three-state read is the whole reason a connection can refuse a proxy its site
+   * has set. Collapsing "key absent" into "explicitly direct" would make 跟随站点 and
+   * 不走代理 the same answer, which is the gap the old address/opt-in pair had.
+   */
+  it('distinguishes absent, null and set proxyRef in extra config', () => {
+    expect(getProxyRefFromExtraConfig(JSON.stringify({}))).toBeUndefined();
+    expect(getProxyRefFromExtraConfig(JSON.stringify({ proxyRef: null }))).toBeNull();
+    expect(getProxyRefFromExtraConfig(JSON.stringify({ proxyRef: 'px_hk' }))).toBe('px_hk');
+    expect(getProxyRefFromExtraConfig(JSON.stringify({ proxyRef: '  px_hk  ' }))).toBe('px_hk');
   });
 
-  it('returns null for missing or empty proxyUrl', () => {
-    expect(getProxyUrlFromExtraConfig(JSON.stringify({}))).toBeNull();
-    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: '' }))).toBeNull();
-    expect(getProxyUrlFromExtraConfig(JSON.stringify({ proxyUrl: '   ' }))).toBeNull();
-    expect(getProxyUrlFromExtraConfig(null)).toBeNull();
-    expect(getProxyUrlFromExtraConfig(undefined)).toBeNull();
-    expect(getProxyUrlFromExtraConfig('invalid-json')).toBeNull();
+  // A corrupt value must read as "no opinion", never as an explicit direct connection:
+  // garbage in the row must not silently override the site's choice.
+  it('reads a garbage proxyRef as no opinion rather than as direct', () => {
+    expect(getProxyRefFromExtraConfig(JSON.stringify({ proxyRef: '' }))).toBeUndefined();
+    expect(getProxyRefFromExtraConfig(JSON.stringify({ proxyRef: '   ' }))).toBeUndefined();
+    expect(getProxyRefFromExtraConfig(JSON.stringify({ proxyRef: 42 }))).toBeUndefined();
+    expect(getProxyRefFromExtraConfig('invalid-json')).toBeUndefined();
+    expect(getProxyRefFromExtraConfig(null)).toBeUndefined();
+    expect(getProxyRefFromExtraConfig(undefined)).toBeUndefined();
   });
 
-  it('reads useSystemProxy from extra config', () => {
-    expect(getUseSystemProxyFromExtraConfig(JSON.stringify({ useSystemProxy: true }))).toBe(true);
-    expect(getUseSystemProxyFromExtraConfig(JSON.stringify({ useSystemProxy: false }))).toBe(false);
-    expect(getUseSystemProxyFromExtraConfig(JSON.stringify({}))).toBe(false);
+  it('writes the three states back, removing the key only for inherit', () => {
+    expect(JSON.parse(withProxyRefInExtraConfig(JSON.stringify({ a: 1 }), 'px_hk'))).toEqual({ a: 1, proxyRef: 'px_hk' });
+    expect(JSON.parse(withProxyRefInExtraConfig(JSON.stringify({ a: 1 }), null))).toEqual({ a: 1, proxyRef: null });
+    expect(JSON.parse(withProxyRefInExtraConfig(JSON.stringify({ a: 1, proxyRef: 'px_hk' }), undefined))).toEqual({ a: 1 });
   });
 
-  it('resolves account proxy url from custom override before system proxy', () => {
-    const previousSystemProxyUrl = config.systemProxyUrl;
-    try {
-      config.systemProxyUrl = 'http://127.0.0.1:7890';
-      expect(resolveProxyUrlFromExtraConfig(JSON.stringify({
-        proxyUrl: 'http://account-proxy:8080',
-        useSystemProxy: true,
-      }))).toBe('http://account-proxy:8080');
-      expect(resolveProxyUrlFromExtraConfig(JSON.stringify({
-        useSystemProxy: true,
-      }))).toBe('http://127.0.0.1:7890');
-      expect(resolveProxyUrlFromExtraConfig(JSON.stringify({
-        useSystemProxy: false,
-      }))).toBeNull();
-    } finally {
-      config.systemProxyUrl = previousSystemProxyUrl;
-    }
+  it('maps the wire sentinel onto the stored three states', () => {
+    expect(parseConnectionProxyRefInput('px_hk')).toBe('px_hk');
+    expect(parseConnectionProxyRefInput(null)).toBeNull();
+    expect(parseConnectionProxyRefInput(PROXY_REF_INHERIT)).toBeUndefined();
+    expect(parseConnectionProxyRefInput('')).toBeUndefined();
   });
 
   it('treats auto-mode api token connections as direct-account routable', () => {

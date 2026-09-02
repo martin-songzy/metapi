@@ -9,6 +9,7 @@ const { apiMock } = vi.hoisted(() => ({
     getRuntimeSettings: vi.fn(),
     updateRuntimeSettings: vi.fn(),
     testNotification: vi.fn(),
+    getProxyPool: vi.fn(),
   },
 }));
 
@@ -117,7 +118,11 @@ describe('NotificationSettings', () => {
     }
   });
 
-  it('loads and saves telegram use system proxy toggle', async () => {
+  it('loads and saves the telegram proxy choice', async () => {
+    apiMock.getProxyPool.mockResolvedValue({
+      success: true,
+      entries: [{ id: 'px_hk', name: '香港', url: 'socks5://10.0.0.1:1080' }],
+    });
     apiMock.getRuntimeSettings.mockResolvedValue({
       webhookUrl: '',
       barkUrl: '',
@@ -128,7 +133,7 @@ describe('NotificationSettings', () => {
       telegramApiBaseUrl: 'https://api.telegram.org',
       telegramChatId: '-1001234567890',
       telegramBotTokenMasked: '1234****token',
-      telegramUseSystemProxy: false,
+      telegramProxyRef: '',
       smtpEnabled: false,
       smtpHost: '',
       smtpPort: 587,
@@ -152,20 +157,14 @@ describe('NotificationSettings', () => {
       });
       await flushMicrotasks();
 
-      const allCheckboxes = root.root.findAll((node) => (
-        node.type === 'input' && node.props.type === 'checkbox'
-      ));
-      const proxyCheckbox = allCheckboxes.find((node) => {
-        const parent = node.parent;
-        if (!parent) return false;
-        const text = collectText(parent);
-        return text.includes('使用系统代理');
-      });
-      expect(proxyCheckbox).toBeTruthy();
-      expect(proxyCheckbox!.props.checked).toBe(false);
+      // Telegram picks from the pool like everything else; there is no address field
+      // here any more, and 不走代理 is the stored default.
+      const directRadio = root.root.find((node) => node.props?.['data-testid'] === 'telegram-proxy-direct');
+      expect(directRadio.props.checked).toBe(true);
 
+      const entryRadio = root.root.find((node) => node.props?.['data-testid'] === 'telegram-proxy-entry-px_hk');
       await act(async () => {
-        proxyCheckbox!.props.onChange({ target: { checked: true } });
+        entryRadio.props.onChange({ target: { checked: true } });
       });
 
       const saveButton = root.root.find((node) => (
@@ -179,10 +178,11 @@ describe('NotificationSettings', () => {
       await flushMicrotasks();
 
       expect(apiMock.updateRuntimeSettings).toHaveBeenCalledWith(expect.objectContaining({
-        telegramUseSystemProxy: true,
+        telegramProxyRef: 'px_hk',
       }));
     } finally {
       root?.unmount();
     }
   });
 });
+

@@ -7,8 +7,25 @@ export const sites = sqliteTable('sites', {
   url: text('url').notNull(),
   externalCheckinUrl: text('external_checkin_url'),
   platform: text('platform').notNull(), // 'new-api' | 'one-api' | 'veloera' | 'one-hub' | 'done-hub' | 'sub2api' | 'openai' | 'claude' | 'gemini' | 'codex' | 'gemini-cli' | 'antigravity'
+  // DEAD COLUMNS — superseded by `proxy_ref` below, and no code reads them any
+  // more. They stay declared because this generator only emits ADDITIVE upgrade
+  // SQL, diffed against the checked-in contract: dropping them here makes the
+  // generator refuse the whole diff, which would also withhold `proxy_ref` and
+  // the per-key probe table from an already-deployed Postgres. Two unread
+  // columns are cheaper than a contract baseline reset that silently skips
+  // shipping the new ones.
   proxyUrl: text('proxy_url'),
   useSystemProxy: integer('use_system_proxy', { mode: 'boolean' }).default(false),
+  // Reference into the `proxy_pool_v1` settings row: the single place a proxy
+  // ADDRESS is entered. NULL means "do not proxy" — a site can refuse to use any
+  // proxy, even when a pool has entries.
+  //
+  // Deliberately NOT a foreign key, and it cannot be one: the pool lives in a
+  // JSON settings row, so there is no table to point at. Deleting a pool entry
+  // therefore has to clear its referrers in application code
+  // (`proxyPoolService.deleteProxyPoolEntry`), and readers treat an unknown id as
+  // "no proxy" rather than falling back to another entry.
+  proxyRef: text('proxy_ref'),
   customHeaders: text('custom_headers'),
   status: text('status').notNull().default('active'), // 'active' | 'disabled'
   isPinned: integer('is_pinned', { mode: 'boolean' }).default(false),
@@ -192,6 +209,58 @@ export const modelProbeResults = sqliteTable('model_probe_results', {
   accountIdIdx: index('model_probe_results_account_id_idx').on(table.accountId),
   statusIdx: index('model_probe_results_status_idx').on(table.status),
   checkedAtIdx: index('model_probe_results_checked_at_idx').on(table.checkedAt),
+}));
+
+// Latest active-probe verdict per (account, key, model). Sibling of
+// model_probe_results, not a replacement: that table stays the site's
+// authoritative state (produced by the account's primary key) and keeps serving
+// routing sync, backup and the existing consumers, while this one records what
+// every individual key saw. A site's keys can each reach a different model set,
+// so a per-key verdict is the only way to tell "this model needs key X" from
+// "this model is gone".
+export const modelProbeKeyResults = sqliteTable('model_probe_key_results', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  // NOT NULL and cascading, unlike the nullable 'set null' account on
+  // model_probe_results: this column is part of the unique key below, and a NULL
+  // there would compare distinct on every insert and silently turn the table
+  // into an append-only log (see the note on that table's key).
+  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  // 0 = the account's primary key (accounts.api_token / access_token);
+  // > 0 = account_tokens.id. Deliberately NOT a foreign key: the sentinel has no
+  // account_tokens row to point at. Deleting a key therefore has to clear its
+  // rows in application code, not by cascade.
+  tokenId: integer('token_id').notNull(),
+  // Display label for the key, denormalized so the result page can render a
+  // verdict whose key row has since been deleted or renamed.
+  tokenName: text('token_name').notNull().default(''),
+  modelName: text('model_name').notNull(),
+  // Same vocabulary as model_probe_results.status, plus 'disabled' and
+  // 'unavailable' for keys that were listed but never probed (a key switched off
+  // or holding a masked value must not read as "reaches no models").
+  status: text('status').notNull(),
+  latencyMs: integer('latency_ms'),
+  httpStatus: integer('http_status'),
+  failureKind: text('failure_kind'),
+  reason: text('reason'),
+  endpointUsed: text('endpoint_used'),
+  promptUsed: text('prompt_used'),
+  userAgentUsed: text('user_agent_used'),
+  checkedAt: text('checked_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  // account_id leads the key because token_id 0 is shared by every account:
+  // without it, two accounts' primary keys probing the same model would collide
+  // on one row and overwrite each other.
+  accountTokenModelUnique: uniqueIndex('model_probe_key_results_account_token_model_unique')
+    .on(table.accountId, table.tokenId, table.modelName),
+  // Mirrors the index set on model_probe_results: one per column the result page
+  // filters or sorts on, plus token_id for the per-key views.
+  modelNameIdx: index('model_probe_key_results_model_name_idx').on(table.modelName),
+  siteIdIdx: index('model_probe_key_results_site_id_idx').on(table.siteId),
+  accountIdIdx: index('model_probe_key_results_account_id_idx').on(table.accountId),
+  tokenIdIdx: index('model_probe_key_results_token_id_idx').on(table.tokenId),
+  statusIdx: index('model_probe_key_results_status_idx').on(table.status),
+  checkedAtIdx: index('model_probe_key_results_checked_at_idx').on(table.checkedAt),
 }));
 
 export const tokenRoutes = sqliteTable('token_routes', {

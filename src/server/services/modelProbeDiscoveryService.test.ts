@@ -13,6 +13,7 @@ const resolvePlatformUserIdMock = vi.fn();
 const resolveChannelProxyUrlMock = vi.fn();
 const withAccountProxyOverrideMock = vi.fn();
 const withSiteRecordProxyRequestInitMock = vi.fn();
+const withResolvedProxyRequestInitMock = vi.fn();
 const isUsableAccountTokenMock = vi.fn();
 const isMaskedTokenValueMock = vi.fn();
 const getOauthInfoFromAccountMock = vi.fn();
@@ -99,6 +100,7 @@ vi.mock('./siteProxy.js', () => ({
   resolveChannelProxyUrl: (...args: unknown[]) => resolveChannelProxyUrlMock(...args),
   withAccountProxyOverride: (...args: unknown[]) => withAccountProxyOverrideMock(...args),
   withSiteRecordProxyRequestInit: (...args: unknown[]) => withSiteRecordProxyRequestInitMock(...args),
+  withResolvedProxyRequestInit: (...args: unknown[]) => withResolvedProxyRequestInitMock(...args),
 }));
 
 vi.mock('./accountTokenService.js', () => ({
@@ -169,6 +171,7 @@ describe('discoverModelsForActiveProbe', () => {
     resolveChannelProxyUrlMock.mockReset();
     withAccountProxyOverrideMock.mockReset();
     withSiteRecordProxyRequestInitMock.mockReset();
+    withResolvedProxyRequestInitMock.mockReset();
     isUsableAccountTokenMock.mockReset();
     isMaskedTokenValueMock.mockReset();
     getOauthInfoFromAccountMock.mockReset();
@@ -198,6 +201,11 @@ describe('discoverModelsForActiveProbe', () => {
     });
     withSiteRecordProxyRequestInitMock.mockImplementation(
       async (_site: unknown, init: RequestInit) => init,
+    );
+    // Signature order differs on purpose: the resolved-address form takes the
+    // already-decided proxy between the site and the init.
+    withResolvedProxyRequestInitMock.mockImplementation(
+      (_site: unknown, _proxyUrl: string | null, init: RequestInit) => init,
     );
     // Every account fixture carries an apiToken, so discovery now tries the
     // token-scoped `/v1/models` catalog before the adapter. Default the fetch stub
@@ -936,3 +944,4 @@ describe('discoverModelsForActiveProbe', () => {
     });
   });
 });
+

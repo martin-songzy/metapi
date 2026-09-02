@@ -32,9 +32,14 @@ describe('schema contract generation', () => {
       notNull: true,
       defaultValue: '0',
     });
-    expect(contract.tables.sites.columns.use_system_proxy).toMatchObject({
+    expect(contract.tables.sites.columns.is_pinned).toMatchObject({
       logicalType: 'boolean',
       defaultValue: 'false',
+    });
+    // The single place a proxy address is selected. Nullable on purpose: NULL is
+    // "do not proxy", so it must not acquire a default.
+    expect(contract.tables.sites.columns.proxy_ref).toMatchObject({
+      logicalType: 'text',
     });
     expect(contract.tables.token_routes.columns.routing_strategy).toMatchObject({
       logicalType: 'text',
@@ -123,6 +128,71 @@ describe('schema contract generation', () => {
         referencedTable: 'accounts',
         referencedColumns: ['id'],
         onDelete: 'SET NULL',
+      }),
+    );
+  });
+
+  it('captures the per-key model probe result table from sqlite migrations', () => {
+    const contract = buildSchemaContractFromSqliteMigrations();
+    const table = contract.tables.model_probe_key_results;
+
+    expect(table).toBeDefined();
+    expect(table.columns.site_id).toMatchObject({ logicalType: 'integer', notNull: true });
+    // NOT NULL here, unlike the site-scoped table's nullable account_id: this
+    // column is part of the unique key below, and a NULL in a unique key compares
+    // distinct on every insert, which would turn the table into an append-only log.
+    expect(table.columns.account_id).toMatchObject({ logicalType: 'integer', notNull: true });
+    // Same reason, plus it carries the sentinel 0 for the account-level primary key.
+    expect(table.columns.token_id).toMatchObject({ logicalType: 'integer', notNull: true });
+    expect(table.columns.token_name).toMatchObject({ logicalType: 'text', notNull: true });
+    expect(table.columns.model_name).toMatchObject({ logicalType: 'text', notNull: true });
+    expect(table.columns.status).toMatchObject({ logicalType: 'text', notNull: true });
+    expect(table.columns.latency_ms).toMatchObject({ logicalType: 'integer', notNull: false });
+    expect(table.columns.http_status).toMatchObject({ logicalType: 'integer', notNull: false });
+    expect(table.columns.failure_kind).toMatchObject({ logicalType: 'text', notNull: false });
+    expect(table.columns.reason).toMatchObject({ logicalType: 'text', notNull: false });
+    expect(table.columns.endpoint_used).toMatchObject({ logicalType: 'text', notNull: false });
+    expect(table.columns.prompt_used).toMatchObject({ logicalType: 'text', notNull: false });
+    expect(table.columns.user_agent_used).toMatchObject({ logicalType: 'text', notNull: false });
+    expect(table.columns.checked_at).toMatchObject({ logicalType: 'datetime' });
+
+    // account_id LEADS the key on purpose. token_id 0 is the shared sentinel for
+    // every account's primary key, so a (token_id, model_name) key would collide
+    // two different accounts' primary-key verdicts into one row.
+    expect(contract.uniques).toContainEqual(
+      expect.objectContaining({
+        name: 'model_probe_key_results_account_token_model_unique',
+        table: 'model_probe_key_results',
+        columns: ['account_id', 'token_id', 'model_name'],
+      }),
+    );
+    expect(contract.foreignKeys).toContainEqual(
+      expect.objectContaining({
+        table: 'model_probe_key_results',
+        columns: ['site_id'],
+        referencedTable: 'sites',
+        referencedColumns: ['id'],
+        onDelete: 'CASCADE',
+      }),
+    );
+    // CASCADE, not SET NULL: the column is NOT NULL and in the unique key, so a
+    // row whose account is gone has no value to fall back to.
+    expect(contract.foreignKeys).toContainEqual(
+      expect.objectContaining({
+        table: 'model_probe_key_results',
+        columns: ['account_id'],
+        referencedTable: 'accounts',
+        referencedColumns: ['id'],
+        onDelete: 'CASCADE',
+      }),
+    );
+    // token_id must NOT be a foreign key: the sentinel 0 has no account_tokens row
+    // to point at. Deleting a key therefore clears these rows in application code
+    // (accountTokens.ts, accountTokenService.ts, siteApiKeyMigrationService.ts).
+    expect(contract.foreignKeys).not.toContainEqual(
+      expect.objectContaining({
+        table: 'model_probe_key_results',
+        columns: ['token_id'],
       }),
     );
   });

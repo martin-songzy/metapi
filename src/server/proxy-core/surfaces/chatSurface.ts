@@ -389,7 +389,7 @@ export async function handleChatSurfaceRequest(
           runtime: endpointRequest.runtime,
         };
       };
-      const dispatchRequest = createSurfaceDispatchRequest({
+      const dispatchRequest = await createSurfaceDispatchRequest({
         site: selected.site,
         siteUrl: siteApiBaseUrl,
         accountExtraConfig: selected.account.extraConfig,
@@ -1329,7 +1329,7 @@ export async function handleClaudeCountTokensSurfaceRequest(
     try {
       const countTokensResult = await runWithSiteApiEndpointPool(selected.site, async (target) => {
         let upstreamRequest = buildRequest(target.baseUrl);
-        const dispatchRequest = createSurfaceDispatchRequest({
+        const dispatchRequest = await createSurfaceDispatchRequest({
           site: selected.site,
           siteUrl: target.baseUrl,
           accountExtraConfig: selected.account.extraConfig,

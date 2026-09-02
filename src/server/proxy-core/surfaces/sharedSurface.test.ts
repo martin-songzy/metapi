@@ -11,6 +11,7 @@ const formatUtcSqlDateTimeMock = vi.fn();
 const insertProxyLogMock = vi.fn();
 const resolveChannelProxyUrlMock = vi.fn();
 const withSiteRecordProxyRequestInitMock = vi.fn();
+const withResolvedProxyRequestInitMock = vi.fn();
 const dispatchRuntimeRequestMock = vi.fn();
 const reportProxyAllFailedMock = vi.fn();
 const reportTokenExpiredMock = vi.fn();
@@ -69,6 +70,7 @@ vi.mock('../../services/proxyLogStore.js', () => ({
 vi.mock('../../services/siteProxy.js', () => ({
   resolveChannelProxyUrl: (...args: unknown[]) => resolveChannelProxyUrlMock(...args),
   withSiteRecordProxyRequestInit: (...args: unknown[]) => withSiteRecordProxyRequestInitMock(...args),
+  withResolvedProxyRequestInit: (...args: unknown[]) => withResolvedProxyRequestInitMock(...args),
 }));
 
 vi.mock('../../services/runtimeDispatch.js', () => ({
@@ -123,6 +125,7 @@ describe('selectSurfaceChannelForAttempt', () => {
     insertProxyLogMock.mockReset();
     resolveChannelProxyUrlMock.mockReset();
     withSiteRecordProxyRequestInitMock.mockReset();
+    withResolvedProxyRequestInitMock.mockReset();
     dispatchRuntimeRequestMock.mockReset();
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
@@ -415,44 +418,47 @@ describe('selectSurfaceChannelForAttempt', () => {
       runtime: { executor: 'default' },
     };
     resolveChannelProxyUrlMock.mockReturnValue('http://proxy.example.com');
-    withSiteRecordProxyRequestInitMock.mockImplementation(async (_site, init, proxyUrl) => ({
+    withResolvedProxyRequestInitMock.mockImplementation((_site, proxyUrl, init) => ({
       ...init,
       proxyUrl,
     }));
     dispatchRuntimeRequestMock.mockResolvedValue('ok');
 
     const { createSurfaceDispatchRequest } = await import('./sharedSurface.js');
-    const dispatchRequest = createSurfaceDispatchRequest({
+    // Async now: the channel's proxy is resolved once, up front, so every retry and
+    // endpoint fallback for this channel egresses through the same proxy.
+    const dispatchRequest = await createSurfaceDispatchRequest({
       site,
-      accountExtraConfig: '{"proxyUrl":"http://proxy.example.com"}',
+      accountExtraConfig: '{"proxyRef":"px_hk"}',
     });
     const result = await dispatchRequest(request, 'https://target.example.com/v1/responses');
 
     expect(result).toBe('ok');
     expect(resolveChannelProxyUrlMock).toHaveBeenCalledWith(
       site,
-      '{"proxyUrl":"http://proxy.example.com"}',
+      '{"proxyRef":"px_hk"}',
     );
     expect(dispatchRuntimeRequestMock).toHaveBeenCalledTimes(1);
     const dispatchArg = dispatchRuntimeRequestMock.mock.calls[0]?.[0];
     expect(dispatchArg.siteUrl).toBe('https://upstream.example.com');
     expect(dispatchArg.targetUrl).toBe('https://target.example.com/v1/responses');
     expect(dispatchArg.request).toBe(request);
-    return dispatchArg.buildInit('https://target.example.com/v1/responses', {
+    const init = dispatchArg.buildInit('https://target.example.com/v1/responses', {
       headers: { authorization: 'Bearer test' },
       body: { model: 'gpt-5.2', input: 'hello' },
-    }).then((init: Record<string, unknown>) => {
-      expect(withSiteRecordProxyRequestInitMock).toHaveBeenCalledWith(site, {
-        method: 'POST',
-        headers: { authorization: 'Bearer test' },
-        body: JSON.stringify({ model: 'gpt-5.2', input: 'hello' }),
-      }, 'http://proxy.example.com');
-      expect(init).toEqual({
-        method: 'POST',
-        headers: { authorization: 'Bearer test' },
-        body: JSON.stringify({ model: 'gpt-5.2', input: 'hello' }),
-        proxyUrl: 'http://proxy.example.com',
-      });
+    });
+    // Pinned to the address resolved once above, not re-resolved per dispatch: a
+    // concurrent pool edit must not split one logical attempt across two egress paths.
+    expect(withResolvedProxyRequestInitMock).toHaveBeenCalledWith(site, 'http://proxy.example.com', {
+      method: 'POST',
+      headers: { authorization: 'Bearer test' },
+      body: JSON.stringify({ model: 'gpt-5.2', input: 'hello' }),
+    });
+    expect(init).toEqual({
+      method: 'POST',
+      headers: { authorization: 'Bearer test' },
+      body: JSON.stringify({ model: 'gpt-5.2', input: 'hello' }),
+      proxyUrl: 'http://proxy.example.com',
     });
   });
 
@@ -1193,3 +1199,4 @@ describe('selectSurfaceChannelForAttempt', () => {
     });
   });
 });
+

@@ -18,13 +18,12 @@ describe('buildSiteSaveAction', () => {
         url: 'https://a.example.com/',
         externalCheckinUrl: 'https://checkin.a.example.com',
         platform: 'new-api',
-        proxyUrl: 'socks5://127.0.0.1:1080',
+        proxyRef: 'px_aaaaaaaaaaaa',
         apiEndpoints: [
           { url: 'https://api-a.example.com', enabled: true, sortOrder: 0 },
           { url: 'https://api-b.example.com', enabled: false, sortOrder: 1 },
         ],
         customHeaders: '{"x-site-token":"alpha"}',
-        useSystemProxy: false,
         globalWeight: 1.2,
         postRefreshProbeEnabled: true,
         postRefreshProbeModel: 'gpt-4o',
@@ -40,13 +39,12 @@ describe('buildSiteSaveAction', () => {
         url: 'https://a.example.com/',
         externalCheckinUrl: 'https://checkin.a.example.com',
         platform: 'new-api',
-        proxyUrl: 'socks5://127.0.0.1:1080',
+        proxyRef: 'px_aaaaaaaaaaaa',
         apiEndpoints: [
           { url: 'https://api-a.example.com', enabled: true, sortOrder: 0 },
           { url: 'https://api-b.example.com', enabled: false, sortOrder: 1 },
         ],
         customHeaders: '{"x-site-token":"alpha"}',
-        useSystemProxy: false,
         globalWeight: 1.2,
         postRefreshProbeEnabled: true,
         postRefreshProbeModel: 'gpt-4o',
@@ -64,8 +62,7 @@ describe('buildSiteSaveAction', () => {
         url: 'https://b.example.com',
         externalCheckinUrl: '',
         platform: 'one-api',
-        proxyUrl: '',
-        useSystemProxy: true,
+        proxyRef: null,
         apiEndpoints: [],
         customHeaders: '',
         globalWeight: 0.8,
@@ -80,8 +77,7 @@ describe('buildSiteSaveAction', () => {
         url: 'https://b.example.com',
         externalCheckinUrl: '',
         platform: 'one-api',
-        proxyUrl: '',
-        useSystemProxy: true,
+        proxyRef: null,
         apiEndpoints: [],
         customHeaders: '',
         globalWeight: 0.8,
@@ -98,8 +94,7 @@ describe('buildSiteSaveAction', () => {
           url: 'https://c.example.com',
           externalCheckinUrl: '',
           platform: '',
-          proxyUrl: '',
-          useSystemProxy: false,
+          proxyRef: null,
           apiEndpoints: [],
           customHeaders: '',
           globalWeight: 1,
@@ -114,7 +109,7 @@ describe('buildSiteSaveAction', () => {
       url: 'https://d.example.com',
       externalCheckinUrl: null,
       platform: 'new-api',
-      proxyUrl: 'http://127.0.0.1:8080',
+      proxyRef: 'px_cccccccccccc',
       apiEndpoints: [
         {
           url: 'https://api.example.com',
@@ -131,11 +126,11 @@ describe('buildSiteSaveAction', () => {
     expect(emptySiteForm()).not.toHaveProperty('apiKey');
     expect(emptySiteForm().customHeaders).toEqual([emptySiteCustomHeader()]);
     expect(emptySiteForm().apiEndpoints).toEqual([emptySiteApiEndpoint()]);
-    expect(emptySiteForm().proxyUrl).toBe('');
+    expect(emptySiteForm().proxyRef).toBeNull();
     expect(siteFormFromSite(legacySite)).not.toHaveProperty('apiKey');
     expect(siteFormFromSite({
-      proxyUrl: 'http://127.0.0.1:8080',
-    }).proxyUrl).toBe('http://127.0.0.1:8080');
+      proxyRef: 'px_bbbbbbbbbbbb',
+    }).proxyRef).toBe('px_bbbbbbbbbbbb');
     expect(siteFormFromSite(legacySite).apiEndpoints).toEqual([
       {
         url: 'https://api.example.com',
@@ -243,8 +238,7 @@ describe('site probe request profile fields', () => {
         url: 'https://probe-site.example.com',
         externalCheckinUrl: '',
         platform: 'new-api',
-        proxyUrl: '',
-        useSystemProxy: false,
+        proxyRef: null,
         apiEndpoints: [],
         customHeaders: '',
         globalWeight: 1,

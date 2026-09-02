@@ -27,7 +27,10 @@ describe('factoryResetService', () => {
     schema = dbModule.schema;
     config = configModule.config;
     performFactoryReset = serviceModule.performFactoryReset;
-  });
+    // Building the sqlite file plus these four dynamic imports runs past vitest's
+    // 10s hook default on a cold Windows filesystem, which fails the suite before a
+    // single assertion runs.
+  }, 60_000);
 
   beforeEach(async () => {
     await db.delete(schema.routeChannels).run();
@@ -88,10 +91,59 @@ describe('factoryResetService', () => {
     expect(await db.select().from(schema.settings).all()).toEqual([
       { key: 'auth_token', value: JSON.stringify('external-reset-token') },
       { key: 'proxy_token', value: JSON.stringify('change-me-proxy-sk-token') },
-      { key: 'system_proxy_url', value: JSON.stringify('') },
       { key: 'db_type', value: JSON.stringify('postgres') },
       { key: 'db_url', value: JSON.stringify('postgres://user:pass@127.0.0.1:5432/metapi') },
       { key: 'db_ssl', value: JSON.stringify(true) },
     ]);
+  });
+
+  it('preserves the proxy pool, which has no runtime mirror to restore from', async () => {
+    const pool = [{ id: 'px_hk', name: '香港', url: 'socks5://127.0.0.1:7890' }];
+    await db.insert(schema.settings).values([
+      { key: 'auth_token', value: JSON.stringify('external-reset-token') },
+      { key: 'proxy_pool_v1', value: JSON.stringify(pool) },
+      // Wiped like any other business setting, to prove the pool is preserved by
+      // being on the allow list rather than by the wipe being incomplete.
+      { key: 'checkin_cron', value: JSON.stringify('0 9 * * *') },
+    ]).run();
+
+    await performFactoryReset({
+      switchRuntimeDatabase: vi.fn(async () => undefined),
+      runSqliteMigrations: vi.fn(() => undefined),
+      ensureDefaultSitesSeeded: vi.fn(async () => ({
+        seeded: 0,
+        alreadyMarked: false,
+        hadExistingSites: false,
+      })),
+    });
+
+    const rows = await db.select().from(schema.settings).all();
+    const byKey = new Map(rows.map((row) => [row.key, row.value]));
+    // The operator's ruling: a proxy is infrastructure. Losing it can leave an
+    // instance unable to reach any upstream — including the one needed to fix it.
+    expect(byKey.get('proxy_pool_v1')).toBe(JSON.stringify(pool));
+    expect(byKey.has('checkin_cron')).toBe(false);
+  });
+
+  it('does not write a pool key when there was no pool to preserve', async () => {
+    await db.insert(schema.settings).values([
+      { key: 'auth_token', value: JSON.stringify('external-reset-token') },
+    ]).run();
+
+    await performFactoryReset({
+      switchRuntimeDatabase: vi.fn(async () => undefined),
+      runSqliteMigrations: vi.fn(() => undefined),
+      ensureDefaultSitesSeeded: vi.fn(async () => ({
+        seeded: 0,
+        alreadyMarked: false,
+        hadExistingSites: false,
+      })),
+    });
+
+    const keys = (await db.select().from(schema.settings).all()).map((row) => row.key);
+    // A reset instance that never had a proxy must not come back holding an empty
+    // pool row: the settings page renders the pool from this row, so an empty array
+    // and an absent key would look the same there but differ on the next export.
+    expect(keys).not.toContain('proxy_pool_v1');
   });
 });

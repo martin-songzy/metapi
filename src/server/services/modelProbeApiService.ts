@@ -32,6 +32,7 @@ import {
   MODEL_PROBE_CONFIRM_TARGET_THRESHOLD,
   previewActiveModelProbe,
   queueActiveModelProbe,
+  type ModelProbeKeyResultView,
   type ModelProbePreview,
   type ModelProbeResultView,
   type ModelProbeSkippedSite,
@@ -274,6 +275,37 @@ export function toModelProbeResultResponse(item: ModelProbeResultView): ModelPro
     endpointUsed: item.endpointUsed,
     promptUsed: item.promptUsed,
     userAgentUsed: item.userAgentUsed,
+    checkedAt: item.checkedAt,
+  };
+}
+
+export type ModelProbeKeyResultResponse = Omit<ModelProbeKeyResultView, 'reason'> & { reason: string | null };
+
+/**
+ * Same boundary redaction as `toModelProbeResultResponse`, and projected field by
+ * field for the same reason: the view type is built from a database row, and a
+ * spread would relay whatever a future column adds.
+ *
+ * `reason` is the only upstream-authored field here. The run service already
+ * masked the key's own credential by value before persisting; this pass catches
+ * secret-SHAPED text the probe never held — including, on this table
+ * specifically, a body in which one key's error echoes a DIFFERENT key's token.
+ */
+export function toModelProbeKeyResultResponse(item: ModelProbeKeyResultView): ModelProbeKeyResultResponse {
+  return {
+    id: item.id,
+    siteId: item.siteId,
+    accountId: item.accountId,
+    tokenId: item.tokenId,
+    tokenName: item.tokenName,
+    isPrimary: item.isPrimary,
+    modelName: item.modelName,
+    status: item.status,
+    latencyMs: item.latencyMs,
+    httpStatus: item.httpStatus,
+    failureKind: item.failureKind,
+    reason: redactNullableUpstreamProbeText(item.reason),
+    endpointUsed: item.endpointUsed,
     checkedAt: item.checkedAt,
   };
 }

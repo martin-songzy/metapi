@@ -8,6 +8,7 @@ const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getSites: vi.fn(),
     batchUpdateSites: vi.fn(),
+    getProxyPool: vi.fn(),
   },
 }));
 
@@ -36,7 +37,7 @@ describe('Sites mobile actions', () => {
         url: 'https://a.example.com',
         platform: 'new-api',
         status: 'active',
-        useSystemProxy: false,
+        proxyRef: null,
       },
       {
         id: 2,
@@ -44,9 +45,10 @@ describe('Sites mobile actions', () => {
         url: 'https://b.example.com',
         platform: 'new-api',
         status: 'active',
-        useSystemProxy: false,
+        proxyRef: null,
       },
     ]);
+    apiMock.getProxyPool.mockResolvedValue({ success: true, entries: [] });
     apiMock.batchUpdateSites.mockResolvedValue({
       success: true,
       successIds: [1, 2],
@@ -92,15 +94,16 @@ describe('Sites mobile actions', () => {
       });
       await flushMicrotasks();
 
-      const batchButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-enable-system-proxy');
+      const batchSelect = root.root.find((node) => node.props['data-testid'] === 'sites-batch-proxy-ref');
       await act(async () => {
-        batchButton.props.onClick();
+        batchSelect.props.onChange({ target: { value: '__direct__' } });
       });
       await flushMicrotasks();
 
       expect(apiMock.batchUpdateSites).toHaveBeenCalledWith({
         ids: [1, 2],
-        action: 'enableSystemProxy',
+        action: 'setProxyRef',
+        proxyRef: null,
       });
 
       const primaryLink = root.root.find((node) => node.type === 'a' && node.props.href === 'https://a.example.com');

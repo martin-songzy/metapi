@@ -1,0 +1,1 @@
+ALTER TABLE `sites` ADD `proxy_ref` text;

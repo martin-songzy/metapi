@@ -389,6 +389,19 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
           await db.delete(schema.accountTokens)
             .where(eq(schema.accountTokens.id, placeholder.id))
             .run();
+          // Same application-level cascade as the delete endpoint (Q18):
+          // `model_probe_key_results.token_id` carries a sentinel for account-level
+          // primary keys, so it is not a real foreign key and nothing cleans up
+          // behind this delete. A masked-pending placeholder is not probed today,
+          // so this is usually a no-op — but keeping it makes the invariant local
+          // instead of something a reader has to re-derive from the probe's skip
+          // rules, and it holds if those rules ever change.
+          await db.delete(schema.modelProbeKeyResults)
+            .where(and(
+              eq(schema.modelProbeKeyResults.accountId, placeholder.accountId),
+              eq(schema.modelProbeKeyResults.tokenId, placeholder.id),
+            ))
+            .run();
         }
         for (const placeholder of staleMaskedPlaceholders) {
           const placeholderIndex = existing.findIndex((row) => row.id === placeholder.id);

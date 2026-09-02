@@ -83,7 +83,6 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     claudeClientSecret: parseOptionalSecret(env.CLAUDE_CLIENT_SECRET),
     geminiCliClientId: parseOptionalSecret(env.GEMINI_CLI_CLIENT_ID) || DEFAULT_GEMINI_CLI_CLIENT_ID,
     geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET) || DEFAULT_GEMINI_CLI_CLIENT_SECRET,
-    systemProxyUrl: env.SYSTEM_PROXY_URL || '',
     accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',
     checkinScheduleMode: (env.CHECKIN_SCHEDULE_MODE || 'cron').trim().toLowerCase() === 'interval'
@@ -106,7 +105,13 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
     telegramApiBaseUrl: 'https://api.telegram.org',
     telegramBotToken: env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: env.TELEGRAM_CHAT_ID || '',
-    telegramUseSystemProxy: parseBoolean(env.TELEGRAM_USE_SYSTEM_PROXY, false),
+    /**
+     * Which proxy pool entry Telegram goes through, by id. `''` means direct.
+     *
+     * A reference rather than the old `TELEGRAM_USE_SYSTEM_PROXY` boolean, because
+     * there is no longer a single global address for a boolean to point at.
+     */
+    telegramProxyRef: (env.TELEGRAM_PROXY_REF || '').trim(),
     telegramMessageThreadId: (env.TELEGRAM_MESSAGE_THREAD_ID || '').trim(),
     smtpEnabled: parseBoolean(env.SMTP_ENABLED, false),
     smtpHost: env.SMTP_HOST || '',

@@ -9,14 +9,13 @@ import {
   getCredentialModeFromExtraConfig,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
-  resolveProxyUrlFromExtraConfig,
   resolvePlatformUserId,
 } from './accountExtraConfig.js';
 import { decryptAccountPassword } from './accountCredentialService.js';
 import { extractRuntimeHealth, setAccountRuntimeHealth } from './accountHealthService.js';
 import { updateTodayIncomeSnapshot } from './todayIncomeRewardService.js';
 import type { BalanceInfo } from './platforms/base.js';
-import { withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
+import { resolveChannelProxyUrl, withAccountProxyOverride, withSiteProxyRequestInit, withSiteRecordProxyRequestInit } from './siteProxy.js';
 import {
   isManagedSub2ApiTokenDue,
   isSub2ApiPlatform,
@@ -219,7 +218,7 @@ async function tryAutoRelogin(account: any, site: any): Promise<string | null> {
   if (!password) return null;
 
   const loginResult = await withAccountProxyOverride(
-    resolveProxyUrlFromExtraConfig(account.extraConfig),
+    await resolveChannelProxyUrl(site, account.extraConfig),
     () => adapter.login(site.url, relogin.username, password),
   );
   if (!loginResult.success || !loginResult.accessToken) return null;
@@ -282,7 +281,7 @@ export async function refreshBalance(accountId: number) {
   let activeExtraConfig = account.extraConfig;
   let balanceInfo: BalanceInfo | null = null;
 
-  const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
+  const accountProxyUrl = await resolveChannelProxyUrl(site, account.extraConfig);
 
   if (isSub2ApiPlatform(site.platform)) {
     const managedAuth = getSub2ApiAuthFromExtraConfig(activeExtraConfig);

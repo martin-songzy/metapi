@@ -21,6 +21,24 @@ const discoverModelsForActiveProbeMock = vi.fn();
 const probeRuntimeModelMock = vi.fn();
 const rebuildTokenRoutesFromAvailabilityMock = vi.fn();
 const dbWriteMock = vi.fn();
+/**
+ * The two collaborators the ADDITIONAL-key discovery path reaches, stubbed because
+ * both make real network calls. `discoverProbeKeysForActiveProbe` itself is left
+ * real on purpose: it owns the key-set selection this feature is about, so mocking
+ * it would test the mock. Its primary-key leg still delegates to
+ * `discoverModelsForActiveProbeMock` above.
+ */
+const requireSiteApiBaseUrlMock = vi.fn();
+const fetchTokenAccessibleModelsMock = vi.fn();
+
+/**
+ * Stands in for `discoverProbeKeysForActiveProbe`. Assigned in `beforeAll` once the
+ * real db module has been imported — `vi.mock` factories are hoisted above the
+ * imports, so this cannot be built at module scope.
+ */
+let discoverProbeKeysForActiveProbeImpl: (...args: any[]) => Promise<unknown> = async () => {
+  throw new Error('discoverProbeKeysForActiveProbe stub was not installed');
+};
 
 /**
  * Keeps the real SQLite database but records every write entry point.
@@ -50,6 +68,23 @@ vi.mock('../db/index.js', async () => {
   };
 });
 
+/**
+ * BOTH discovery entry points are stubbed, and the per-key one is the load-bearing
+ * stub.
+ *
+ * The run service calls `discoverProbeKeysForActiveProbe`, which reaches
+ * `discoverModelsForActiveProbe` through a MODULE-LOCAL binding — replacing the
+ * export here does not intercept that call, so a stub on the single-key function
+ * alone leaves the real primary-key discovery running (adapter → network → a 15s
+ * timeout per site, and zero targets).
+ *
+ * `discoverProbeKeysForActiveProbe` is therefore stubbed at the boundary the run
+ * service actually crosses, and its body calls `discoverModelsForActiveProbeMock`
+ * once per site so the existing "discovery ran for N sites" assertions keep their
+ * meaning. Key SELECTION is `modelProbeDiscoveryService`'s own test's subject; what
+ * this file owns is the run loop's traversal over whatever key set it is handed, so
+ * the stub reads the real seeded `account_tokens` rows rather than inventing keys.
+ */
 vi.mock('./modelProbeDiscoveryService.js', async () => {
   const actual = await vi.importActual<typeof import('./modelProbeDiscoveryService.js')>(
     './modelProbeDiscoveryService.js',
@@ -57,12 +92,35 @@ vi.mock('./modelProbeDiscoveryService.js', async () => {
   return {
     ...actual,
     discoverModelsForActiveProbe: (...args: unknown[]) => discoverModelsForActiveProbeMock(...args),
+    discoverProbeKeysForActiveProbe: (...args: unknown[]) => (
+      discoverProbeKeysForActiveProbeImpl(...args)
+    ),
   };
 });
 
 vi.mock('./runtimeModelProbe.js', () => ({
   probeRuntimeModel: (...args: unknown[]) => probeRuntimeModelMock(...args),
 }));
+
+vi.mock('./siteApiEndpointService.js', async () => {
+  const actual = await vi.importActual<typeof import('./siteApiEndpointService.js')>(
+    './siteApiEndpointService.js',
+  );
+  return {
+    ...actual,
+    requireSiteApiBaseUrl: (...args: unknown[]) => requireSiteApiBaseUrlMock(...args),
+  };
+});
+
+vi.mock('./modelProbeTokenModels.js', async () => {
+  const actual = await vi.importActual<typeof import('./modelProbeTokenModels.js')>(
+    './modelProbeTokenModels.js',
+  );
+  return {
+    ...actual,
+    fetchTokenAccessibleModels: (...args: unknown[]) => fetchTokenAccessibleModelsMock(...args),
+  };
+});
 
 vi.mock('./modelService.js', async () => {
   const actual = await vi.importActual<typeof import('./modelService.js')>('./modelService.js');
@@ -118,6 +176,80 @@ describe('modelProbeRunService', () => {
     resetBackgroundTasks = backgroundTaskModule.__resetBackgroundTasksForTests;
     config = configModule.config;
     previousProxyRoutingEnabled = config.proxyRoutingEnabled;
+
+    // Installed here rather than at module scope because it needs the real db, and
+    // `vi.mock` factories are hoisted above every import.
+    //
+    // Mirrors the two rules from `selectProbeKeys` that the run loop depends on:
+    // the primary key is FIRST in the array (position, never id, is the
+    // discriminator), and a key that will not be probed carries a `skipReason` with
+    // a null credential. The site's `models` is the UNION across keys (Q8=A).
+    discoverProbeKeysForActiveProbeImpl = async (input: { siteId: number; timeoutMs: number }) => {
+      const primary = await discoverModelsForActiveProbeMock(input) as {
+        site: unknown; account: { id: number }; models: string[];
+        source?: string; notes?: string[]; liveFailure?: unknown;
+      };
+
+      const tokens = await db.select()
+        .from(schema.accountTokens)
+        .where(eq(schema.accountTokens.accountId, primary.account.id))
+        .all();
+
+      const keys: Array<Record<string, unknown>> = [{
+        tokenId: 0,
+        tokenName: '',
+        credential: CREDENTIAL,
+        credentialKind: 'api_token',
+        skipReason: null,
+        models: primary.models,
+        source: primary.source ?? 'live',
+        liveFailure: primary.liveFailure ?? null,
+        notes: primary.notes ?? [],
+      }];
+
+      for (const token of [...tokens].sort((left, right) => (left.id ?? 0) - (right.id ?? 0))) {
+        const skipReason = token.enabled === false
+          ? 'disabled'
+          : (token.valueStatus === 'ready' ? null : 'credential_unavailable');
+        if (skipReason !== null) {
+          keys.push({
+            tokenId: token.id,
+            tokenName: token.name || '',
+            credential: null,
+            credentialKind: 'managed_token',
+            skipReason,
+            models: [],
+            source: null,
+            liveFailure: null,
+            notes: [],
+          });
+          continue;
+        }
+        const models = await fetchTokenAccessibleModelsMock({
+          baseUrl: await requireSiteApiBaseUrlMock(primary.site),
+          credential: token.token,
+          timeoutMs: input.timeoutMs,
+        }) as string[] | null;
+        keys.push({
+          tokenId: token.id,
+          tokenName: token.name || '',
+          credential: token.token,
+          credentialKind: 'managed_token',
+          skipReason: null,
+          models: models || [],
+          source: 'live',
+          liveFailure: null,
+          notes: [],
+        });
+      }
+
+      return {
+        site: primary.site,
+        account: primary.account,
+        keys,
+        models: [...new Set(keys.flatMap((key) => key.models as string[]))],
+      };
+    };
     // Migration plus the service module graph exceeds the 10s default on a cold
     // Windows filesystem.
   }, 60_000);
@@ -127,12 +259,20 @@ describe('modelProbeRunService', () => {
     probeRuntimeModelMock.mockReset();
     rebuildTokenRoutesFromAvailabilityMock.mockReset();
     rebuildTokenRoutesFromAvailabilityMock.mockResolvedValue(undefined);
+    requireSiteApiBaseUrlMock.mockReset();
+    requireSiteApiBaseUrlMock.mockResolvedValue('https://api.probe.example.com');
+    fetchTokenAccessibleModelsMock.mockReset();
+    // Default: an additional key reaches nothing. Every test that cares about the
+    // key axis overrides this, and one that does not must not silently acquire
+    // extra paid targets from a leftover implementation.
+    fetchTokenAccessibleModelsMock.mockResolvedValue([]);
     resetBackgroundTasks();
     config.proxyRoutingEnabled = true;
 
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.modelProbeResults).run();
+    await db.delete(schema.modelProbeKeyResults).run();
     await db.delete(schema.modelAvailability).run();
     await db.delete(schema.siteDisabledModels).run();
     await db.delete(schema.accountTokens).run();
@@ -167,6 +307,28 @@ describe('modelProbeRunService', () => {
     }).returning().get();
 
     return { site, account };
+  }
+
+  /**
+   * Adds an `account_tokens` row — an "additional key" in the probe's vocabulary.
+   *
+   * `token` defaults to a value derived from the name so each key is distinguishable
+   * in `fetchTokenAccessibleModels` stubs: the run loop must pass each key's OWN
+   * credential, and a shared value would hide a bug that substitutes the primary.
+   */
+  async function seedToken(
+    accountId: number,
+    name: string,
+    overrides?: Partial<typeof schema.accountTokens.$inferInsert>,
+  ) {
+    return db.insert(schema.accountTokens).values({
+      accountId,
+      name,
+      token: `sk-${name}-value`,
+      enabled: true,
+      valueStatus: 'ready',
+      ...overrides,
+    }).returning().get();
   }
 
   type DiscoveryStub = {
@@ -1439,6 +1601,121 @@ describe('modelProbeRunService', () => {
       // Would have read 「另有 0 个未探测」.
       expect(terminal).not.toContain('另有 0 个');
       expect(terminal).toContain('全部目标都已探测完');
+    });
+  });
+
+  describe('per-key traversal', () => {
+    it('probes every key for every model and keeps the verdicts in separate rows', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      primeDiscovery([{ site, account, models: ['gpt-4o', 'gpt-5'] }]);
+      const extra = await seedToken(account.id, 'group-b', { token: 'sk-extra-key' });
+      // The additional key lists the same two models, so the target set is
+      // 2 keys x 2 models. Q13=A: no dedupe across keys.
+      fetchTokenAccessibleModelsMock.mockResolvedValue(['gpt-4o', 'gpt-5']);
+      // Verdicts differ BY KEY, which is the whole point of the feature: if the
+      // rows collided, one of these two answers would be lost.
+      probeRuntimeModelMock.mockImplementation(async (input: { tokenValue: string }) => (
+        probeResult(input.tokenValue === CREDENTIAL
+          ? { status: 'unsupported', latencyMs: 10 }
+          : { status: 'supported', latencyMs: 20 })
+      ));
+
+      await runProbe();
+
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(4);
+      const rows = await db.select().from(schema.modelProbeKeyResults).all();
+      expect(rows).toHaveLength(4);
+      expect(rows.map((row) => `${row.tokenId}:${row.modelName}:${row.status}`).sort()).toEqual([
+        `0:gpt-4o:unsupported`,
+        `0:gpt-5:unsupported`,
+        `${extra.id}:gpt-4o:supported`,
+        `${extra.id}:gpt-5:supported`,
+      ]);
+      // The primary key's verdict is the only one in the site-scoped table (Q15=B):
+      // the additional key carries no proxy traffic, so its answer must not stand
+      // in for the site.
+      const siteRows = await db.select().from(schema.modelProbeResults).all();
+      expect(siteRows).toHaveLength(2);
+      expect(siteRows.every((row) => row.status === 'unsupported')).toBe(true);
+      // Q7=C: availability follows the primary key alone. Taking the union would
+      // have marked both models available and then failed every proxied request,
+      // because forwarding uses the primary credential.
+      const availability = await db.select().from(schema.modelAvailability).all();
+      expect(availability.every((row) => row.available === false)).toBe(true);
+    });
+
+    it('keeps two accounts\' primary keys apart despite the shared sentinel id', async () => {
+      const alpha = await seedSite({ name: 'alpha' });
+      const beta = await seedSite({ name: 'beta' });
+      await setInterest(['^gpt-']);
+      primeDiscovery([
+        { site: alpha.site, account: alpha.account, models: ['gpt-4o'] },
+        { site: beta.site, account: beta.account, models: ['gpt-4o'] },
+      ]);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      await runProbe();
+
+      // Both rows carry token_id 0 for the same model name. Keyed on
+      // (token_id, model_name) alone — the version the design review corrected —
+      // the second upsert would have overwritten the first.
+      const rows = await db.select().from(schema.modelProbeKeyResults).all();
+      expect(rows).toHaveLength(2);
+      expect(rows.every((row) => row.tokenId === 0)).toBe(true);
+      expect(rows.map((row) => row.accountId).sort()).toEqual(
+        [alpha.account.id, beta.account.id].sort(),
+      );
+    });
+
+    it('records a listed-but-never-probed key without spending a request on it', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      primeDiscovery([{ site, account, models: ['gpt-4o'] }]);
+      const off = await seedToken(account.id, 'switched-off', { enabled: false });
+      const unusable = await seedToken(account.id, 'masked', {
+        valueStatus: 'masked_pending',
+      });
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      await runProbe();
+
+      // Only the primary key was probed: a skipped key costs nothing (Q20=A).
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(1);
+
+      const rows = await db.select().from(schema.modelProbeKeyResults).all();
+      const byToken = new Map(rows.map((row) => [row.tokenId, row]));
+      // Q21=B: both skipped keys still appear, each saying why. Omitting them would
+      // read as "this key reaches no models" — a claim no probe ever tested.
+      expect(byToken.get(off.id)?.status).toBe('disabled');
+      expect(byToken.get(unusable.id)?.status).toBe('unavailable');
+      expect(byToken.get(0)?.status).toBe('supported');
+      // A never-probed row carries no latency and no prompt: nothing was sent.
+      expect(byToken.get(off.id)?.latencyMs).toBeNull();
+      expect(byToken.get(off.id)?.promptUsed).toBeNull();
+      // ...and it must not move the summary counters, which report probes.
+      const summary = await service.previewActiveModelProbe();
+      expect(summary.totalModels).toBe(1);
+    });
+
+    it('clears the per-key table alongside the site-scoped one', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      primeDiscovery([{ site, account, models: ['gpt-4o'] }]);
+      await seedToken(account.id, 'group-b', { token: 'sk-extra-key' });
+      fetchTokenAccessibleModelsMock.mockResolvedValue(['gpt-4o']);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      await runProbe();
+      expect(await db.select().from(schema.modelProbeResults).all()).not.toHaveLength(0);
+      expect(await db.select().from(schema.modelProbeKeyResults).all()).not.toHaveLength(0);
+
+      await service.clearModelProbeResults();
+
+      // Both tables, or the results page would keep rendering per-key rows for
+      // verdicts the operator just cleared (Q18).
+      expect(await db.select().from(schema.modelProbeResults).all()).toHaveLength(0);
+      expect(await db.select().from(schema.modelProbeKeyResults).all()).toHaveLength(0);
     });
   });
 

@@ -36,9 +36,6 @@ describe('ensureSiteSchemaCompatibility', () => {
     {
       dialect: 'sqlite' as const,
       expectedSql: [
-        'ALTER TABLE sites ADD COLUMN proxy_url text;',
-        'ALTER TABLE sites ADD COLUMN use_system_proxy integer DEFAULT 0;',
-        'UPDATE sites SET use_system_proxy = 0 WHERE use_system_proxy IS NULL;',
         'ALTER TABLE sites ADD COLUMN custom_headers text;',
         'ALTER TABLE sites ADD COLUMN external_checkin_url text;',
         'ALTER TABLE sites ADD COLUMN global_weight real DEFAULT 1;',
@@ -55,9 +52,6 @@ describe('ensureSiteSchemaCompatibility', () => {
     {
       dialect: 'postgres' as const,
       expectedSql: [
-        'ALTER TABLE "sites" ADD COLUMN "proxy_url" TEXT',
-        'ALTER TABLE "sites" ADD COLUMN "use_system_proxy" BOOLEAN DEFAULT FALSE',
-        'UPDATE "sites" SET "use_system_proxy" = FALSE WHERE "use_system_proxy" IS NULL',
         'ALTER TABLE "sites" ADD COLUMN "custom_headers" TEXT',
         'ALTER TABLE "sites" ADD COLUMN "external_checkin_url" TEXT',
         'ALTER TABLE "sites" ADD COLUMN "global_weight" DOUBLE PRECISION DEFAULT 1',
@@ -74,9 +68,6 @@ describe('ensureSiteSchemaCompatibility', () => {
     {
       dialect: 'mysql' as const,
       expectedSql: [
-        'ALTER TABLE `sites` ADD COLUMN `proxy_url` TEXT NULL',
-        'ALTER TABLE `sites` ADD COLUMN `use_system_proxy` BOOLEAN DEFAULT FALSE',
-        'UPDATE `sites` SET `use_system_proxy` = FALSE WHERE `use_system_proxy` IS NULL',
         'ALTER TABLE `sites` ADD COLUMN `custom_headers` TEXT NULL',
         'ALTER TABLE `sites` ADD COLUMN `external_checkin_url` TEXT NULL',
         'ALTER TABLE `sites` ADD COLUMN `global_weight` DOUBLE DEFAULT 1',
@@ -90,7 +81,7 @@ describe('ensureSiteSchemaCompatibility', () => {
         'CREATE INDEX `site_disabled_models_site_id_idx` ON `site_disabled_models` (`site_id`)',
       ],
     },
-  ])('adds missing site proxy columns for $dialect', async ({ dialect, expectedSql }) => {
+  ])('adds missing site columns for $dialect', async ({ dialect, expectedSql }) => {
     const { inspector, executedSql } = createInspector(dialect);
 
     await ensureSiteSchemaCompatibility(inspector);

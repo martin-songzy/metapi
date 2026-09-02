@@ -9,7 +9,6 @@ import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageF
 import { mergeProxyUsage, parseProxyUsage, pullSseDataEvents } from '../../services/proxyUsageParser.js';
 import { ensureModelAllowedForDownstreamKey, getDownstreamRoutingPolicy, recordDownstreamCostUsage } from '../../services/downstreamRoutingPolicy.js';
 import { withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
-import { getProxyUrlFromExtraConfig } from '../../services/accountExtraConfig.js';
 import { composeProxyLogMessage } from '../../services/proxyLogMessage.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
@@ -92,7 +91,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
               },
               body: JSON.stringify(forwardBody),
               signal,
-            }, getProxyUrlFromExtraConfig(selected.account.extraConfig))),
+            }, selected.account)),
             {
               firstByteTimeoutMs,
               startedAtMs: attemptStartedAtMs,

@@ -22,6 +22,7 @@ const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() 
     deleteOAuthRouteUnit: vi.fn(),
     getAccountModels: vi.fn(),
     checkModels: vi.fn(),
+    getProxyPool: vi.fn(),
   },
   openMock: vi.fn(),
   focusMock: vi.fn(),
@@ -63,11 +64,13 @@ function findOauthSettingInput(root: WebTestRenderer, key: string) {
   ));
 }
 
-function findOauthImportSettingInput(root: WebTestRenderer, key: string) {
-  return root.root.find((node) => (
-    node.type === 'input'
-    && node.props['data-oauth-import-setting'] === key
-  ));
+/**
+ * The proxy picker's radios. Sites and connections choose from the pool now, so a
+ * test drives a radio by id instead of typing an address into a field that no
+ * longer exists.
+ */
+function findProxyRadio(root: WebTestRenderer, idPrefix: string, key: string) {
+  return root.root.find((node) => node.props?.['data-testid'] === `${idPrefix}-${key}`);
 }
 
 function findAllByClassName(root: WebTestRenderer, className: string) {
@@ -95,6 +98,11 @@ describe('OAuthManagement page', () => {
     vi.useFakeTimers();
     vi.clearAllMocks();
     Object.values(apiMock).forEach((mock) => mock.mockReset());
+    // Every drawer's picker reads the pool, so it is part of the page's baseline.
+    apiMock.getProxyPool.mockResolvedValue({
+      success: true,
+      entries: [{ id: 'px_hk', name: '香港', url: 'http://oauth-user:secret@127.0.0.1:7890' }],
+    });
     openMock.mockReturnValue({ focus: focusMock });
     confirmMock.mockReturnValue(true);
     promptMock.mockReturnValue('project-demo');
@@ -1289,9 +1297,6 @@ describe('OAuthManagement page', () => {
 
   it('supports selecting multiple json files, defaults import to system proxy, and sends one batch request', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
-      defaults: {
-        systemProxyConfigured: true,
-      },
       providers: [
         {
           provider: 'codex',
@@ -1406,7 +1411,9 @@ describe('OAuthManagement page', () => {
       expect(importText).toContain('workspace-b.json');
       expect(importText).toContain('已识别 2 份 JSON');
       expect(importText).toContain('结构有效');
-      expect(findOauthImportSettingInput(root, 'use-system-proxy').props.checked).toBe(true);
+      // Import defaults to 跟随站点 now: there is no global address for it to
+      // preselect, and inheriting is the only answer that is right for every file.
+      expect(findProxyRadio(root, 'oauth-import-proxy', 'inherit').props.checked).toBe(true);
 
       await clickButton(root, '添加');
 
@@ -1424,7 +1431,6 @@ describe('OAuthManagement page', () => {
             email: 'workspace-b@example.com',
           },
         ],
-        useSystemProxy: true,
       });
       await act(async () => {
         vi.advanceTimersByTime(300);
@@ -1622,16 +1628,8 @@ describe('OAuthManagement page', () => {
 
       await clickButton(root!, '新建 OAuth 连接');
 
-      const proxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
-
       await act(async () => {
-        proxyToggle.props.onChange({ target: { checked: true } });
-      });
-
-      const proxyInput = findOauthSettingInput(root!, 'proxy-url');
-
-      await act(async () => {
-        proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
+        findProxyRadio(root!, 'oauth-proxy', 'entry-px_hk').props.onChange({ target: { checked: true } });
       });
 
       await clickButton(root!, '连接 Codex');
@@ -1641,8 +1639,7 @@ describe('OAuthManagement page', () => {
 
       expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', {
         projectId: undefined,
-        proxyUrl: 'http://127.0.0.1:7890',
-        useSystemProxy: false,
+        proxyRef: 'px_hk',
       });
       expect(openMock).toHaveBeenCalledWith(
         'https://auth.openai.com/oauth/authorize?state=oauth-state-123',
@@ -1947,7 +1944,9 @@ describe('OAuthManagement page', () => {
         await flushMicrotasks();
       });
 
-      expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('gemini-cli', { projectId: undefined });
+      // 'inherit' is an explicit, meaningful value: the new connection follows its
+      // site rather than carrying a proxy of its own.
+      expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('gemini-cli', { projectId: undefined, proxyRef: 'inherit' });
       expect(openMock).toHaveBeenCalledWith(
         'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-state-123',
         'oauth-gemini-cli',
@@ -2032,7 +2031,8 @@ describe('OAuthManagement page', () => {
       });
 
       expect(promptMock).not.toHaveBeenCalled();
-      expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {});
+      // This connection stores no proxy of its own, so the rebind re-sends 跟随站点.
+      expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, { proxyRef: 'inherit' });
       expect(openMock).toHaveBeenCalledWith(
         'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-rebind-123',
         'oauth-gemini-cli',
@@ -2069,7 +2069,7 @@ describe('OAuthManagement page', () => {
           modelCount: 5,
           modelsPreview: ['gemini-2.5-pro'],
           status: 'healthy',
-          proxyUrl: 'http://127.0.0.1:7890',
+          proxyRef: 'px_hk',
         },
       ],
       total: 1,
@@ -2111,8 +2111,7 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {
-        proxyUrl: 'http://127.0.0.1:7890',
-        useSystemProxy: false,
+        proxyRef: 'px_hk',
       });
     } finally {
       root?.unmount();
@@ -2145,7 +2144,7 @@ describe('OAuthManagement page', () => {
           modelCount: 5,
           modelsPreview: ['gemini-2.5-pro'],
           status: 'healthy',
-          proxyUrl: 'http://127.0.0.1:7890',
+          proxyRef: 'px_hk',
         },
       ],
       total: 1,
@@ -2171,16 +2170,10 @@ describe('OAuthManagement page', () => {
       expect(collectText(root!.root)).toContain('已打开 OAuth 代理设置');
       expect(collectText(root!.root)).toContain('代理设置 · gemini@example.com');
 
-      const proxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
-      const proxyInput = findOauthSettingInput(root!, 'proxy-url');
-
-      expect(findOauthSettingInput(root!, 'use-system-proxy').props.checked).toBe(false);
-
-      expect(proxyToggle).toBeTruthy();
-      expect(proxyToggle.props.checked).toBe(true);
-      expect(proxyInput).toBeTruthy();
-      expect(proxyInput.props.disabled).toBe(false);
-      expect(proxyInput.props.value).toBe('http://127.0.0.1:7890');
+      // The drawer opens on the connection's STORED choice, not on a default.
+      expect(findProxyRadio(root!, 'oauth-proxy', 'entry-px_hk').props.checked).toBe(true);
+      expect(findProxyRadio(root!, 'oauth-proxy', 'inherit').props.checked).toBe(false);
+      expect(findProxyRadio(root!, 'oauth-proxy', 'direct').props.checked).toBe(false);
     } finally {
       root?.unmount();
     }
@@ -2212,7 +2205,7 @@ describe('OAuthManagement page', () => {
           modelCount: 5,
           modelsPreview: ['gemini-2.5-pro'],
           status: 'healthy',
-          proxyUrl: 'http://127.0.0.1:7890',
+          proxyRef: 'px_hk',
         },
       ],
       total: 1,
@@ -2235,18 +2228,17 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       await clickButton(root!, '代理设置');
-      const customProxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
+      const customProxyToggle = findProxyRadio(root!, 'oauth-proxy', 'direct');
 
       await act(async () => {
-        customProxyToggle.props.onChange({ target: { checked: false } });
+        customProxyToggle.props.onChange({ target: { checked: true } });
       });
 
       await clickButton(root!, '保存代理');
       await flushMicrotasks();
 
       expect(apiMock.updateOAuthConnectionProxy).toHaveBeenCalledWith(11, {
-        proxyUrl: null,
-        useSystemProxy: false,
+        proxyRef: null,
       });
       expect(apiMock.rebindOAuthConnection).not.toHaveBeenCalled();
       expect(openMock).not.toHaveBeenCalled();
@@ -2281,7 +2273,7 @@ describe('OAuthManagement page', () => {
           modelCount: 5,
           modelsPreview: ['gemini-2.5-pro'],
           status: 'healthy',
-          proxyUrl: 'http://127.0.0.1:7890',
+          proxyRef: 'px_hk',
         },
       ],
       total: 1,
@@ -2326,8 +2318,7 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {
-        proxyUrl: 'http://127.0.0.1:7890',
-        useSystemProxy: false,
+        proxyRef: 'px_hk',
       });
       expect(openMock).toHaveBeenCalledWith(
         'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-rebind-save-and-reauthorize',
@@ -2387,7 +2378,7 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       await clickButton(root!, '新建 OAuth 连接');
-      const systemProxyToggle = findOauthSettingInput(root!, 'use-system-proxy');
+      const systemProxyToggle = findProxyRadio(root!, 'oauth-proxy', 'direct');
 
       await act(async () => {
         systemProxyToggle.props.onChange({ target: { checked: true } });
@@ -2398,8 +2389,7 @@ describe('OAuthManagement page', () => {
 
       expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', {
         projectId: undefined,
-        proxyUrl: null,
-        useSystemProxy: true,
+        proxyRef: null,
       });
     } finally {
       root?.unmount();
@@ -2483,31 +2473,21 @@ describe('OAuthManagement page', () => {
 
       await clickButton(root, '新建 OAuth 连接');
 
-      const proxyToggle = findOauthSettingInput(root, 'use-custom-proxy');
-      const proxyInput = findOauthSettingInput(root, 'proxy-url');
-
       await act(async () => {
-        proxyToggle.props.onChange({ target: { checked: true } });
-      });
-      await act(async () => {
-        proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
+        findProxyRadio(root, 'oauth-proxy', 'entry-px_hk').props.onChange({ target: { checked: true } });
       });
       await clickButton(root, '连接 ChatGPT Codex');
       await flushMicrotasks();
 
       expect(apiMock.startOAuthProvider).toHaveBeenNthCalledWith(1, 'codex', {
         projectId: undefined,
-        proxyUrl: 'http://127.0.0.1:7890',
-        useSystemProxy: false,
+        proxyRef: 'px_hk',
       });
 
-      const resetProxyToggle = findOauthSettingInput(root, 'use-custom-proxy');
-      const resetProxyInput = findOauthSettingInput(root, 'proxy-url');
-      const resetSystemProxyToggle = findOauthSettingInput(root, 'use-system-proxy');
-
-      expect(resetProxyToggle.props.checked).toBe(false);
-      expect(resetProxyInput.props.value).toBe('');
-      expect(resetSystemProxyToggle.props.checked).toBe(false);
+      // Back to 跟随站点: a one-off choice for one authorization must not linger and
+      // silently apply to the next connection created from the same drawer.
+      expect(findProxyRadio(root, 'oauth-proxy', 'inherit').props.checked).toBe(true);
+      expect(findProxyRadio(root, 'oauth-proxy', 'entry-px_hk').props.checked).toBe(false);
     } finally {
       root?.unmount();
     }
@@ -2564,7 +2544,7 @@ describe('OAuthManagement page', () => {
             routeChannelCount: 1,
             lastModelSyncAt: '2026-03-17T08:00:00.000Z',
             lastModelSyncError: 'Codex 模型获取失败（HTTP 403: forbidden）',
-            proxyUrl: 'http://oauth-user:secret@127.0.0.1:7890',
+            proxyRef: 'px_hk',
           },
         ],
         total: 1,
@@ -2596,7 +2576,9 @@ describe('OAuthManagement page', () => {
         expect(text).toContain('deactivated_workspace');
         expect(text).not.toContain('当前 Codex OAuth 未暴露官方 5h 窗口');
         expect(text).not.toContain('当前 Codex OAuth 未暴露官方 7d 窗口');
-        expect(text).toContain('http://***@127.0.0.1:7890');
+        // The row shows the pool entry's NAME now, never its address, so a proxy
+        // credential cannot reach the screen from here at all.
+        expect(text).toContain('香港');
         expect(text).not.toContain('oauth-user:secret');
       });
 

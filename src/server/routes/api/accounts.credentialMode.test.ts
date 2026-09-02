@@ -486,7 +486,7 @@ describe('accounts credential mode', { timeout: 15_000 }, () => {
       status: 'active',
       unitCost: 25,
       extraConfig: JSON.stringify({
-        proxyUrl: 'http://127.0.0.1:7890',
+        proxyRef: 'px_hk',
       }),
     }).returning().get();
 
@@ -503,7 +503,7 @@ describe('accounts credential mode', { timeout: 15_000 }, () => {
         isPinned: false,
         refreshToken: null,
         tokenExpiresAt: null,
-        proxyUrl: null,
+        proxyRef: null,
       },
     });
 
@@ -518,7 +518,10 @@ describe('accounts credential mode', { timeout: 15_000 }, () => {
       apiToken: null,
       isPinned: false,
     });
-    expect(JSON.parse(updated?.extraConfig || '{}')).not.toHaveProperty('proxyUrl');
+    // `null` is STORED, not erased: it is the connection saying 不走代理, which has to
+    // survive as an answer that overrides the site rather than collapsing to "inherit".
+    const storedExtraConfig = JSON.parse(updated?.extraConfig || '{}');
+    expect(storedExtraConfig).toHaveProperty('proxyRef', null);
   });
 
   it('does not refresh models for pin-only account edits', async () => {

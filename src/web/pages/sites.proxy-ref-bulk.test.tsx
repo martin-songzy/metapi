@@ -8,6 +8,7 @@ const { apiMock } = vi.hoisted(() => ({
   apiMock: {
     getSites: vi.fn(),
     batchUpdateSites: vi.fn(),
+    getProxyPool: vi.fn(),
   },
 }));
 
@@ -22,7 +23,7 @@ async function flushMicrotasks() {
   });
 }
 
-describe('Sites system proxy bulk actions', () => {
+describe('Sites proxy bulk actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     apiMock.getSites.mockResolvedValue([
@@ -32,7 +33,7 @@ describe('Sites system proxy bulk actions', () => {
         url: 'https://a.example.com',
         platform: 'new-api',
         status: 'active',
-        useSystemProxy: false,
+        proxyRef: null,
       },
       {
         id: 2,
@@ -40,9 +41,13 @@ describe('Sites system proxy bulk actions', () => {
         url: 'https://b.example.com',
         platform: 'new-api',
         status: 'active',
-        useSystemProxy: false,
+        proxyRef: null,
       },
     ]);
+    apiMock.getProxyPool.mockResolvedValue({
+      success: true,
+      entries: [{ id: 'px_aaaaaaaaaaaa', name: '香港', url: 'socks5://10.0.0.1:1080' }],
+    });
     apiMock.batchUpdateSites.mockResolvedValue({
       success: true,
       successIds: [1, 2],
@@ -54,7 +59,7 @@ describe('Sites system proxy bulk actions', () => {
     vi.clearAllMocks();
   });
 
-  it('sends selected site ids to enable system proxy', async () => {
+  it('sends the selected site ids together with the chosen pool entry', async () => {
     let root!: WebTestRenderer;
     try {
       await act(async () => {
@@ -76,15 +81,53 @@ describe('Sites system proxy bulk actions', () => {
         checkboxB.props.onChange({ target: { checked: true } });
       });
 
-      const batchButton = root.root.find((node) => node.props['data-testid'] === 'sites-batch-enable-system-proxy');
+      const batchSelect = root.root.find((node) => node.props['data-testid'] === 'sites-batch-proxy-ref');
       await act(async () => {
-        batchButton.props.onClick();
+        batchSelect.props.onChange({ target: { value: 'px_aaaaaaaaaaaa' } });
       });
       await flushMicrotasks();
 
       expect(apiMock.batchUpdateSites).toHaveBeenCalledWith({
         ids: [1, 2],
-        action: 'enableSystemProxy',
+        action: 'setProxyRef',
+        proxyRef: 'px_aaaaaaaaaaaa',
+      });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  // 不走代理 is a value in the same list, not a separate button: the batch bar has one
+  // control, so there is no way to express "clear the proxy" that skips validation.
+  it('sends a null ref when the operator picks 不走代理', async () => {
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={['/sites']}>
+            <ToastProvider>
+              <Sites />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const checkboxA = root.root.find((node) => node.props['data-testid'] === 'site-select-1');
+      await act(async () => {
+        checkboxA.props.onChange({ target: { checked: true } });
+      });
+
+      const batchSelect = root.root.find((node) => node.props['data-testid'] === 'sites-batch-proxy-ref');
+      await act(async () => {
+        batchSelect.props.onChange({ target: { value: '__direct__' } });
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.batchUpdateSites).toHaveBeenCalledWith({
+        ids: [1],
+        action: 'setProxyRef',
+        proxyRef: null,
       });
     } finally {
       root?.unmount();

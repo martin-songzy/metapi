@@ -16,6 +16,7 @@ import {
   getModelProbeConfigLimits,
   listModelProbeSites,
   requestActiveModelProbeRun,
+  toModelProbeKeyResultResponse,
   toModelProbePreviewResponse,
   toModelProbeResultResponse,
   updateModelProbeSiteConfig,
@@ -24,6 +25,7 @@ import {
   buildModelProbeRunLimitMessage,
   clearModelProbeResults,
   listActiveModelProbeResults,
+  listModelProbeKeyResultsForModels,
   previewActiveModelProbe,
   requestActiveModelProbeCancellation,
 } from '../../services/modelProbeRunService.js';
@@ -207,9 +209,20 @@ export async function modelProbeRoutes(app: FastifyInstance) {
       ...(query.offset !== undefined ? { offset: query.offset } : {}),
     });
 
+    // Per-key verdicts ride along with the page rather than living behind their own
+    // endpoint: they are a detail OF these rows, so scoping them to exactly the
+    // site×model pairs being returned is both the correct bound and the one that
+    // cannot drift out of step with the page's filters and paging. It also spares
+    // the panel a second request per page.
+    const keyItems = await listModelProbeKeyResultsForModels({
+      siteIds: results.items.map((item) => item.siteId),
+      modelNames: results.items.map((item) => item.modelName),
+    });
+
     return {
       success: true,
       items: results.items.map(toModelProbeResultResponse),
+      keyItems: keyItems.map(toModelProbeKeyResultResponse),
       total: results.total,
       query,
     };

@@ -24,7 +24,10 @@ describe('backupService', () => {
     db = dbModule.db;
     schema = dbModule.schema;
     backupService = serviceModule;
-  });
+    // Migration plus this service's module graph exceeds the 10s default hook
+    // timeout on a cold Windows filesystem, the same reason
+    // `modelProbeRunService.test.ts` raises its own.
+  }, 60_000);
 
   beforeEach(async () => {
     await db.delete(schema.routeChannels).run();
@@ -33,6 +36,7 @@ describe('backupService', () => {
     await db.delete(schema.tokenModelAvailability).run();
     await db.delete(schema.modelAvailability).run();
     await db.delete(schema.modelProbeResults).run();
+    await db.delete(schema.modelProbeKeyResults).run();
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
     await db.delete(schema.siteAnnouncements).run();
@@ -58,8 +62,7 @@ describe('backupService', () => {
       url: 'https://roundtrip.example.com',
       platform: 'new-api',
       externalCheckinUrl: 'https://checkin.roundtrip.example.com',
-      proxyUrl: 'http://127.0.0.1:8080',
-      useSystemProxy: true,
+      proxyRef: 'px_hk',
       customHeaders: JSON.stringify({
         'cf-access-client-id': 'roundtrip-client',
       }),
@@ -273,9 +276,11 @@ describe('backupService', () => {
     const restoredModelAvailability = await db.select().from(schema.modelAvailability).all();
     const restoredDownstreamKeys = await db.select().from(schema.downstreamApiKeys).all();
 
-    expect(restoredSite?.proxyUrl).toBe('http://127.0.0.1:8080');
     expect(restoredSite?.externalCheckinUrl).toBe('https://checkin.roundtrip.example.com');
-    expect(restoredSite?.useSystemProxy).toBe(true);
+    // The site's proxy is a REFERENCE. Restoring it is what keeps a restored instance
+    // proxied; dropping the field would leave every site reading as 不走代理, which
+    // looks deliberate rather than lost.
+    expect(restoredSite?.proxyRef).toBe('px_hk');
     expect(restoredSite?.customHeaders).toBe('{"cf-access-client-id":"roundtrip-client"}');
     expect(restoredSite?.isPinned).toBe(true);
     expect(restoredSite?.sortOrder).toBe(9);
@@ -501,6 +506,277 @@ describe('backupService', () => {
       failureKind: 'model_absent',
       reason: 'model not found',
     });
+  });
+
+  it('roundtrips per-key probe verdicts including the primary-key sentinel', async () => {
+    const now = new Date().toISOString();
+    const site = await db.insert(schema.sites).values({
+      name: 'per-key-site',
+      url: 'https://per-key.example.com',
+      platform: 'new-api',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+
+    // Two accounts on purpose: their primary keys BOTH carry token_id 0, so this
+    // fixture is also the sentinel-collision case for the restore path. A conflict
+    // target of (token_id, model_name) would collapse them into one row.
+    const first = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'first',
+      accessToken: 'first-session',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+    const second = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'second',
+      accessToken: 'second-session',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    }).returning().get();
+
+    await db.insert(schema.modelProbeKeyResults).values([
+      {
+        siteId: site.id,
+        accountId: first.id,
+        tokenId: 0,
+        tokenName: '',
+        modelName: 'gpt-shared',
+        status: 'supported',
+        latencyMs: 210,
+        httpStatus: 200,
+        endpointUsed: '/v1/chat/completions',
+        promptUsed: 'ping',
+        userAgentUsed: 'codex_cli_rs/0.20.0',
+        checkedAt: now,
+      },
+      {
+        siteId: site.id,
+        accountId: second.id,
+        tokenId: 0,
+        tokenName: '',
+        modelName: 'gpt-shared',
+        status: 'unsupported',
+        latencyMs: null,
+        httpStatus: 404,
+        failureKind: 'model_absent',
+        reason: 'no channel for this group',
+        checkedAt: now,
+      },
+      // A listed-but-never-probed key: the status vocabulary this table adds.
+      {
+        siteId: site.id,
+        accountId: first.id,
+        tokenId: 42,
+        tokenName: 'group-b',
+        modelName: 'gpt-shared',
+        status: 'disabled',
+        latencyMs: null,
+        httpStatus: null,
+        reason: '该令牌已停用',
+        checkedAt: now,
+      },
+    ]).run();
+
+    const exported = await backupService.exportBackup('all') as any;
+    expect(exported.accounts.modelProbeKeyResults).toHaveLength(3);
+    // No surrogate id in the file: it is stripped on export so a restore cannot
+    // collide with an id the target database already assigned.
+    for (const row of exported.accounts.modelProbeKeyResults) {
+      expect(row).not.toHaveProperty('id');
+    }
+
+    const result = await backupService.importBackup(exported as Record<string, unknown>);
+    expect(result.sections.accounts).toBe(true);
+
+    const restored = await db.select().from(schema.modelProbeKeyResults)
+      .orderBy(asc(schema.modelProbeKeyResults.accountId), asc(schema.modelProbeKeyResults.tokenId))
+      .all();
+    expect(restored).toHaveLength(3);
+    expect(restored.map((row) => `${row.accountId}:${row.tokenId}:${row.status}`)).toEqual([
+      `${first.id}:0:supported`,
+      `${first.id}:42:disabled`,
+      `${second.id}:0:unsupported`,
+    ]);
+    expect(restored[0]).toMatchObject({
+      siteId: site.id,
+      modelName: 'gpt-shared',
+      latencyMs: 210,
+      httpStatus: 200,
+      endpointUsed: '/v1/chat/completions',
+      promptUsed: 'ping',
+      userAgentUsed: 'codex_cli_rs/0.20.0',
+      checkedAt: now,
+    });
+    // The denormalized name survives, which is the point of storing it: it keeps a
+    // restored file readable even where the key row itself did not come back.
+    expect(restored[1]?.tokenName).toBe('group-b');
+  });
+
+  /**
+   * The proxy pool lives in `settings`, which the PREFERENCES section owns, but
+   * `sites.proxy_ref` lives in the ACCOUNTS section. So the pool has to travel in
+   * both, or an accounts-only file ships references whose definitions were left
+   * behind — and since a dangling ref resolves to "no proxy", the restore would
+   * silently un-proxy every site with no error anywhere.
+   */
+  it('keeps proxy references resolvable through an accounts-only round-trip', async () => {
+    const now = new Date().toISOString();
+    const pool = [{ id: 'px_hk', name: '香港', url: 'socks5://127.0.0.1:7890' }];
+    await db.insert(schema.settings).values([
+      { key: 'proxy_pool_v1', value: JSON.stringify(pool) },
+    ]).run();
+    await db.insert(schema.sites).values({
+      name: 'proxied-site',
+      url: 'https://proxied.example.com',
+      platform: 'new-api',
+      proxyRef: 'px_hk',
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const exported = await backupService.exportBackup('accounts') as any;
+    // No preferences section at all in this export type — which is exactly why the
+    // pool must ride along inside `accounts`.
+    expect(exported.preferences).toBeUndefined();
+    expect(exported.accounts.proxyPool).toEqual(pool);
+    expect(exported.accounts.sites[0].proxyRef).toBe('px_hk');
+
+    // Simulate restoring into a different instance: both the pool and the site are
+    // gone before the import.
+    await db.delete(schema.sites).run();
+    await db.delete(schema.settings).run();
+
+    const result = await backupService.importBackup(exported as Record<string, unknown>);
+    expect(result.sections.accounts).toBe(true);
+
+    const site = await db.select().from(schema.sites).get();
+    expect(site?.proxyRef).toBe('px_hk');
+    const settingRows = await db.select().from(schema.settings).all();
+    const byKey = new Map(settingRows.map((row) => [row.key, row.value]));
+    // The reference resolves again, which is the whole point: a `proxyRef` restored
+    // without its pool would name an entry that no longer exists, and readers treat
+    // an unknown id as "no proxy" — so the site would silently go direct.
+    expect(JSON.parse(byKey.get('proxy_pool_v1') || 'null')).toEqual(pool);
+  });
+
+  it('carries the pool in a full export too, and restores it identically', async () => {
+    const now = new Date().toISOString();
+    const pool = [{ id: 'px_jp', name: '日本', url: 'http://10.0.0.5:8080' }];
+    await db.insert(schema.settings).values([
+      { key: 'proxy_pool_v1', value: JSON.stringify(pool) },
+    ]).run();
+    await db.insert(schema.sites).values({
+      name: 'full-site',
+      url: 'https://full.example.com',
+      platform: 'new-api',
+      proxyRef: 'px_jp',
+      createdAt: now,
+      updatedAt: now,
+    }).run();
+
+    const exported = await backupService.exportBackup('all') as any;
+    // Present in BOTH sections. The two copies are identical, so import order
+    // cannot change the outcome.
+    expect(exported.accounts.proxyPool).toEqual(pool);
+    expect(exported.preferences.settings.some((row: any) => row.key === 'proxy_pool_v1')).toBe(true);
+
+    await db.delete(schema.sites).run();
+    await db.delete(schema.settings).run();
+    await backupService.importBackup(exported as Record<string, unknown>);
+
+    const site = await db.select().from(schema.sites).get();
+    expect(site?.proxyRef).toBe('px_jp');
+    const settingRows = await db.select().from(schema.settings).all();
+    const stored = settingRows.find((row) => row.key === 'proxy_pool_v1');
+    expect(JSON.parse(stored?.value || 'null')).toEqual(pool);
+  });
+
+  it('leaves the current pool alone when restoring a file that predates it', async () => {
+    const now = new Date().toISOString();
+    const existing = [{ id: 'px_keep', name: '保留', url: 'http://10.0.0.9:1' }];
+    await db.insert(schema.settings).values({
+      key: 'proxy_pool_v1',
+      value: JSON.stringify(existing),
+    }).run();
+
+    // An older file: sites, but no `proxyPool` key anywhere.
+    const result = await backupService.importBackup({
+      version: '2.0',
+      timestamp: Date.now(),
+      type: 'accounts',
+      accounts: {
+        sites: [{
+          id: 901,
+          name: 'legacy-site',
+          url: 'https://legacy.example.com',
+          platform: 'new-api',
+          status: 'active',
+          createdAt: now,
+          updatedAt: now,
+        }],
+        accounts: [],
+        accountTokens: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+      },
+    } as Record<string, unknown>);
+
+    expect(result.sections.accounts).toBe(true);
+    const stored = await db.select().from(schema.settings)
+      .where(eq(schema.settings.key, 'proxy_pool_v1')).get();
+    // Wiping it would destroy proxies the operator still uses, for no reason: the
+    // file simply had nothing to say about them.
+    expect(JSON.parse(stored?.value || 'null')).toEqual(existing);
+  });
+
+  it('drops a per-key verdict whose account did not come back', async () => {
+    const now = new Date().toISOString();
+    // Asymmetry with the site-scoped table on purpose: there, a missing account is
+    // nulled and the verdict kept. Here `account_id` is NOT NULL and part of the
+    // unique key, so a row whose account is absent has nowhere to land.
+    const result = await backupService.importBackup({
+      version: '2.0',
+      timestamp: Date.now(),
+      type: 'accounts',
+      accounts: {
+        sites: [{
+          id: 811,
+          name: 'orphan-key-site',
+          url: 'https://orphan-key.example.com',
+          platform: 'new-api',
+          status: 'active',
+          createdAt: now,
+          updatedAt: now,
+        }],
+        accounts: [],
+        accountTokens: [],
+        tokenRoutes: [],
+        routeChannels: [],
+        routeGroupSources: [],
+        modelProbeResults: [],
+        modelProbeKeyResults: [
+          {
+            siteId: 811,
+            accountId: 9_999,
+            tokenId: 0,
+            tokenName: '',
+            modelName: 'gpt-orphan',
+            status: 'supported',
+            checkedAt: now,
+          },
+        ],
+      },
+    } as Record<string, unknown>);
+
+    // The section still succeeds: one unplaceable row must not fail the restore.
+    expect(result.sections.accounts).toBe(true);
+    expect(await db.select().from(schema.modelProbeKeyResults).all()).toEqual([]);
   });
 
   it('lets the last verdict win when a backup repeats a probe result key', async () => {

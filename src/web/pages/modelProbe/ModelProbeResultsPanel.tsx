@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   api,
+  type ModelProbeKeyResult,
+  type ModelProbeKeyResultStatus,
   type ModelProbeResult,
   type ModelProbeResultSortBy,
   type ModelProbeResultStatus,
@@ -35,13 +37,14 @@ const PLACEHOLDER = '—';
  * drifting out of order is the classic way a table like this breaks silently.
  */
 type ResultColumnKey =
-  | 'site' | 'model' | 'status' | 'latency' | 'balance'
+  | 'site' | 'model' | 'status' | 'keys' | 'latency' | 'balance'
   | 'endpoint' | 'checkedAt' | 'prompt' | 'userAgent' | 'reason';
 
 const COLUMN_LABELS: Record<ResultColumnKey, string> = {
   site: '站点 / 账号',
   model: '模型',
   status: '状态',
+  keys: 'Key 结果',
   latency: '响应',
   balance: '余额',
   endpoint: '接口',
@@ -52,11 +55,12 @@ const COLUMN_LABELS: Record<ResultColumnKey, string> = {
 };
 
 const COLUMN_ORDER: ResultColumnKey[] = [
-  'site', 'model', 'status', 'latency', 'balance',
+  'site', 'model', 'status', 'keys', 'latency', 'balance',
   'endpoint', 'checkedAt', 'prompt', 'userAgent', 'reason',
 ];
 
 const DEFAULT_COLUMN_WIDTHS: Partial<Record<ResultColumnKey, number>> = {
+  keys: 200,
   endpoint: 170,
   checkedAt: 150,
   prompt: 200,
@@ -152,6 +156,37 @@ const STATUS_COLORS: Record<ModelProbeResultStatus, string> = {
   skipped: 'var(--color-text-muted)',
 };
 
+/**
+ * Extends the site-scoped vocabulary with the two states only a per-key verdict
+ * has. 「已停用」 and 「密钥不可用」 are deliberately not merged into 「未确定」:
+ * that one means the probe ran and could not attribute the failure, while these
+ * two mean no request was ever sent for this key — a distinction that matters
+ * both diagnostically and because every probe costs the operator money.
+ */
+const KEY_STATUS_LABELS: Record<ModelProbeKeyResultStatus, string> = {
+  ...STATUS_LABELS,
+  disabled: '已停用',
+  unavailable: '密钥不可用',
+};
+
+/** Both never-probed states read as muted: neither is a verdict about the model. */
+const KEY_STATUS_COLORS: Record<ModelProbeKeyResultStatus, string> = {
+  ...STATUS_COLORS,
+  disabled: 'var(--color-text-muted)',
+  unavailable: 'var(--color-text-muted)',
+};
+
+/**
+ * The primary key has no stored name — it lives on the account row, not in
+ * `account_tokens` — so it is labelled here rather than rendered blank. An
+ * unnamed additional key falls back to its row id so two nameless keys stay
+ * tellable apart, matching how the task log describes them.
+ */
+function describeKeyLabel(entry: ModelProbeKeyResult): string {
+  if (entry.isPrimary) return '主 Key';
+  return entry.tokenName ? entry.tokenName : `Key #${entry.tokenId}`;
+}
+
 const SORT_LABELS: Record<ModelProbeResultSortBy, string> = {
   latency: '响应速度',
   balance: '站点余额',
@@ -206,6 +241,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     offset: 0,
   });
   const [items, setItems] = useState<ModelProbeResult[]>([]);
+  const [keyItems, setKeyItems] = useState<ModelProbeKeyResult[]>([]);
   const [total, setTotal] = useState(0);
   const [appliedQuery, setAppliedQuery] = useState<ModelProbeResultsQuery | null>(null);
   const [loading, setLoading] = useState(true);
@@ -214,6 +250,18 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
   const [layout, setLayout] = useState<ColumnLayout>(() => readColumnLayout());
   const [columnMenuOpen, setColumnMenuOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  /**
+   * Client-side, unlike every other filter here, and deliberately so: the marker
+   * it filters on is not a stored column but a comparison BETWEEN the per-key rows
+   * of one site×model pair, so the server would have to self-join the key table to
+   * express it. The comparison is already computed below for rendering, and the
+   * page is at most `PAGE_SIZE` rows, so filtering here costs nothing and cannot
+   * disagree with the badge the operator is looking at.
+   *
+   * The cost is honest and stated in the label: it narrows THIS page, not the whole
+   * result set, so a page of 50 showing 3 matches does not mean the sweep found 3.
+   */
+  const [backupOnly, setBackupOnly] = useState(false);
 
   /**
    * 清空结果 is all-or-nothing across every site and model — the server offers no
@@ -281,6 +329,10 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
         const response = await api.getModelProbeResults(query);
         if (cancelled) return;
         setItems(Array.isArray(response.items) ? response.items : []);
+        // Absent on an older server, which is not the same as "one key": an empty
+        // array means no key breakdown is available, and the Key column says so
+        // rather than implying the primary key was the only one probed.
+        setKeyItems(Array.isArray(response.keyItems) ? response.keyItems : []);
         setTotal(Number.isFinite(response.total) ? response.total : 0);
         setAppliedQuery(response.query ?? {});
         setLoadError('');
@@ -288,6 +340,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
         if (cancelled) return;
         const message = error?.message || '加载探测结果失败';
         setItems([]);
+        setKeyItems([]);
         setTotal(0);
         setAppliedQuery(null);
         setLoadError(message);
@@ -339,6 +392,73 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     for (const site of sites) map.set(site.id, site.name);
     return map;
   }, [sites]);
+
+  /**
+   * Per-key verdicts grouped by the site×model row they belong to.
+   *
+   * Keyed on `siteId + modelName` because that is the identity of a row in
+   * `items` — the per-key rows arrive scoped to exactly the page being shown, so
+   * a row with no entry here genuinely has no key breakdown (an older server, or
+   * a verdict stored before this feature existed) rather than one key.
+   */
+  const keyResultsByRow = useMemo(() => {
+    const map = new Map<string, ModelProbeKeyResult[]>();
+    for (const entry of keyItems) {
+      const rowKey = `${entry.siteId}::${entry.modelName}`;
+      const bucket = map.get(rowKey);
+      if (bucket) bucket.push(entry);
+      else map.set(rowKey, [entry]);
+    }
+    return map;
+  }, [keyItems]);
+
+  const keyResultsFor = (row: ModelProbeResult): ModelProbeKeyResult[] =>
+    keyResultsByRow.get(`${row.siteId}::${row.modelName}`) ?? [];
+
+  /**
+   * True when the primary key could not serve this model but some additional key
+   * could.
+   *
+   * This is the case the whole per-key axis exists to surface, and it is the one
+   * an operator cannot find by eye: it only shows up by comparing same-named rows
+   * across keys, hundreds of rows deep. Note what it does NOT imply — the router
+   * still forwards with the primary key, so a model marked here is reachable only
+   * if the operator promotes that key. It is a finding, not a fix.
+   *
+   * Requires a real primary verdict to be present: with no primary row at all
+   * there is nothing to contrast against, and calling that 「仅备用 Key 可用」
+   * would claim a comparison that never happened.
+   */
+  const isBackupOnly = (row: ModelProbeResult): boolean => {
+    const keys = keyResultsFor(row);
+    const primary = keys.find((entry) => entry.isPrimary);
+    if (!primary || primary.status === 'supported') return false;
+    return keys.some((entry) => !entry.isPrimary && entry.status === 'supported');
+  };
+
+  /**
+   * Filtered client-side, unlike every other filter here, which the server
+   * applies.
+   *
+   * It has to be: the marker is derived by comparing a row's key verdicts against
+   * each other, and the server returns key rows scoped to the page it already
+   * chose. Pushing this into the query would mean a second, differently-bounded
+   * pass over both tables.
+   *
+   * The honest consequence, stated in the UI: this narrows the CURRENT page, so
+   * the count shown is "n of this page", not a total across the result set.
+   */
+  const visibleItems = useMemo(
+    () => (backupOnly ? items.filter((row) => isBackupOnly(row)) : items),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [backupOnly, items, keyResultsByRow],
+  );
+
+  const backupOnlyCount = useMemo(
+    () => items.filter((row) => isBackupOnly(row)).length,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [items, keyResultsByRow],
+  );
 
   const appliedText = useMemo(() => {
     const applied = appliedQuery;
@@ -398,6 +518,26 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
       >
         查询
       </button>
+      {/*
+        Not a ModernSelect alongside the others: it is not a server-side filter and
+        grouping it with those would imply it narrows the whole result set. The
+        label says 本页 for the same reason.
+      */}
+      <label
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          fontSize: 12, color: 'var(--color-text-muted)', cursor: 'pointer',
+        }}
+        title="主 Key 不可用、但该站点下某个备用 Key 可用的模型。仅筛选当前页。"
+      >
+        <input
+          type="checkbox"
+          data-testid="model-probe-results-backup-only"
+          checked={backupOnly}
+          onChange={(event) => setBackupOnly(event.target.checked)}
+        />
+        仅备用 Key 可用（本页 {backupOnlyCount}）
+      </label>
     </div>
   );
 
@@ -472,9 +612,48 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
   const canPrev = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
 
+  /**
+   * One line per key that was listed for this site×model.
+   *
+   * Renders EVERY key, including the ones that were never probed: 「已停用」 and
+   * 「密钥不可用」 are distinct facts from 「未确定」, and an operator paying per key
+   * needs to see that a key contributed nothing because it was switched off, not
+   * because the model failed for it.
+   *
+   * The primary key is labelled rather than left to its empty stored `tokenName`
+   * — it lives on the account row and has no `account_tokens` name — and it comes
+   * first because the server already ordered on the sentinel.
+   */
+  const renderKeyResults = (row: ModelProbeResult): React.ReactNode => {
+    const keys = keyResultsFor(row);
+    if (keys.length === 0) return PLACEHOLDER;
+
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {keys.map((entry) => (
+          <div
+            key={entry.id}
+            data-testid={`model-probe-key-result-${entry.id}`}
+            style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12 }}
+          >
+            <span style={{ color: 'var(--color-text-muted)', flex: '0 0 auto' }}>
+              {describeKeyLabel(entry)}
+            </span>
+            <span style={{ color: KEY_STATUS_COLORS[entry.status], fontWeight: 600 }}>
+              {KEY_STATUS_LABELS[entry.status]}
+            </span>
+            {entry.latencyMs !== null && (
+              <span style={{ color: 'var(--color-text-muted)' }}>{formatLatency(entry.latencyMs)}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const renderMobileRows = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      {items.map((row) => (
+      {visibleItems.map((row) => (
         <MobileCard
           key={row.id}
           className={`model-probe-result-row-${row.id}`}
@@ -488,6 +667,8 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
             <MobileField label="响应" value={formatLatency(row.latencyMs)} />
             <MobileField label="接口" value={formatText(row.endpointUsed)} stacked />
             <MobileField label="探测时间" value={formatCheckedAt(row.checkedAt)} />
+            {/* Cards have no columns, so the key breakdown is always shown here. */}
+            <MobileField label="Key 结果" value={renderKeyResults(row)} stacked />
             <MobileField label="原因" value={renderReason(row)} stacked />
           </div>
         </MobileCard>
@@ -508,6 +689,8 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
         return <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }}>{row.modelName}</span>;
       case 'status':
         return renderStatus(row.status);
+      case 'keys':
+        return renderKeyResults(row);
       case 'latency':
         return formatLatency(row.latencyMs);
       case 'balance':
@@ -659,7 +842,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
           </tr>
         </thead>
         <tbody>
-          {items.map((row) => (
+          {visibleItems.map((row) => (
             <tr key={row.id} data-testid={`model-probe-result-row-${row.id}`}>
               {visibleColumns.map((key) => (
                 <td key={key} data-testid={`model-probe-result-cell-${key}-${row.id}`}>

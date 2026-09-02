@@ -1,5 +1,5 @@
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
-import { resolveChannelProxyUrl, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
+import { resolveChannelProxyUrl, withResolvedProxyRequestInit, withSiteRecordProxyRequestInit } from '../../services/siteProxy.js';
 import type { SiteProxyConfigLike } from '../../services/siteProxy.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { resolveProxyUsageWithSelfLogFallback } from '../../services/proxyUsageFallbackService.js';
@@ -74,8 +74,7 @@ type SurfaceSuccessSelectedChannel = SurfaceSelectedChannel & {
     url: string;
     platform: string;
     apiKey?: string | null;
-    useSystemProxy?: boolean | null;
-    proxyUrl?: string | null;
+    proxyRef?: string | null;
     name?: string | null;
   };
   tokenValue: string;
@@ -250,12 +249,20 @@ export async function writeSurfaceProxyLog(input: {
   }
 }
 
-export function createSurfaceDispatchRequest(input: {
+/**
+ * Async because resolving the channel's proxy now needs the proxy pool loaded.
+ *
+ * The proxy is resolved ONCE here and closed over, not per dispatch: every retry
+ * and endpoint fallback for this channel must go out through the same proxy the
+ * routing decision was made against, and re-resolving mid-flight would let a
+ * concurrent settings edit split one logical attempt across two egress paths.
+ */
+export async function createSurfaceDispatchRequest(input: {
   site: SiteProxyConfigLike & { url: string };
   accountExtraConfig?: string | null;
   siteUrl?: string;
 }) {
-  const channelProxyUrl = resolveChannelProxyUrl(input.site, input.accountExtraConfig);
+  const channelProxyUrl = await resolveChannelProxyUrl(input.site, input.accountExtraConfig);
   return (
     request: BuiltEndpointRequest,
     targetUrl?: string,
@@ -266,11 +273,11 @@ export function createSurfaceDispatchRequest(input: {
       targetUrl,
       signal,
       request,
-      buildInit: (_requestUrl, requestForFetch) => withSiteRecordProxyRequestInit(input.site, {
+      buildInit: (_requestUrl, requestForFetch) => withResolvedProxyRequestInit(input.site, channelProxyUrl, {
         method: 'POST',
         headers: requestForFetch.headers,
         body: JSON.stringify(requestForFetch.body),
-      }, channelProxyUrl),
+      }),
     })
   );
 }

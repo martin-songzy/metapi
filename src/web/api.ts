@@ -337,7 +337,28 @@ export type ProxyTestJobResponse = {
 };
 
 export type SystemProxyTestRequest = {
-  proxyUrl?: string;
+  proxyUrl: string;
+};
+
+/**
+ * One entry in the proxy pool — the only place a proxy address is entered. Sites
+ * and connections carry a reference to `id`, never an address of their own.
+ */
+export type ProxyPoolEntry = {
+  id: string;
+  name: string;
+  url: string;
+};
+
+export type ProxyPoolResponse = {
+  success: true;
+  entries: ProxyPoolEntry[];
+};
+
+export type ProxyPoolReferrersResponse = {
+  success: true;
+  siteNames: string[];
+  accountLabels: string[];
 };
 
 export type SystemProxyTestResponse = {
@@ -361,7 +382,6 @@ export type RuntimeRoutingWeightsPayload = {
 
 export type RuntimeSettingsPayload = {
   proxyToken?: string;
-  systemProxyUrl?: string;
   payloadRules?: Record<string, unknown> | null;
   modelAvailabilityProbeEnabled?: boolean;
   codexUpstreamWebsocketEnabled?: boolean;
@@ -396,7 +416,8 @@ export type RuntimeSettingsPayload = {
   telegramApiBaseUrl?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
-  telegramUseSystemProxy?: boolean;
+  /** Proxy pool id, or '' for direct. */
+  telegramProxyRef?: string | null;
   telegramMessageThreadId?: string;
   smtpEnabled?: boolean;
   smtpHost?: string;
@@ -604,9 +625,6 @@ export type OAuthProviderInfo = {
 
 export type OAuthProvidersResponse = {
   providers: OAuthProviderInfo[];
-  defaults?: {
-    systemProxyConfigured?: boolean;
-  };
 };
 
 export type OAuthRouteUnitStrategy = "round_robin" | "stick_until_unavailable";
@@ -695,8 +713,8 @@ export type OAuthConnectionInfo = {
   routeChannelCount?: number;
   lastModelSyncAt?: string | null;
   lastModelSyncError?: string | null;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  /** Wire value: `null` = direct, `'inherit'` = follow the site, id = that pool entry. */
+  proxyRef?: string | null;
   routeUnit?: OAuthRouteUnitSummary | null;
   routeParticipation?: OAuthRouteParticipation | null;
   site?: { id: number; name: string; url: string; platform: string } | null;
@@ -963,9 +981,54 @@ export type ModelProbeResultsQuery = {
   offset?: number;
 };
 
+/**
+ * One key's verdict for one model.
+ *
+ * Branch on `isPrimary`, not on `tokenId === 0`: the sentinel is shared across
+ * accounts, and the server already resolved the distinction.
+ *
+ * `tokenName` is the label stored with the verdict, so a key renamed or deleted
+ * since the sweep still renders as the key it was. It is empty for the primary
+ * key, which has no `account_tokens` row to carry a name.
+ */
+/**
+ * A per-key verdict carries two states a site-scoped one cannot: a key that was
+ * listed but deliberately never probed. They are NOT folded into `inconclusive`
+ * — "we asked and could not tell" and "we never asked" are different facts, and
+ * the operator is billed per key.
+ */
+export type ModelProbeKeyResultStatus =
+  | ModelProbeResultStatus
+  | "disabled"
+  | "unavailable";
+
+export type ModelProbeKeyResult = {
+  id: number;
+  siteId: number;
+  accountId: number;
+  tokenId: number;
+  tokenName: string;
+  isPrimary: boolean;
+  modelName: string;
+  status: ModelProbeKeyResultStatus;
+  latencyMs: number | null;
+  httpStatus: number | null;
+  failureKind: string | null;
+  reason: string | null;
+  endpointUsed: string | null;
+  checkedAt: string | null;
+};
+
 export type ModelProbeResultsResponse = {
   success: boolean;
   items: ModelProbeResult[];
+  /**
+   * Per-key verdicts for exactly the site×model pairs in `items` — a detail of
+   * those rows, not an independently filtered list. Absent from an older server,
+   * hence optional; the panel treats missing as "no key breakdown available"
+   * rather than as "one key".
+   */
+  keyItems?: ModelProbeKeyResult[];
   total: number;
   /** Echo of the filters the server actually applied. */
   query: ModelProbeResultsQuery;
@@ -1099,7 +1162,7 @@ export const api = {
     accessToken: string;
     platformUserId?: number;
     credentialMode?: "auto" | "session" | "apikey";
-    proxyUrl?: string | null;
+    proxyRef?: string | null;
   }) =>
     request("/api/accounts/verify-token", {
       method: "POST",
@@ -1409,8 +1472,7 @@ export const api = {
     data?: {
       accountId?: number;
       projectId?: string;
-      proxyUrl?: string | null;
-      useSystemProxy?: boolean;
+      proxyRef?: string | null;
     },
   ) =>
     request(`/api/oauth/providers/${encodeURIComponent(provider)}/start`, {
@@ -1445,7 +1507,7 @@ export const api = {
     }) as Promise<OAuthQuotaBatchRefreshResponse>,
   updateOAuthConnectionProxy: (
     accountId: number,
-    data: { proxyUrl?: string | null; useSystemProxy?: boolean },
+    data: { proxyRef?: string | null },
   ) =>
     request(`/api/oauth/connections/${accountId}/proxy`, {
       method: "PATCH",
@@ -1453,7 +1515,7 @@ export const api = {
     }) as Promise<{ success: true }>,
   rebindOAuthConnection: (
     accountId: number,
-    data?: { proxyUrl?: string | null; useSystemProxy?: boolean },
+    data?: { proxyRef?: string | null },
   ) =>
     request(`/api/oauth/connections/${accountId}/rebind`, {
       method: "POST",
@@ -1672,6 +1734,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify(data),
       timeoutMs: 20_000,
+    }),
+  getProxyPool: (): Promise<ProxyPoolResponse> =>
+    request("/api/settings/proxy-pool"),
+  createProxyPoolEntry: (data: { name?: string; url: string }) =>
+    request("/api/settings/proxy-pool", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateProxyPoolEntry: (id: string, data: { name?: string; url?: string }) =>
+    request(`/api/settings/proxy-pool/${encodeURIComponent(id)}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  // Read-only lookup behind the delete confirmation, so it can name what will be
+  // reset. Deletion is not gated on it.
+  getProxyPoolReferrers: (id: string): Promise<ProxyPoolReferrersResponse> =>
+    request(`/api/settings/proxy-pool/${encodeURIComponent(id)}/referrers`),
+  deleteProxyPoolEntry: (id: string) =>
+    request(`/api/settings/proxy-pool/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     }),
   getRuntimeDatabaseConfig: () => request("/api/settings/database/runtime"),
   updateRuntimeDatabaseConfig: (data: {

@@ -14,6 +14,7 @@ const { apiMock } = vi.hoisted(() => ({
     addAccount: vi.fn(),
     addAccountAvailableModels: vi.fn(),
     verifyToken: vi.fn(),
+    getProxyPool: vi.fn(),
   },
 }));
 
@@ -40,6 +41,10 @@ describe('Accounts CodingPlan initialization', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     installAccountsSnapshotCompat(apiMock);
+    apiMock.getProxyPool.mockResolvedValue({
+      success: true,
+      entries: [{ id: 'px_hk', name: '香港', url: 'http://127.0.0.1:7890' }],
+    });
     apiMock.getAccounts.mockResolvedValue([]);
     apiMock.getSites.mockResolvedValue([
       { id: 10, name: 'Aliyun CodingPlan', url: 'https://coding.dashscope.aliyuncs.com/v1', platform: 'openai', status: 'active' },
@@ -205,9 +210,8 @@ describe('Accounts CodingPlan initialization', () => {
         node.type === 'textarea'
         && node.props.placeholder === '粘贴 API Key'
       ));
-      const proxyInput = root.root.find((node) => (
-        node.type === 'input'
-        && node.props.placeholder === '代理地址（可选，如 http://127.0.0.1:7890）'
+      const proxyRadio = root.root.find((node) => (
+        node.props?.['data-testid'] === 'account-apikey-proxy-entry-px_hk'
       ));
       const verifyButton = root.root.find((node) => (
         node.type === 'button'
@@ -222,7 +226,7 @@ describe('Accounts CodingPlan initialization', () => {
 
       await act(async () => {
         tokenInput.props.onChange({ target: { value: 'sk-proxy-demo' } });
-        proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
+        proxyRadio.props.onChange({ target: { checked: true } });
       });
 
       await act(async () => {
@@ -234,7 +238,7 @@ describe('Accounts CodingPlan initialization', () => {
         siteId: 10,
         accessToken: 'sk-proxy-demo',
         credentialMode: 'apikey',
-        proxyUrl: 'http://127.0.0.1:7890',
+        proxyRef: 'px_hk',
       }));
 
       await act(async () => {
@@ -246,10 +250,11 @@ describe('Accounts CodingPlan initialization', () => {
         siteId: 10,
         accessToken: 'sk-proxy-demo',
         credentialMode: 'apikey',
-        proxyUrl: 'http://127.0.0.1:7890',
+        proxyRef: 'px_hk',
       }));
     } finally {
       root?.unmount();
     }
   });
 });
+

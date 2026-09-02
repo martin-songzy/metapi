@@ -33,7 +33,17 @@ import {
   parseRuntimeSettingsPayload,
   parseBackupWebdavConfigPayload,
   parseBackupWebdavExportPayload,
+  parseProxyPoolCreatePayload,
+  parseProxyPoolUpdatePayload,
 } from '../../contracts/settingsRoutePayloads.js';
+import {
+  addProxyPoolEntry,
+  deleteProxyPoolEntry,
+  listProxyPoolReferrers,
+  loadProxyPool,
+  ProxyPoolError,
+  updateProxyPoolEntry,
+} from '../../services/proxyPoolService.js';
 import { formatUtcSqlDateTime, getResolvedTimeZone } from '../../services/localTimeService.js';
 import { extractClientIp, findInvalidIpAllowlistEntries, isIpAllowed } from '../../middleware/auth.js';
 import { invalidateSiteProxyCache, normalizeSiteProxyUrl, withExplicitProxyRequestInit } from '../../services/siteProxy.js';
@@ -50,7 +60,6 @@ type RoutingWeights = typeof config.routingWeights;
 
 interface RuntimeSettingsBody {
   proxyToken?: string;
-  systemProxyUrl?: string;
   payloadRules?: unknown;
   modelAvailabilityProbeEnabled?: boolean;
   codexUpstreamWebsocketEnabled?: boolean;
@@ -85,7 +94,7 @@ interface RuntimeSettingsBody {
   telegramApiBaseUrl?: string;
   telegramBotToken?: string;
   telegramChatId?: string;
-  telegramUseSystemProxy?: boolean;
+  telegramProxyRef?: string | null;
   telegramMessageThreadId?: string;
   smtpEnabled?: boolean;
   smtpHost?: string;
@@ -408,11 +417,6 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.proxyToken = nextToken;
       return;
     }
-    case 'system_proxy_url': {
-      if (typeof value !== 'string') return;
-      config.systemProxyUrl = normalizeSiteProxyUrl(value) || '';
-      return;
-    }
     case 'model_availability_probe_enabled': {
       if (typeof value !== 'boolean') return;
       config.modelAvailabilityProbeEnabled = value;
@@ -614,8 +618,9 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.telegramChatId = value.trim();
       return;
     }
-    case 'telegram_use_system_proxy': {
-      config.telegramUseSystemProxy = !!value;
+    case 'telegram_proxy_ref': {
+      if (typeof value !== 'string') return;
+      config.telegramProxyRef = value.trim();
       return;
     }
     case 'telegram_message_thread_id': {
@@ -750,7 +755,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     telegramApiBaseUrl: config.telegramApiBaseUrl,
     telegramBotTokenMasked: maskSecret(config.telegramBotToken),
     telegramChatId: config.telegramChatId,
-    telegramUseSystemProxy: config.telegramUseSystemProxy,
+    telegramProxyRef: config.telegramProxyRef,
     telegramMessageThreadId: config.telegramMessageThreadId,
     smtpEnabled: config.smtpEnabled,
     smtpHost: config.smtpHost,
@@ -764,7 +769,6 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     adminIpAllowlist: config.adminIpAllowlist,
     currentAdminIp,
     serverTimeZone: getResolvedTimeZone(),
-    systemProxyUrl: config.systemProxyUrl,
     payloadRules: config.payloadRules,
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
@@ -852,6 +856,9 @@ export async function settingsRoutes(app: FastifyInstance) {
     return { brands: getAllBrandNames() };
   });
 
+  // Kept at its original path so the proxy pool panel's per-entry "test" button and
+  // any existing client keep working; there is no global address to default to any
+  // more, so the URL is now always supplied by the caller.
   app.post<{ Body: unknown }>('/api/settings/system-proxy/test', async (request, reply) => {
     const parsedBody = parseSystemProxyTestPayload(request.body);
     if (!parsedBody.success) {
@@ -861,9 +868,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       });
     }
 
-    const rawProxyUrl = parsedBody.data.proxyUrl === undefined
-      ? config.systemProxyUrl
-      : String(parsedBody.data.proxyUrl || '').trim();
+    const rawProxyUrl = String(parsedBody.data.proxyUrl || '').trim();
     const normalizedProxyUrl = rawProxyUrl
       ? normalizeSiteProxyUrl(rawProxyUrl)
       : '';
@@ -871,14 +876,14 @@ export async function settingsRoutes(app: FastifyInstance) {
     if (!rawProxyUrl) {
       return reply.code(400).send({
         success: false,
-        message: '请先填写系统代理地址',
+        message: '请先填写代理地址',
       });
     }
 
     if (!normalizedProxyUrl) {
       return reply.code(400).send({
         success: false,
-        message: '系统代理地址无效，请填写合法的 http(s)/socks 代理 URL',
+        message: '代理地址无效，请填写合法的 http(s)/socks 代理 URL',
       });
     }
 
@@ -892,8 +897,84 @@ export async function settingsRoutes(app: FastifyInstance) {
     } catch (error: any) {
       return reply.code(502).send({
         success: false,
-        message: error?.message || '系统代理测试失败',
+        message: error?.message || '代理测试失败',
       });
+    }
+  });
+
+  /**
+   * The proxy pool: the single place a proxy ADDRESS is entered. Sites and
+   * connections only ever select from this list, which is why none of their own
+   * endpoints accept an address any more.
+   */
+  app.get('/api/settings/proxy-pool', async () => ({
+    success: true,
+    entries: await loadProxyPool(),
+  }));
+
+  app.post<{ Body: unknown }>('/api/settings/proxy-pool', async (request, reply) => {
+    const parsed = parseProxyPoolCreatePayload(request.body);
+    if (!parsed.success) return reply.code(400).send({ success: false, message: parsed.error });
+
+    try {
+      return reply.code(201).send({
+        success: true,
+        entry: await addProxyPoolEntry({ name: parsed.data.name, url: parsed.data.url }),
+      });
+    } catch (error) {
+      // A bad address or a full list is the operator's to fix, so 400 rather than
+      // letting it surface as a 500.
+      if (error instanceof ProxyPoolError) {
+        return reply.code(400).send({ success: false, code: error.code, message: error.message });
+      }
+      throw error;
+    }
+  });
+
+  app.put<{ Params: { id: string }; Body: unknown }>('/api/settings/proxy-pool/:id', async (request, reply) => {
+    const parsed = parseProxyPoolUpdatePayload(request.body);
+    if (!parsed.success) return reply.code(400).send({ success: false, message: parsed.error });
+
+    try {
+      // Edits keep the id, so every site already pointing here follows the new
+      // address without being touched.
+      const entry = await updateProxyPoolEntry(String(request.params.id || ''), {
+        ...(parsed.data.name !== undefined ? { name: parsed.data.name } : {}),
+        ...(parsed.data.url !== undefined ? { url: parsed.data.url } : {}),
+      });
+      invalidateSiteProxyCache();
+      return { success: true, entry };
+    } catch (error) {
+      if (error instanceof ProxyPoolError) {
+        const status = error.code === 'not_found' ? 404 : 400;
+        return reply.code(status).send({ success: false, code: error.code, message: error.message });
+      }
+      throw error;
+    }
+  });
+
+  /**
+   * Reports who points at an entry, so the delete confirmation can name the blast
+   * radius. Read-only: deletion is not gated on it.
+   */
+  app.get<{ Params: { id: string } }>('/api/settings/proxy-pool/:id/referrers', async (request) => ({
+    success: true,
+    ...(await listProxyPoolReferrers(String(request.params.id || ''))),
+  }));
+
+  app.delete<{ Params: { id: string } }>('/api/settings/proxy-pool/:id', async (request, reply) => {
+    try {
+      // Deliberately not blocked when referenced (operator's ruling): the service
+      // resets every referrer to "do not proxy" and the delete proceeds.
+      await deleteProxyPoolEntry(String(request.params.id || ''));
+      invalidateSiteProxyCache();
+      return { success: true };
+    } catch (error) {
+      if (error instanceof ProxyPoolError) {
+        const status = error.code === 'not_found' ? 404 : 400;
+        return reply.code(status).send({ success: false, code: error.code, message: error.message });
+      }
+      throw error;
     }
   });
 
@@ -947,7 +1028,7 @@ export async function settingsRoutes(app: FastifyInstance) {
       || body.telegramApiBaseUrl !== undefined
       || body.telegramBotToken !== undefined
       || body.telegramChatId !== undefined
-      || body.telegramUseSystemProxy !== undefined
+      || body.telegramProxyRef !== undefined
       || body.telegramMessageThreadId !== undefined;
     const nextTelegramEnabled = body.telegramEnabled !== undefined
       ? !!body.telegramEnabled
@@ -1122,22 +1203,6 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.proxyToken = proxyToken;
       upsertSetting('proxy_token', proxyToken);
-    }
-
-    if (body.systemProxyUrl !== undefined) {
-      const rawSystemProxyUrl = String(body.systemProxyUrl || '').trim();
-      const normalizedSystemProxyUrl = rawSystemProxyUrl
-        ? normalizeSiteProxyUrl(rawSystemProxyUrl)
-        : '';
-      if (rawSystemProxyUrl && !normalizedSystemProxyUrl) {
-        return reply.code(400).send({ success: false, message: '系统代理地址无效，请填写合法的 http(s)/socks 代理 URL' });
-      }
-      if (normalizedSystemProxyUrl !== config.systemProxyUrl) {
-        changedLabels.push('系统代理');
-      }
-      config.systemProxyUrl = normalizedSystemProxyUrl || '';
-      upsertSetting('system_proxy_url', config.systemProxyUrl);
-      invalidateSiteProxyCache();
     }
 
     if (body.payloadRules !== undefined) {
@@ -1549,12 +1614,15 @@ export async function settingsRoutes(app: FastifyInstance) {
       upsertSetting('telegram_chat_id', config.telegramChatId);
     }
 
-    if (body.telegramUseSystemProxy !== undefined) {
-      if (!!body.telegramUseSystemProxy !== config.telegramUseSystemProxy) {
-        changedLabels.push('Telegram 使用系统代理');
+    if (body.telegramProxyRef !== undefined) {
+      const nextTelegramProxyRef = body.telegramProxyRef === null
+        ? ''
+        : String(body.telegramProxyRef || '').trim();
+      if (nextTelegramProxyRef !== config.telegramProxyRef) {
+        changedLabels.push('Telegram 代理');
       }
-      config.telegramUseSystemProxy = !!body.telegramUseSystemProxy;
-      upsertSetting('telegram_use_system_proxy', config.telegramUseSystemProxy);
+      config.telegramProxyRef = nextTelegramProxyRef;
+      upsertSetting('telegram_proxy_ref', config.telegramProxyRef);
     }
 
     if (body.telegramMessageThreadId !== undefined) {

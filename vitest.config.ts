@@ -27,5 +27,13 @@ export default defineConfig({
     env: {
       NODE_ENV: process.env.NODE_ENV && process.env.NODE_ENV !== 'production' ? process.env.NODE_ENV : 'test',
     },
+    /**
+     * Raised from the 10s default because most of our suite-level `beforeAll` hooks
+     * migrate a fresh SQLite file, and on Windows that regularly exceeds 10s when
+     * several suites start at once — a whole file then reports as failed with
+     * "Hook timed out", followed by a misleading `app.close()` TypeError, while every
+     * test in it is skipped. A hook that genuinely hangs still fails, just later.
+     */
+    hookTimeout: 60_000,
   },
 });

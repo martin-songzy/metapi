@@ -30,7 +30,8 @@ const VALID_CREDENTIAL_MODES = new Set<AccountCredentialMode>([
 type AccountExtraConfig = {
   platformUserId?: unknown;
   credentialMode?: unknown;
-  useSystemProxy?: unknown;
+  /** Reference into the proxy pool. See `getProxyRefFromExtraConfig` for why it is three-state. */
+  proxyRef?: unknown;
   oauth?: {
     provider?: unknown;
     [key: string]: unknown;
@@ -133,24 +134,66 @@ export function normalizeCredentialMode(raw: unknown): AccountCredentialMode | u
   return normalized as AccountCredentialMode;
 }
 
-export function getProxyUrlFromExtraConfig(extraConfig?: ExtraConfigInput): string | null {
-  const parsed = parseExtraConfig(extraConfig);
-  return normalizeNonEmptyString(parsed.proxyUrl) ?? null;
+/**
+ * Wire sentinel meaning "follow the site" for a CONNECTION's proxy choice.
+ *
+ * A connection has four states over the wire — untouched, follow-the-site,
+ * explicitly direct, and one pool entry — and a single optional+nullable JSON field
+ * can only carry three. Absent stays "leave the stored choice alone", `null` is
+ * "explicitly direct", an id is that entry, and this sentinel is "follow the site"
+ * (which erases the stored key).
+ *
+ * Collision-free by construction: pool ids are only ever generated as `px_<hex>`.
+ */
+export const PROXY_REF_INHERIT = 'inherit';
+
+/**
+ * Reads one wire value into the three-state form `withProxyRefInExtraConfig` wants.
+ * Returns `undefined` for the sentinel (erase the key → inherit).
+ */
+export function parseConnectionProxyRefInput(raw: string | null): string | null | undefined {
+  if (raw === null) return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed === PROXY_REF_INHERIT) return undefined;
+  return trimmed;
 }
 
-export function getUseSystemProxyFromExtraConfig(extraConfig?: ExtraConfigInput): boolean {
-  const parsed = parseExtraConfig(extraConfig);
-  return parsed.useSystemProxy === true;
-}
-
-export function resolveProxyUrlFromExtraConfig(
+/**
+ * A connection's reference into the proxy pool. THREE distinct return values,
+ * because the connection layer is the only one that needs a "no opinion" state:
+ *
+ *  - `undefined` → key absent: inherit whatever the site decided
+ *  - `null`      → explicitly stored null: do NOT proxy, overriding the site
+ *  - a string    → that pool entry
+ *
+ * Collapsing `undefined` and `null` would make "this connection must go direct"
+ * unexpressible, which is the gap this whole feature closes.
+ */
+export function getProxyRefFromExtraConfig(
   extraConfig?: ExtraConfigInput,
-  systemProxyUrl = config.systemProxyUrl,
-): string | null {
-  const explicitProxyUrl = getProxyUrlFromExtraConfig(extraConfig);
-  if (explicitProxyUrl) return explicitProxyUrl;
-  if (!getUseSystemProxyFromExtraConfig(extraConfig)) return null;
-  return normalizeNonEmptyString(systemProxyUrl) ?? null;
+): string | null | undefined {
+  const parsed = parseExtraConfig(extraConfig);
+  if (!('proxyRef' in parsed)) return undefined;
+  const raw = parsed.proxyRef;
+  if (raw === null) return null;
+  const trimmed = typeof raw === 'string' ? raw.trim() : '';
+  // Garbage in the key reads as "no opinion" rather than as an explicit direct
+  // connection: a corrupt value must not silently override the site's choice.
+  return trimmed || undefined;
+}
+
+/**
+ * Writes the reference back, preserving the three-state distinction above:
+ * `undefined` REMOVES the key (inherit), `null` stores an explicit null.
+ */
+export function withProxyRefInExtraConfig(
+  extraConfig: ExtraConfigInput,
+  proxyRef: string | null | undefined,
+): string {
+  const parsed: Record<string, unknown> = { ...parseExtraConfig(extraConfig) };
+  if (proxyRef === undefined) delete parsed.proxyRef;
+  else parsed.proxyRef = proxyRef;
+  return JSON.stringify(parsed);
 }
 
 export function getPlatformUserIdFromExtraConfig(extraConfig?: ExtraConfigInput): number | undefined {

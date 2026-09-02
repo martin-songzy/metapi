@@ -3,10 +3,11 @@ import { db, schema } from '../../db/index.js';
 import { getInsertedRowId } from '../../db/insertHelpers.js';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 import { detectSite } from '../../services/siteDetector.js';
-import { invalidateSiteProxyCache, parseSiteProxyUrlInput } from '../../services/siteProxy.js';
+import { invalidateSiteProxyCache } from '../../services/siteProxy.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { invalidateTokenRouterCache } from '../../services/tokenRouter.js';
 import { parseSiteCustomHeadersInput } from '../../services/siteCustomHeaders.js';
+import { loadProxyPool } from '../../services/proxyPoolService.js';
 import { getSub2ApiSubscriptionFromExtraConfig } from '../../services/accountExtraConfig.js';
 import {
   parseSiteBatchPayload,
@@ -45,8 +46,35 @@ function normalizePinnedFlag(input: unknown): boolean | null {
   return null;
 }
 
-function normalizeUseSystemProxyFlag(input: unknown): boolean | null {
-  return normalizePinnedFlag(input);
+/**
+ * A site's proxy choice, which is a REFERENCE into the proxy pool — never an
+ * address. `null` is a real answer ("do not proxy"), which is why absent and
+ * null have to stay distinguishable here: absent leaves the stored choice alone.
+ */
+function normalizeProxyRefInput(input: unknown): {
+  present: boolean;
+  valid: boolean;
+  proxyRef: string | null;
+} {
+  if (input === undefined) return { present: false, valid: true, proxyRef: null };
+  if (input === null) return { present: true, valid: true, proxyRef: null };
+  if (typeof input !== 'string') return { present: true, valid: false, proxyRef: null };
+  const trimmed = input.trim();
+  return { present: true, valid: true, proxyRef: trimmed || null };
+}
+
+/**
+ * Rejected rather than stored-and-ignored.
+ *
+ * A dangling ref is READ as "no proxy" so a deleted pool entry can never silently
+ * reroute traffic, but accepting one on WRITE would turn a stale UI into a site
+ * that quietly stopped being proxied. The picker only ever offers ids that exist,
+ * so a miss here means the pool changed underneath the form.
+ */
+async function isKnownProxyRef(ref: string | null): Promise<boolean> {
+  if (!ref) return true;
+  const pool = await loadProxyPool();
+  return pool.some((entry) => entry.id === ref);
 }
 
 function normalizeSortOrder(input: unknown): number | null {
@@ -497,8 +525,7 @@ export async function sitesRoutes(app: FastifyInstance) {
       url,
       platform,
       initializationPresetId,
-      proxyUrl,
-      useSystemProxy,
+      proxyRef,
       customHeaders,
       externalCheckinUrl,
       status,
@@ -511,14 +538,6 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedStatus = normalizeSiteStatus(status);
     if (status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
-    }
-    const normalizedUseSystemProxy = normalizeUseSystemProxyFlag(useSystemProxy);
-    if (useSystemProxy !== undefined && normalizedUseSystemProxy === null) {
-      return reply.code(400).send({ error: 'Invalid useSystemProxy value. Expected boolean.' });
-    }
-    const normalizedProxyUrl = parseSiteProxyUrlInput(proxyUrl);
-    if (!normalizedProxyUrl.valid) {
-      return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
     }
     const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
@@ -539,6 +558,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedCustomHeaders = parseSiteCustomHeadersInput(customHeaders);
     if (!normalizedCustomHeaders.valid) {
       return reply.code(400).send({ error: normalizedCustomHeaders.error || 'Invalid customHeaders.' });
+    }
+    const normalizedProxyRef = normalizeProxyRefInput(proxyRef);
+    if (!normalizedProxyRef.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyRef. Expected a proxy pool id or null.' });
+    }
+    if (!await isKnownProxyRef(normalizedProxyRef.proxyRef)) {
+      return reply.code(400).send({ error: 'Unknown proxyRef. The selected proxy no longer exists.' });
     }
     const explicitInitializationPreset = initializationPresetId == null || initializationPresetId === ''
       ? null
@@ -598,8 +624,7 @@ export async function sitesRoutes(app: FastifyInstance) {
           name,
           url: canonicalUrl,
           platform: detectedPlatform,
-          proxyUrl: normalizedProxyUrl.proxyUrl,
-          useSystemProxy: normalizedUseSystemProxy ?? false,
+          proxyRef: normalizedProxyRef.proxyRef,
           customHeaders: normalizedCustomHeaders.customHeaders,
           externalCheckinUrl: normalizedExternalCheckinUrl.url,
           status: normalizedStatus ?? 'active',
@@ -666,14 +691,6 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.status !== undefined && !normalizedStatus) {
       return reply.code(400).send({ error: 'Invalid site status. Expected active or disabled.' });
     }
-    const normalizedUseSystemProxy = normalizeUseSystemProxyFlag(body.useSystemProxy);
-    if (body.useSystemProxy !== undefined && normalizedUseSystemProxy === null) {
-      return reply.code(400).send({ error: 'Invalid useSystemProxy value. Expected boolean.' });
-    }
-    const normalizedProxyUrl = parseSiteProxyUrlInput(body.proxyUrl);
-    if (!normalizedProxyUrl.valid) {
-      return reply.code(400).send({ error: 'Invalid proxyUrl. Expected a valid http(s)/socks proxy URL.' });
-    }
     const normalizedExternalCheckinUrl = normalizeOptionalExternalCheckinUrl(body.externalCheckinUrl);
     if (!normalizedExternalCheckinUrl.valid) {
       return reply.code(400).send({ error: 'Invalid externalCheckinUrl. Expected a valid http(s) URL.' });
@@ -697,6 +714,13 @@ export async function sitesRoutes(app: FastifyInstance) {
     const normalizedApiEndpoints = normalizeSiteApiEndpointsInput(body.apiEndpoints);
     if (!normalizedApiEndpoints.valid) {
       return reply.code(400).send({ error: normalizedApiEndpoints.error || 'Invalid apiEndpoints.' });
+    }
+    const normalizedProxyRef = normalizeProxyRefInput(body.proxyRef);
+    if (!normalizedProxyRef.valid) {
+      return reply.code(400).send({ error: 'Invalid proxyRef. Expected a proxy pool id or null.' });
+    }
+    if (normalizedProxyRef.present && !await isKnownProxyRef(normalizedProxyRef.proxyRef)) {
+      return reply.code(400).send({ error: 'Unknown proxyRef. The selected proxy no longer exists.' });
     }
 
     const canonicalPlatform = normalizeSitePlatform(body.platform);
@@ -723,8 +747,7 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (body.name !== undefined) updates.name = body.name;
     if (body.url !== undefined) updates.url = nextUrl;
     if (body.platform !== undefined) updates.platform = nextPlatform;
-    if (normalizedProxyUrl.present) updates.proxyUrl = normalizedProxyUrl.proxyUrl;
-    if (body.useSystemProxy !== undefined) updates.useSystemProxy = normalizedUseSystemProxy;
+    if (normalizedProxyRef.present) updates.proxyRef = normalizedProxyRef.proxyRef;
     if (normalizedCustomHeaders.present) updates.customHeaders = normalizedCustomHeaders.customHeaders;
     if (normalizedExternalCheckinUrl.present) updates.externalCheckinUrl = normalizedExternalCheckinUrl.url;
     if (body.status !== undefined) updates.status = normalizedStatus;
@@ -797,8 +820,21 @@ export async function sitesRoutes(app: FastifyInstance) {
     if (ids.length === 0) {
       return reply.code(400).send({ message: 'ids is required' });
     }
-    if (!['enable', 'disable', 'delete', 'enableSystemProxy', 'disableSystemProxy'].includes(action)) {
+    if (!['enable', 'disable', 'delete', 'setProxyRef'].includes(action)) {
       return reply.code(400).send({ message: 'Invalid action' });
+    }
+
+    // `setProxyRef` carries a payload, and its absence is not "leave alone" here —
+    // a batch action with no target is a mistake, not a no-op, so it is rejected
+    // rather than silently applied as "do not proxy" to every selected site.
+    const batchProxyRef = normalizeProxyRefInput((parsedBody.data as Record<string, unknown>).proxyRef);
+    if (action === 'setProxyRef') {
+      if (!batchProxyRef.present || !batchProxyRef.valid) {
+        return reply.code(400).send({ message: 'proxyRef is required. Expected a proxy pool id or null.' });
+      }
+      if (!await isKnownProxyRef(batchProxyRef.proxyRef)) {
+        return reply.code(400).send({ message: 'Unknown proxyRef. The selected proxy no longer exists.' });
+      }
     }
 
     const successIds: number[] = [];
@@ -814,14 +850,9 @@ export async function sitesRoutes(app: FastifyInstance) {
       try {
         if (action === 'delete') {
           await db.delete(schema.sites).where(eq(schema.sites.id, id)).run();
-        } else if (action === 'enableSystemProxy') {
+        } else if (action === 'setProxyRef') {
           await db.update(schema.sites)
-            .set({ useSystemProxy: true, updatedAt: new Date().toISOString() })
-            .where(eq(schema.sites.id, id))
-            .run();
-        } else if (action === 'disableSystemProxy') {
-          await db.update(schema.sites)
-            .set({ useSystemProxy: false, updatedAt: new Date().toISOString() })
+            .set({ proxyRef: batchProxyRef.proxyRef, updatedAt: new Date().toISOString() })
             .where(eq(schema.sites.id, id))
             .run();
         } else {

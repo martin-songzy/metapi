@@ -592,7 +592,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
             runtime: endpointRequest.runtime,
           };
         };
-        const baseDispatchRequest = createSurfaceDispatchRequest({
+        const baseDispatchRequest = await createSurfaceDispatchRequest({
           site: selected.site,
           siteUrl: siteApiBaseUrl,
           accountExtraConfig: selected.account.extraConfig,

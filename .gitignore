@@ -10,6 +10,7 @@ logs/
 tmp/*
 !tmp/.gitkeep
 .worktrees/
+bak/
 
 # Local desktop/debug artifacts
 /.tmp-*
@@ -26,3 +27,4 @@ docker/.env
 docs/plan/
 docs/plans/
 .ace-tool/
+draft.md

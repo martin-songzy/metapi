@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, sql, type Column, type SQL } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql, type Column, type SQL } from 'drizzle-orm';
 
 import { config } from '../config.js';
 import { db, runtimeDbDialect, schema } from '../db/index.js';
@@ -13,11 +13,13 @@ import {
 import { compileInterestPatterns, matchesInterest, type InvalidInterestPattern } from './modelInterestFilter.js';
 import { loadModelProbeConfig, resolveModelProbeUserAgent, type ModelProbeConfig } from './modelProbeConfigService.js';
 import {
-  discoverModelsForActiveProbe,
+  discoverProbeKeysForActiveProbe,
   ModelProbeDiscoveryError,
+  PRIMARY_PROBE_TOKEN_ID,
   type ModelProbeDiscoveryErrorCode,
   type ModelProbeDiscoverySource,
   type ModelProbeLiveFailure,
+  type ProbeKeySkipReason,
 } from './modelProbeDiscoveryService.js';
 import { chooseModelProbePrompt } from './modelProbePrompts.js';
 import { maskCredentialInText } from './modelProbeSecrets.js';
@@ -321,6 +323,49 @@ export function isActiveModelProbeCancelled(taskId: string): boolean {
 type SiteRow = typeof schema.sites.$inferSelect;
 type AccountRow = typeof schema.accounts.$inferSelect;
 
+/**
+ * One key's discovery result inside a site outcome, already filtered to the
+ * interest patterns.
+ *
+ * `credential` is null exactly when `skipReason` is set: a key that will not be
+ * probed has no usable value to probe with. The pair travels together so the
+ * probe loop can skip on structure rather than on a truthiness check.
+ */
+type DiscoveryKeyOutcome = {
+  tokenId: number;
+  tokenName: string;
+  /**
+   * Derived from POSITION, never inferred from `tokenId`: the sentinel 0 is
+   * shared across accounts, and a primary key that resolved to a managed row
+   * carries a real `account_tokens.id` indistinguishable in shape from an
+   * additional key's.
+   *
+   * Load-bearing rather than cosmetic — it gates the site-scoped table write and
+   * the routing sync.
+   */
+  isPrimary: boolean;
+  credential: string | null;
+  skipReason: ProbeKeySkipReason | null;
+  /** Everything this key's catalog returned, before the interest filter. */
+  discovered: string[];
+  /** What this key will actually be probed for. */
+  models: string[];
+  source: ModelProbeDiscoverySource | null;
+  liveFailure: ModelProbeLiveFailure | null;
+  notes: string[];
+};
+
+/**
+ * `credential`, `source`, `liveFailure` and `notes` remain the PRIMARY key's
+ * values, not an aggregate over `keys`. Every existing consumer — the preview
+ * payload, `model_probe_results`, the routing sync — is site-scoped and was
+ * written against the primary key's semantics, and Q7=C keeps availability
+ * decided by the primary key alone. Aggregating here would silently change what
+ * those consumers mean.
+ *
+ * `models` IS the union across keys (Q8=A): it is the target list, and a model
+ * only a secondary key can reach still has to be probed.
+ */
 type DiscoveryOutcome = {
   site: SiteRow;
   account: AccountRow;
@@ -330,7 +375,28 @@ type DiscoveryOutcome = {
   models: string[];
   liveFailure: ModelProbeLiveFailure | null;
   notes: string[];
+  keys: DiscoveryKeyOutcome[];
 };
+
+/**
+ * Operator-facing label for one key in the task log.
+ *
+ * The primary key has no name of its own (it lives on the account row, not in
+ * `account_tokens`), so it is named here rather than stored empty-and-rendered-
+ * blank. An unnamed additional key falls back to its row id so two nameless keys
+ * are still tellable apart in the log.
+ *
+ * `keys` is taken so a single-key site reads as plain 「主 Key」 without a count
+ * suffix that would imply a key axis it does not have.
+ */
+function describeProbeKey(key: DiscoveryKeyOutcome, keys: readonly DiscoveryKeyOutcome[]): string {
+  if (key.isPrimary) return keys.length > 1 ? '主 Key' : '主 Key（唯一）';
+  return key.tokenName ? `Key ${key.tokenName}` : `Key #${key.tokenId}`;
+}
+
+function describeProbeKeySkip(reason: ProbeKeySkipReason): string {
+  return reason === 'disabled' ? '该令牌已停用' : '该令牌没有可用的值';
+}
 
 /**
  * The set of sites one sweep may touch.
@@ -530,19 +596,40 @@ async function discoverAcrossSites(input: {
     Math.max(input.probeConfig.siteConcurrency, DISCOVERY_MIN_CONCURRENCY),
     async (site) => {
       try {
-        const discovery = await discoverModelsForActiveProbe({
+        const discovery = await discoverProbeKeysForActiveProbe({
           siteId: site.id,
           timeoutMs: input.probeConfig.timeoutMs,
         });
+
+        // The primary key is first by construction (`selectProbeKeys` builds it
+        // that way), and the site-scoped fields below are ITS values — see the
+        // `DiscoveryOutcome` doc comment for why they are not aggregates.
+        const [primary] = discovery.keys;
+        const keys: DiscoveryKeyOutcome[] = discovery.keys.map((key, index) => ({
+          tokenId: key.tokenId,
+          tokenName: key.tokenName,
+          isPrimary: index === 0,
+          credential: key.credential,
+          skipReason: key.skipReason,
+          discovered: key.models,
+          models: key.models.filter((modelName) => matchesInterest(modelName, input.interestPatterns)),
+          source: key.source,
+          liveFailure: key.liveFailure,
+          notes: key.notes,
+        }));
+
         const outcome: DiscoveryOutcome = {
           site: discovery.site,
           account: discovery.account,
-          credential: discovery.credential,
-          source: discovery.source,
+          // Non-null by contract: `discoverProbeKeysForActiveProbe` throws rather
+          // than returning a primary key without a credential.
+          credential: primary?.credential || '',
+          source: primary?.source ?? 'live',
           discovered: discovery.models,
           models: discovery.models.filter((modelName) => matchesInterest(modelName, input.interestPatterns)),
-          liveFailure: discovery.source === 'cached' ? discovery.liveFailure : null,
-          notes: discovery.notes ?? [],
+          liveFailure: primary?.source === 'cached' ? (primary?.liveFailure ?? null) : null,
+          notes: primary?.notes ?? [],
+          keys,
         };
         outcomes.set(site.id, outcome);
         input.onSite?.(outcome);
@@ -693,7 +780,11 @@ async function runActiveModelProbe(
     log(`跳过站点 ${skip.siteName}（${skip.code}）：${skip.message}`);
   }
 
-  const targets: Array<{ discovery: DiscoveryOutcome; modelName: string }> = [];
+  const targets: Array<{
+    discovery: DiscoveryOutcome;
+    key: DiscoveryKeyOutcome;
+    modelName: string;
+  }> = [];
   const { outcomes, skipped: discoverySkips } = await discoverAcrossSites({
     sites,
     probeConfig,
@@ -704,15 +795,34 @@ async function runActiveModelProbe(
         + `命中兴趣正则 ${outcome.models.length} 个`
         + (outcome.source === 'cached' ? '（来自缓存，凭据未经验证）' : ''),
       );
+      // Per-key breakdown, logged even when a key contributes nothing: "this key
+      // reached no models" and "this key was never asked" are different facts and
+      // the operator is paying per key.
+      for (const key of outcome.keys) {
+        const label = describeProbeKey(key, outcome.keys);
+        if (key.skipReason) {
+          log(`  ${label}：跳过（${describeProbeKeySkip(key.skipReason)}）`);
+          continue;
+        }
+        log(`  ${label}：发现 ${key.discovered.length} 个模型，命中 ${key.models.length} 个`);
+      }
     },
     onSkip: (skip) => {
       log(`跳过站点 ${skip.siteName}（${skip.code}）：${skip.message}`);
     },
   });
 
+  // The cartesian product over (key × model) with NO dedupe across keys (Q13=A):
+  // a model both keys can list is probed once per key, because the whole question
+  // this feature answers is whether the verdict differs BETWEEN keys. That makes
+  // cost scale linearly with key count, which is why the two pre-probe guards
+  // below now bound the per-key total rather than the model count.
   for (const outcome of outcomes) {
-    for (const modelName of outcome.models) {
-      targets.push({ discovery: outcome, modelName });
+    for (const key of outcome.keys) {
+      if (key.skipReason !== null || !key.credential) continue;
+      for (const modelName of key.models) {
+        targets.push({ discovery: outcome, key, modelName });
+      }
     }
   }
 
@@ -736,11 +846,64 @@ async function runActiveModelProbe(
 
   log(`共 ${outcomes.length} 个站点、${targets.length} 个模型待探测，站点间并发 ${probeConfig.siteConcurrency}、站点内并发 ${probeConfig.modelConcurrency}`);
 
+  // Rows for keys that were LISTED but never probed (Q21=B). Written before the
+  // probe loop because they cost nothing — no request leaves the process — and they
+  // are what stops 「压根没探」 from reading as 「这个 key 探不到任何模型」: with no row
+  // at all, a skipped key is simply ABSENT from a model's key breakdown, which is
+  // the exact ambiguity the per-key view exists to remove.
+  //
+  // Written against the SITE's target list, not the key's own: a skipped key has no
+  // catalogue, because discovery never asked it. That is not a fabricated verdict —
+  // `disabled`/`unavailable` assert that no verdict exists — and it cannot leak into
+  // availability, which takes only `unsupported` from the primary key (Q7=C).
+  //
+  // Two deliberate omissions: these never enter `probeOutcomes` (nothing was probed,
+  // so they must not move the summary counters or the routing sync), and they carry
+  // no prompt/user-agent (none was chosen).
+  //
+  // The upsert overwrites a real verdict this key earned in an earlier sweep, which
+  // is the intended reading: the key is switched off or unusable NOW, and leaving
+  // yesterday's `supported` standing would claim it still serves that model.
+  for (const outcome of outcomes) {
+    for (const key of outcome.keys) {
+      if (key.skipReason === null && key.credential) continue;
+      // 'unavailable' is also the fallback for the structurally-impossible
+      // "no skip reason, no credential": the honest report is still that this key
+      // was not probed.
+      const skipStatus: ModelProbeKeyStatus = key.skipReason === 'disabled' ? 'disabled' : 'unavailable';
+      for (const modelName of outcome.models) {
+        await upsertModelProbeKeyResult({
+          siteId: outcome.site.id,
+          accountId: outcome.account.id,
+          tokenId: key.tokenId,
+          tokenName: key.tokenName,
+          modelName,
+          status: skipStatus,
+          latencyMs: null,
+          httpStatus: null,
+          failureKind: null,
+          // Locally generated, never upstream prose: nothing was sent, so there is
+          // no response body to quote.
+          reason: describeProbeKeySkip(key.skipReason ?? 'credential_unavailable'),
+          endpointUsed: null,
+          promptUsed: null,
+          userAgentUsed: null,
+        });
+      }
+    }
+  }
+
   type ProbeOutcome = {
     site: SiteRow;
     account: AccountRow;
     modelName: string;
     status: RuntimeModelProbeStatus;
+    /**
+     * Only a primary-key verdict may reach `model_availability`. An additional
+     * key is a discovery axis that carries no proxy traffic, so its `unsupported`
+     * says nothing about what the routing credential can actually serve (Q7=C).
+     */
+    isPrimary: boolean;
   };
   const probeOutcomes: ProbeOutcome[] = [];
 
@@ -771,7 +934,11 @@ async function runActiveModelProbe(
     // costs nothing, which is the whole point.
     if (isActiveModelProbeCancelled(taskId)) return;
 
-    const { site, account, credential } = target.discovery;
+    const { site, account } = target.discovery;
+    // The KEY's own credential, not the site's primary one — substituting the
+    // latter is exactly what the key axis exists to prevent. `targets` was built
+    // only from keys carrying a usable value, so this is non-empty by construction.
+    const credential = target.key.credential || '';
     const userAgent = resolveModelProbeUserAgent(probeConfig, site.probeUserAgent);
     const endpointType = normalizeModelProbeEndpointType(site.probeEndpointType);
     // 'auto' keeps the capability-derived endpoint with cross-protocol fallback;
@@ -823,29 +990,63 @@ async function runActiveModelProbe(
       endpointUsed = null;
     }
 
-    await upsertModelProbeResult({
+    // The one secret whose value is known here, so mask it by value before
+    // anything is written: some relays echo the rejected key back in their
+    // error body, and `reason` is both persisted and served to the results
+    // page. Shape-based scrubbing of secrets the probe never held is a
+    // separate control at the HTTP boundary, over the fields
+    // `MODEL_PROBE_UPSTREAM_TEXT_FIELDS` names.
+    //
+    // Masked with THIS key's credential, which is the only one that could appear
+    // in this particular response body.
+    const maskedReason = maskCredentialInText(reason, credential);
+
+    // Every key's verdict lands in the per-key table (Q15=B). Only the primary
+    // key's also lands in the site-scoped table: that one is keyed on
+    // (site_id, model_name), so writing additional keys there would have them
+    // overwrite each other and leave the last-finished key's verdict standing in
+    // for the site — the exact ambiguity the per-key table removes.
+    await upsertModelProbeKeyResult({
       siteId: site.id,
       accountId: account.id,
+      tokenId: target.key.tokenId,
+      tokenName: target.key.tokenName,
       modelName: target.modelName,
       status,
       latencyMs,
       httpStatus,
       failureKind,
-      // The one secret whose value is known here, so mask it by value before
-      // anything is written: some relays echo the rejected key back in their
-      // error body, and `reason` is both persisted and served to the results
-      // page. Shape-based scrubbing of secrets the probe never held is a
-      // separate control at the HTTP boundary, over the fields
-      // `MODEL_PROBE_UPSTREAM_TEXT_FIELDS` names.
-      reason: maskCredentialInText(reason, credential),
+      reason: maskedReason,
       endpointUsed,
       promptUsed: prompt,
       userAgentUsed: userAgent,
     });
 
-    probeOutcomes.push({ site, account, modelName: target.modelName, status });
+    if (target.key.isPrimary) {
+      await upsertModelProbeResult({
+        siteId: site.id,
+        accountId: account.id,
+        modelName: target.modelName,
+        status,
+        latencyMs,
+        httpStatus,
+        failureKind,
+        reason: maskedReason,
+        endpointUsed,
+        promptUsed: prompt,
+        userAgentUsed: userAgent,
+      });
+    }
+
+    probeOutcomes.push({
+      site,
+      account,
+      modelName: target.modelName,
+      status,
+      isPrimary: target.key.isPrimary,
+    });
     log(
-      `${site.name} / ${target.modelName}：${status}`
+      `${site.name} / ${describeProbeKey(target.key, target.discovery.keys)} / ${target.modelName}：${status}`
       + (latencyMs != null ? ` ${latencyMs}ms` : '')
       + (httpStatus != null ? ` HTTP ${httpStatus}` : '')
       + (failureKind ? ` (${failureKind})` : ''),
@@ -870,7 +1071,13 @@ async function runActiveModelProbe(
 
   // ONLY `unsupported` reaches the write path, filtered by construction rather
   // than by a later check so no future edit can leak `inconclusive` in.
-  const unsupported = probeOutcomes.filter((outcome) => outcome.status === 'unsupported');
+  // Restricted to the PRIMARY key as well (Q7=C): an additional key carries no
+  // proxy traffic, so its `unsupported` describes a credential the router will
+  // never use. Taking the union across keys here would disable models the routing
+  // credential can actually serve.
+  const unsupported = probeOutcomes.filter(
+    (outcome) => outcome.status === 'unsupported' && outcome.isPrimary,
+  );
   // A cancel withdraws the operator's authorization mid-sweep, so a PARTIAL run
   // leaves no persistent routing effect behind. The verdicts themselves are still
   // recorded in `model_probe_results` for inspection — nothing is lost, it simply
@@ -1055,6 +1262,88 @@ async function upsertModelProbeResult(input: {
     .run();
 }
 
+/**
+ * Per-key twin of `upsertModelProbeResult`, on the
+ * (account_id, token_id, model_name) unique key.
+ *
+ * All three columns are in the key because `token_id` carries the sentinel 0 for
+ * an account-level primary key, and 0 is shared across every account — keyed on
+ * (token_id, model_name) alone, two accounts' primary keys probing the same model
+ * would collide into one row. That is also why `token_id` is not a real foreign
+ * key, so deleting an `account_tokens` row has to clear its rows here in
+ * application code.
+ *
+ * `tokenName` is denormalized on purpose: it keeps the results page readable for
+ * a key that has since been renamed or deleted, without a join that would drop
+ * the row entirely.
+ */
+async function upsertModelProbeKeyResult(input: {
+  siteId: number;
+  accountId: number;
+  tokenId: number;
+  tokenName: string;
+  modelName: string;
+  // Wider than the site-scoped table's status: this one also records keys that were
+  // listed but never probed (Q21=B), which have no runtime verdict.
+  status: ModelProbeKeyStatus;
+  latencyMs: number | null;
+  httpStatus: number | null;
+  failureKind: ModelProbeFailureKind | null;
+  reason: string | null;
+  endpointUsed: UpstreamEndpoint | null;
+  promptUsed: string | null;
+  userAgentUsed: string | null;
+}): Promise<void> {
+  const values = {
+    siteId: input.siteId,
+    accountId: input.accountId,
+    tokenId: input.tokenId,
+    tokenName: input.tokenName || '',
+    modelName: input.modelName,
+    status: input.status,
+    latencyMs: input.latencyMs,
+    httpStatus: input.httpStatus,
+    failureKind: input.failureKind,
+    reason: input.reason ? truncate(input.reason, MAX_PERSISTED_REASON_LENGTH) : null,
+    endpointUsed: input.endpointUsed,
+    promptUsed: input.promptUsed,
+    userAgentUsed: input.userAgentUsed || null,
+    checkedAt: new Date().toISOString(),
+  };
+
+  const updateSet = {
+    siteId: values.siteId,
+    tokenName: values.tokenName,
+    status: values.status,
+    latencyMs: values.latencyMs,
+    httpStatus: values.httpStatus,
+    failureKind: values.failureKind,
+    reason: values.reason,
+    endpointUsed: values.endpointUsed,
+    promptUsed: values.promptUsed,
+    userAgentUsed: values.userAgentUsed,
+    checkedAt: values.checkedAt,
+  };
+
+  if (runtimeDbDialect === 'mysql') {
+    await (db.insert(schema.modelProbeKeyResults).values(values) as any)
+      .onDuplicateKeyUpdate({ set: updateSet })
+      .run();
+    return;
+  }
+
+  await (db.insert(schema.modelProbeKeyResults).values(values) as any)
+    .onConflictDoUpdate({
+      target: [
+        schema.modelProbeKeyResults.accountId,
+        schema.modelProbeKeyResults.tokenId,
+        schema.modelProbeKeyResults.modelName,
+      ],
+      set: updateSet,
+    })
+    .run();
+}
+
 export type ModelProbeResultsSortBy = 'latency' | 'balance' | 'checkedAt';
 
 /**
@@ -1163,6 +1452,9 @@ export function buildModelProbeResultOrdering(sortColumn: Column, order: 'asc' |
  */
 export async function clearModelProbeResults(): Promise<void> {
   await db.delete(schema.modelProbeResults).run();
+  // Both tables or neither: leaving per-key rows behind would have the results
+  // page still showing verdicts the operator believes they just cleared.
+  await db.delete(schema.modelProbeKeyResults).run();
 }
 
 export async function listActiveModelProbeResults(query: ModelProbeResultsQuery): Promise<{
@@ -1241,4 +1533,118 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
     })),
     total: Number(totalRow?.total || 0),
   };
+}
+
+/**
+ * A per-key row carries two states the site-scoped table has no use for: a key
+ * that was listed but deliberately never probed.
+ *
+ * Kept OUT of `RuntimeModelProbeStatus` rather than added to it: that type is the
+ * vocabulary of an actual probe attempt, and widening it would put two verdicts
+ * that never made a request into every switch that classifies one that did —
+ * including the routing sync, where `unsupported` disables a model.
+ */
+export type ModelProbeKeyStatus = RuntimeModelProbeStatus | 'disabled' | 'unavailable';
+
+const KEY_RESULT_STATUSES: readonly ModelProbeKeyStatus[] = [
+  ...RESULT_STATUSES,
+  'disabled',
+  'unavailable',
+];
+
+/**
+ * Same fallback reasoning as `normalizeResultStatus`, over the wider per-key
+ * vocabulary. A separate function rather than a parameter on that one: the two
+ * tables accept different sets, and sharing a normalizer is how the site-scoped
+ * table would start admitting `disabled`.
+ */
+function normalizeKeyResultStatus(value: unknown): ModelProbeKeyStatus {
+  return KEY_RESULT_STATUSES.find((candidate) => candidate === value) ?? 'inconclusive';
+}
+
+/**
+ * One key's verdict for one model.
+ *
+ * `tokenId` is carried raw so the caller can tell the sentinel apart, but
+ * `isPrimary` is what consumers should branch on: it is the same distinction the
+ * run loop draws, and reproducing the `=== PRIMARY_PROBE_TOKEN_ID` test at every
+ * call site is how that meaning gets forgotten.
+ *
+ * `tokenName` is the denormalized label stored with the verdict, not a join onto
+ * `account_tokens`: a key that has since been renamed or deleted must still
+ * render as the key it was when probed.
+ */
+export type ModelProbeKeyResultView = {
+  id: number;
+  siteId: number;
+  accountId: number;
+  tokenId: number;
+  tokenName: string;
+  isPrimary: boolean;
+  modelName: string;
+  status: ModelProbeKeyStatus;
+  latencyMs: number | null;
+  httpStatus: number | null;
+  failureKind: string | null;
+  /** May embed upstream prose — see MODEL_PROBE_UPSTREAM_TEXT_FIELDS. */
+  reason: string | null;
+  endpointUsed: string | null;
+  checkedAt: string | null;
+};
+
+/**
+ * Every stored per-key verdict for the given site×model pairs, keyed for lookup
+ * by the results page.
+ *
+ * Scoped to the rows the caller is already showing rather than offering its own
+ * filters and paging: the per-key rows are a detail OF a site-scoped result row,
+ * so a second independent query could return keys for models absent from the
+ * page. The bound on the query is therefore the page itself.
+ *
+ * Returns a flat array; grouping is the caller's business because the two
+ * consumers group differently (a per-row expander keys by model, the summary
+ * marker keys by key).
+ */
+export async function listModelProbeKeyResultsForModels(input: {
+  siteIds: number[];
+  modelNames: string[];
+}): Promise<ModelProbeKeyResultView[]> {
+  const siteIds = [...new Set(input.siteIds.filter((id) => Number.isInteger(id) && id > 0))];
+  const modelNames = [...new Set(input.modelNames.map((name) => String(name || '').trim()).filter(Boolean))];
+  // An empty `inArray` is a SQL syntax error on some dialects, and there is
+  // nothing to look up anyway.
+  if (siteIds.length === 0 || modelNames.length === 0) return [];
+
+  const rows = await db.select()
+    .from(schema.modelProbeKeyResults)
+    .where(and(
+      inArray(schema.modelProbeKeyResults.siteId, siteIds),
+      inArray(schema.modelProbeKeyResults.modelName, modelNames),
+    ))
+    // Primary key first within a model, then by name, so the caller can render in
+    // arrival order without re-sorting: the primary key is the one whose verdict
+    // drives routing and therefore the one an operator reads first.
+    .orderBy(
+      asc(schema.modelProbeKeyResults.modelName),
+      asc(schema.modelProbeKeyResults.tokenId),
+      asc(schema.modelProbeKeyResults.id),
+    )
+    .all();
+
+  return rows.map((row) => ({
+    id: row.id,
+    siteId: row.siteId,
+    accountId: row.accountId,
+    tokenId: row.tokenId,
+    tokenName: row.tokenName || '',
+    isPrimary: row.tokenId === PRIMARY_PROBE_TOKEN_ID,
+    modelName: row.modelName,
+    status: normalizeKeyResultStatus(row.status),
+    latencyMs: row.latencyMs ?? null,
+    httpStatus: row.httpStatus ?? null,
+    failureKind: row.failureKind ?? null,
+    reason: row.reason ?? null,
+    endpointUsed: row.endpointUsed ?? null,
+    checkedAt: row.checkedAt ?? null,
+  }));
 }

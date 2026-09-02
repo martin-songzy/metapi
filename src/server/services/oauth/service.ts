@@ -2,11 +2,11 @@ import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
 import {
-  getProxyUrlFromExtraConfig,
-  getUseSystemProxyFromExtraConfig,
+  getProxyRefFromExtraConfig,
   mergeAccountExtraConfig,
-  resolveProxyUrlFromExtraConfig,
+  withProxyRefInExtraConfig,
 } from '../accountExtraConfig.js';
+import { parseConnectionProxyRefInput, PROXY_REF_INHERIT } from '../accountExtraConfig.js';
 import { refreshModelsForAccount } from '../modelService.js';
 import * as routeRefreshWorkflow from '../routeRefreshWorkflow.js';
 import {
@@ -37,6 +37,7 @@ import {
   type OauthIdentityCarrierLike,
 } from './codexAccount.js';
 import { resolveOauthAccountProxyUrl, resolveOauthProviderProxyUrl } from './requestProxy.js';
+import { resolveProxyRefFromPrimedPool } from '../siteProxy.js';
 import { ensureOauthIdentityBackfill } from './oauthIdentityBackfill.js';
 import { buildQuotaSnapshotFromOauthInfo, refreshOauthQuotaSnapshot } from './quota.js';
 import {
@@ -464,8 +465,8 @@ async function activatePersistedOauthAccount(input: {
     providerData?: Record<string, unknown>;
   };
   rebindAccountId?: number;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  /** Wire value: absent = leave alone, `null` = direct, `'inherit'` = follow site, id = that entry. */
+  proxyRef?: string | null;
   persistedStatus?: 'active' | 'disabled';
   activateExistingAfterRefresh?: boolean;
 }) {
@@ -478,8 +479,7 @@ async function activatePersistedOauthAccount(input: {
     definition: input.definition,
     exchange: input.exchange,
     rebindAccountId: input.rebindAccountId,
-    proxyUrl: input.proxyUrl,
-    useSystemProxy: input.useSystemProxy,
+    proxyRef: input.proxyRef,
     persistedStatus: input.persistedStatus,
   });
 
@@ -597,8 +597,8 @@ async function upsertOauthAccount(input: {
     providerData?: Record<string, unknown>;
   };
   rebindAccountId?: number;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  /** Wire value: absent = leave alone, `null` = direct, `'inherit'` = follow site, id = that entry. */
+  proxyRef?: string | null;
   persistedStatus?: 'active' | 'disabled';
 }) {
   const site = await ensureOauthSite(input.definition);
@@ -626,12 +626,13 @@ async function upsertOauthAccount(input: {
     idToken: input.exchange.idToken,
     providerData: input.exchange.providerData,
   });
-  const extraConfig = mergeAccountExtraConfig(existing?.extraConfig, {
+  const mergedExtraConfig = mergeAccountExtraConfig(existing?.extraConfig, {
     credentialMode: 'session',
-    ...(input.proxyUrl !== undefined ? { proxyUrl: input.proxyUrl } : {}),
-    ...(input.useSystemProxy !== undefined ? { useSystemProxy: input.useSystemProxy } : {}),
     oauth: buildStoredOauthState(oauth),
   });
+  const extraConfig = input.proxyRef !== undefined
+    ? withProxyRefInExtraConfig(mergedExtraConfig, parseConnectionProxyRefInput(input.proxyRef))
+    : mergedExtraConfig;
 
   if (existing) {
     await db.update(schema.accounts).set({
@@ -688,18 +689,21 @@ export function listOauthProviders() {
   });
 }
 
+/**
+ * There is no longer a single global proxy for the page to advertise, so the old
+ * `systemProxyConfigured` hint is gone: the picker lists the pool instead, and an
+ * empty pool is self-evident in the UI.
+ */
 export function getOauthProviderDefaults() {
-  return {
-    systemProxyConfigured: !!resolveProxyUrlFromExtraConfig({ useSystemProxy: true }),
-  };
+  return {};
 }
 
 export async function startOauthProviderFlow(input: {
   provider: string;
   rebindAccountId?: number;
   projectId?: string;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  /** Wire value: absent = leave alone, `null` = direct, `'inherit'` = follow site, id = that entry. */
+  proxyRef?: string | null;
   requestOrigin?: string;
 }) {
   const definition = getOAuthProviderDefinition(input.provider);
@@ -716,8 +720,7 @@ export async function startOauthProviderFlow(input: {
     redirectUri,
     rebindAccountId: input.rebindAccountId,
     projectId: input.projectId,
-    proxyUrl: input.proxyUrl,
-    useSystemProxy: input.useSystemProxy,
+    proxyRef: input.proxyRef,
   });
   return {
     provider: input.provider,
@@ -773,11 +776,12 @@ export async function handleOauthCallback(input: {
   }
 
   try {
-    const resolvedProxyUrl = session.proxyUrl
-      ? session.proxyUrl
-      : session.useSystemProxy
-        ? resolveProxyUrlFromExtraConfig({ useSystemProxy: true })
-        : await resolveOauthProviderProxyUrl(input.provider);
+    // The login exchange itself goes through whatever the operator picked for this
+    // flow; with no pick it follows the provider's own site, exactly as before.
+    const sessionProxyRef = parseConnectionProxyRefInput(session.proxyRef ?? null);
+    const resolvedProxyUrl = session.proxyRef !== undefined && session.proxyRef !== PROXY_REF_INHERIT
+      ? resolveProxyRefFromPrimedPool(sessionProxyRef ?? null)
+      : await resolveOauthProviderProxyUrl(input.provider);
     const exchange = await definition.exchangeAuthorizationCode({
       code,
       state: input.state,
@@ -790,8 +794,7 @@ export async function handleOauthCallback(input: {
       definition,
       exchange,
       rebindAccountId: session.rebindAccountId,
-      proxyUrl: session.proxyUrl,
-      useSystemProxy: session.useSystemProxy,
+      proxyRef: session.proxyRef,
       activateExistingAfterRefresh: true,
     });
     if (!account) {
@@ -956,8 +959,7 @@ export async function listOauthConnections(options: {
         : (routeChannelCountByAccount.get(row.accounts.id) || 0),
       lastModelSyncAt: oauth.lastModelSyncAt,
       lastModelSyncError: oauth.lastModelSyncError,
-      proxyUrl: getProxyUrlFromExtraConfig(row.accounts.extraConfig),
-      useSystemProxy: getUseSystemProxyFromExtraConfig(row.accounts.extraConfig),
+      proxyRef: getProxyRefFromExtraConfig(row.accounts.extraConfig) ?? PROXY_REF_INHERIT,
       routeParticipation,
       routeUnit,
       site: {
@@ -1079,8 +1081,8 @@ export async function refreshOauthConnectionQuotaBatch(accountIds: number[]) {
 export async function importOauthConnectionsFromNativeJson(input: {
   data?: unknown;
   items?: unknown[];
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  /** Wire value: absent = leave alone, `null` = direct, `'inherit'` = follow site, id = that entry. */
+  proxyRef?: string | null;
 }) {
   const payloadItems = normalizeImportedOauthJsonItems(input);
   const continueOnItemFailure = Array.isArray(input.items);
@@ -1114,8 +1116,7 @@ export async function importOauthConnectionsFromNativeJson(input: {
       const persisted = await activatePersistedOauthAccount({
         definition,
         exchange: resolvedIdentity.exchange,
-        proxyUrl: input.proxyUrl,
-        useSystemProxy: input.useSystemProxy,
+        proxyRef: input.proxyRef,
         persistedStatus: resolvedIdentity.disabled ? 'disabled' : 'active',
       });
       imported += 1;
@@ -1156,8 +1157,8 @@ export async function importOauthConnectionsFromNativeJson(input: {
 
 export async function updateOauthConnectionProxySettings(input: {
   accountId: number;
-  proxyUrl?: string | null;
-  useSystemProxy?: boolean;
+  /** Wire value: absent = leave alone, `null` = direct, `'inherit'` = follow site, id = that entry. */
+  proxyRef?: string | null;
 }) {
   const account = await db.select().from(schema.accounts)
     .where(eq(schema.accounts.id, input.accountId))
@@ -1170,10 +1171,9 @@ export async function updateOauthConnectionProxySettings(input: {
     throw new Error('account is not managed by oauth');
   }
 
-  const extraConfig = mergeAccountExtraConfig(account.extraConfig, {
-    ...(input.proxyUrl !== undefined ? { proxyUrl: input.proxyUrl } : {}),
-    ...(input.useSystemProxy !== undefined ? { useSystemProxy: input.useSystemProxy } : {}),
-  });
+  const extraConfig = input.proxyRef !== undefined
+    ? withProxyRefInExtraConfig(account.extraConfig, parseConnectionProxyRefInput(input.proxyRef))
+    : String(account.extraConfig ?? '');
   const updatedAt = new Date().toISOString();
 
   await db.update(schema.accounts).set({
@@ -1187,8 +1187,7 @@ export async function updateOauthConnectionProxySettings(input: {
   return {
     success: true as const,
     accountId: input.accountId,
-    proxyUrl: getProxyUrlFromExtraConfig(extraConfig),
-    useSystemProxy: getUseSystemProxyFromExtraConfig(extraConfig),
+    proxyRef: getProxyRefFromExtraConfig(extraConfig) ?? PROXY_REF_INHERIT,
     refreshedRoutes: true,
     modelRefresh: {
       success: refreshResult.status === 'success',
@@ -1202,9 +1201,9 @@ export async function updateOauthConnectionProxySettings(input: {
 
 export async function startOauthRebindFlow(
   accountId: number,
-  options?: { requestOrigin?: string; proxyUrl?: string | null; useSystemProxy?: boolean },
+  options?: { requestOrigin?: string; proxyRef?: string | null },
 ) {
-  const { requestOrigin, proxyUrl, useSystemProxy } = options ?? {};
+  const { requestOrigin, proxyRef } = options ?? {};
   const account = await db.select().from(schema.accounts)
     .where(eq(schema.accounts.id, accountId))
     .get();
@@ -1219,12 +1218,10 @@ export async function startOauthRebindFlow(
     provider: oauth.provider,
     rebindAccountId: accountId,
     projectId: oauth.projectId,
-    proxyUrl: proxyUrl !== undefined
-      ? proxyUrl
-      : (getProxyUrlFromExtraConfig(account.extraConfig) ?? undefined),
-    useSystemProxy: useSystemProxy !== undefined
-      ? useSystemProxy
-      : (getUseSystemProxyFromExtraConfig(account.extraConfig) || undefined),
+    // Rebinding keeps the connection's existing choice unless the caller overrides it.
+    proxyRef: proxyRef !== undefined
+      ? proxyRef
+      : (getProxyRefFromExtraConfig(account.extraConfig) ?? PROXY_REF_INHERIT),
     requestOrigin,
   });
 }

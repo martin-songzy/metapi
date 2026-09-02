@@ -24,7 +24,7 @@
   <img alt="Docker Pulls" src="https://img.shields.io/docker/pulls/kennethww/metapi?style=flat&logo=docker&label=Docker%20Pulls">
 </a><a href="https://hub.docker.com/r/kennethww/metapi">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-brightgreen?style=flat">
-</a><img alt="Node.js" src="https://img.shields.io/badge/Node.js-22.15%2B-339933?logo=node.js&style=flat"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat"><a href="https://zeabur.com/templates/DOX5PR">
+</a><img alt="Node.js" src="https://img.shields.io/badge/Node.js-25%2B-339933?logo=node.js&style=flat"><img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&style=flat"><a href="https://zeabur.com/templates/DOX5PR">
   <img alt="Deploy on Zeabur" src="https://zeabur.com/button.svg" height="28">
 </a><a href="https://render.com/deploy?repo=https://github.com/martin-songzy/metapi">
   <img alt="Deploy to Render" src="https://render.com/images/deploy-to-render-button.svg" height="28">
@@ -196,8 +196,11 @@
 | **Veloera**   | `veloera`   | API 网关平台         |
 | **AnyRouter** | `anyrouter` | 通用路由平台         |
 | **Sub2API**   | `sub2api`   | 订阅制中转平台       |
+| **通用站点**  | `generic`   | 没有管理 API 的中转站 |
 
 各平台适配器覆盖模型枚举、余额查询、Token 管理、代理接入等通用能力；登录、签到、用户信息等能力按平台而异。
+
+`generic` 是给「只有一个 OpenAI 兼容接口、没有任何管理 API」的站点用的兜底类型，只能在平台下拉框里**手动选择**——它的自动检测永不命中，以免把一个响应慢的 New API 分支误降级成通用站点。这类站点没有登录、没有签到，余额恒为 0（不是查询失败，是平台本身就没有这个概念）。添加连接时可勾选「允许未验证」：仍然会去拉一次模型列表，只是拉到空列表不再算失败——凭证会以 API Key 形式存下并关掉签到。适配器抛出的真实错误不会被这个开关吞掉，也不会凭空写入模型。
 
 ### 👥 账号与 Token 管理
 
@@ -206,6 +209,22 @@
 - **凭证加密存储**：所有敏感凭证均加密保存在本地数据库中
 - **自动续签**：Token 过期时自动重新登录获取新凭证
 - **站点联动**：禁用站点自动级联禁用所有关联账号
+
+### 🔀 出站代理
+
+代理地址只在**一个地方**输入：设置 → 代理池。站点、连接、Telegram 通知都不再各自填地址，改为从这个列表里**选**一条——同一个代理换了地址只改这一处，所有引用它的站点会一起生效。
+
+| 层级         | 可选答案                          | 说明                                     |
+| ------------ | --------------------------------- | ---------------------------------------- |
+| **站点**     | 某条池条目 / 不走代理             | 站点级默认                               |
+| **连接**     | 跟随站点 / 不走代理 / 某条池条目  | 「不走代理」会**覆盖**站点，而不是回退到它 |
+| **Telegram** | 某条池条目 / 不走代理             | 通知推送单独选                            |
+
+- 站点/连接存的是条目 **id**，不是地址。改名或换地址都不会破坏引用。
+- **删除**一条代理前，会先列出将被改成「不走代理」的站点与连接，确认后才执行；引用已删条目一律按「不走代理」处理，且在站点列表里标出来，绝不会顶替成另一条。
+- 恢复出厂设置**保留代理池**——一个连不上任何上游的实例没法被重新配置。
+
+> **从 v1.3 之前升级**：旧的全局系统代理、站点代理地址、连接代理地址不会自动迁移。升级后所有代理都是关闭状态，需要在代理池里添加条目并重新勾选。
 
 ### 🏪 模型广场
 
@@ -235,9 +254,10 @@
 
 `site_disabled_models` 按**站点**存储、不区分账号、且不会自动恢复，所以一次误判会让该站点所有账号都用不了这个模型。默认关键词表只收「模型不存在」这类语义，账号级失败（余额不足、限流、密钥无效）一律落到「未确定」。需要让某种错误措辞被判为不可用，把它加进关键词表即可。
 
-- **配置**：兴趣正则、随机测试词表（避开固定 `hi`/`hello` 被识别为测活）、User-Agent（内置 Claude Code / Codex，可自定义）、接口类型（chat / messages / responses）、代理、并发与超时；接口类型和 UA 可按站点单独配置
+- **配置**：兴趣正则、随机测试词表（避开固定 `hi`/`hello` 被识别为测活）、User-Agent（内置 Claude Code / Codex，可自定义）、接口类型（chat / messages / responses）、代理、超时；接口类型和 UA 可按站点单独配置
+- **并发分两条轴**：站点并发（同时扫几个站，默认 5、上限 10）与站点内模型并发（默认 1、上限 8）。分开是因为「多站点并行」通常没问题，而**对单站的突发请求**才是触发限流的原因。最坏同时在飞的请求数是两者相乘，且每个都计费
 - **运行**：超过阈值先弹确认并告知将发出多少个真实请求，硬上限 300 会直接拒绝并提示收窄正则；运行中可随时取消，已完成的结果保留并标记为「已取消」，不会当成完整扫描
-- **结果**：按模型或站点筛选，按响应速度或站点余额排序，持久化并纳入备份恢复。未测量的行（超时、余额未知）在两个排序方向上都排最后
+- **结果**：按模型或站点筛选，按响应速度或站点余额排序，持久化并纳入备份恢复。未测量的行（超时、余额未知）在两个排序方向上都排最后。结果没有 TTL，可用「清空结果」一次性清掉（**全部站点全部模型**，不跟随当前筛选）
 
 ### ✅ 自动签到
 
