@@ -804,6 +804,12 @@ export type ModelProbeUserAgentPreset = {
 
 export type ModelProbeConfig = {
   interestPatterns: string[];
+  /**
+   * Stored patterns switched OFF for the next sweep. A DISABLE list, so a newly
+   * added pattern is active by default and narrowing a sweep does not require
+   * deleting regexes you want back.
+   */
+  disabledInterestPatterns: string[];
   prompts: string[];
   userAgents: ModelProbeUserAgentPreset[];
   defaultUserAgentId: string;
@@ -881,8 +887,20 @@ export type ModelProbePreviewSite = {
   credentialVerified: boolean;
   discoveredCount: number;
   models: string[];
+  /** Probe requests this site contributes: the (key × model) product, not `models.length`. */
+  targetCount: number;
+  keys: ModelProbePreviewKey[];
   liveFailure: ModelProbeLiveFailure | null;
   notes: string[];
+};
+
+export type ModelProbePreviewKey = {
+  tokenId: number;
+  tokenName: string;
+  isPrimary: boolean;
+  skipReason: string | null;
+  discoveredCount: number;
+  modelCount: number;
 };
 
 export type ModelProbeSkippedSite = {
@@ -899,6 +917,11 @@ export type ModelProbeInvalidPattern = {
 
 export type ModelProbePreview = {
   sites: ModelProbePreviewSite[];
+  /**
+   * The number of probe requests a run would issue — the per-key total, not the
+   * count of distinct models. This is the number the confirmation gate authorizes
+   * and the number the sweep is billed for.
+   */
   totalModels: number;
   invalidPatterns: ModelProbeInvalidPattern[];
   skipped: ModelProbeSkippedSite[];
@@ -950,8 +973,17 @@ export type ModelProbeResultStatus =
   | "inconclusive"
   | "skipped";
 
-export type ModelProbeResultSortBy = "latency" | "balance" | "checkedAt";
+/** Every results column is sortable; mirrors MODEL_PROBE_RESULT_SORT_FIELDS. */
+export type ModelProbeResultSortBy =
+  | "site" | "model" | "status" | "key" | "latency" | "balance"
+  | "endpoint" | "checkedAt" | "prompt" | "userAgent" | "reason";
 
+/**
+ * One row of the results table: one KEY's verdict for one model.
+ *
+ * `status` uses the wider per-key vocabulary, which adds the two states that mean
+ * no request was ever sent for this key.
+ */
 export type ModelProbeResult = {
   id: number;
   siteId: number;
@@ -959,8 +991,12 @@ export type ModelProbeResult = {
   accountId: number | null;
   accountUsername: string | null;
   balance: number | null;
+  tokenId: number;
+  /** Empty for the primary key, which has no `account_tokens` row to name it. */
+  tokenName: string;
+  isPrimary: boolean;
   modelName: string;
-  status: ModelProbeResultStatus;
+  status: ModelProbeKeyResultStatus;
   latencyMs: number | null;
   httpStatus: number | null;
   failureKind: string | null;
@@ -974,7 +1010,8 @@ export type ModelProbeResult = {
 export type ModelProbeResultsQuery = {
   model?: string;
   siteId?: number;
-  status?: ModelProbeResultStatus;
+  /** The wider per-key vocabulary: the page lists per-key rows. */
+  status?: ModelProbeKeyResultStatus;
   sortBy?: ModelProbeResultSortBy;
   order?: "asc" | "desc";
   limit?: number;

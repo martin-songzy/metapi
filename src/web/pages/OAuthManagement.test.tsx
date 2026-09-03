@@ -65,12 +65,12 @@ function findOauthSettingInput(root: WebTestRenderer, key: string) {
 }
 
 /**
- * The proxy picker's radios. Sites and connections choose from the pool now, so a
- * test drives a radio by id instead of typing an address into a field that no
+ * The proxy picker's dropdown. Sites and connections choose from the pool now, so a
+ * test picks an option value instead of typing an address into a field that no
  * longer exists.
  */
-function findProxyRadio(root: WebTestRenderer, idPrefix: string, key: string) {
-  return root.root.find((node) => node.props?.['data-testid'] === `${idPrefix}-${key}`);
+function findProxySelect(root: WebTestRenderer, idPrefix: string) {
+  return root.root.find((node) => node.props?.['data-testid'] === `${idPrefix}-select`);
 }
 
 function findAllByClassName(root: WebTestRenderer, className: string) {
@@ -1413,7 +1413,7 @@ describe('OAuthManagement page', () => {
       expect(importText).toContain('结构有效');
       // Import defaults to 跟随站点 now: there is no global address for it to
       // preselect, and inheriting is the only answer that is right for every file.
-      expect(findProxyRadio(root, 'oauth-import-proxy', 'inherit').props.checked).toBe(true);
+      expect(findProxySelect(root, 'oauth-import-proxy').props.value).toBe('inherit');
 
       await clickButton(root, '添加');
 
@@ -1629,7 +1629,7 @@ describe('OAuthManagement page', () => {
       await clickButton(root!, '新建 OAuth 连接');
 
       await act(async () => {
-        findProxyRadio(root!, 'oauth-proxy', 'entry-px_hk').props.onChange({ target: { checked: true } });
+        findProxySelect(root!, 'oauth-proxy').props.onChange({ target: { value: 'px_hk' } });
       });
 
       await clickButton(root!, '连接 Codex');
@@ -2171,9 +2171,7 @@ describe('OAuthManagement page', () => {
       expect(collectText(root!.root)).toContain('代理设置 · gemini@example.com');
 
       // The drawer opens on the connection's STORED choice, not on a default.
-      expect(findProxyRadio(root!, 'oauth-proxy', 'entry-px_hk').props.checked).toBe(true);
-      expect(findProxyRadio(root!, 'oauth-proxy', 'inherit').props.checked).toBe(false);
-      expect(findProxyRadio(root!, 'oauth-proxy', 'direct').props.checked).toBe(false);
+      expect(findProxySelect(root!, 'oauth-proxy').props.value).toBe('px_hk');
     } finally {
       root?.unmount();
     }
@@ -2228,10 +2226,10 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       await clickButton(root!, '代理设置');
-      const customProxyToggle = findProxyRadio(root!, 'oauth-proxy', 'direct');
+      const customProxyToggle = findProxySelect(root!, 'oauth-proxy');
 
       await act(async () => {
-        customProxyToggle.props.onChange({ target: { checked: true } });
+        customProxyToggle.props.onChange({ target: { value: '__direct__' } });
       });
 
       await clickButton(root!, '保存代理');
@@ -2378,10 +2376,10 @@ describe('OAuthManagement page', () => {
       await flushMicrotasks();
 
       await clickButton(root!, '新建 OAuth 连接');
-      const systemProxyToggle = findProxyRadio(root!, 'oauth-proxy', 'direct');
+      const systemProxyToggle = findProxySelect(root!, 'oauth-proxy');
 
       await act(async () => {
-        systemProxyToggle.props.onChange({ target: { checked: true } });
+        systemProxyToggle.props.onChange({ target: { value: '__direct__' } });
       });
 
       await clickButton(root!, '连接 ChatGPT Codex');
@@ -2474,7 +2472,7 @@ describe('OAuthManagement page', () => {
       await clickButton(root, '新建 OAuth 连接');
 
       await act(async () => {
-        findProxyRadio(root, 'oauth-proxy', 'entry-px_hk').props.onChange({ target: { checked: true } });
+        findProxySelect(root, 'oauth-proxy').props.onChange({ target: { value: 'px_hk' } });
       });
       await clickButton(root, '连接 ChatGPT Codex');
       await flushMicrotasks();
@@ -2486,8 +2484,7 @@ describe('OAuthManagement page', () => {
 
       // Back to 跟随站点: a one-off choice for one authorization must not linger and
       // silently apply to the next connection created from the same drawer.
-      expect(findProxyRadio(root, 'oauth-proxy', 'inherit').props.checked).toBe(true);
-      expect(findProxyRadio(root, 'oauth-proxy', 'entry-px_hk').props.checked).toBe(false);
+      expect(findProxySelect(root, 'oauth-proxy').props.value).toBe('inherit');
     } finally {
       root?.unmount();
     }
@@ -2830,3 +2827,5 @@ describe('OAuthManagement page', () => {
     }
   });
 });
+
+

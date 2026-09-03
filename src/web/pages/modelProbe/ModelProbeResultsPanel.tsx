@@ -37,14 +37,14 @@ const PLACEHOLDER = '—';
  * drifting out of order is the classic way a table like this breaks silently.
  */
 type ResultColumnKey =
-  | 'site' | 'model' | 'status' | 'keys' | 'latency' | 'balance'
+  | 'site' | 'model' | 'status' | 'key' | 'latency' | 'balance'
   | 'endpoint' | 'checkedAt' | 'prompt' | 'userAgent' | 'reason';
 
 const COLUMN_LABELS: Record<ResultColumnKey, string> = {
   site: '站点 / 账号',
   model: '模型',
   status: '状态',
-  keys: 'Key 结果',
+  key: 'Key',
   latency: '响应',
   balance: '余额',
   endpoint: '接口',
@@ -55,12 +55,12 @@ const COLUMN_LABELS: Record<ResultColumnKey, string> = {
 };
 
 const COLUMN_ORDER: ResultColumnKey[] = [
-  'site', 'model', 'status', 'keys', 'latency', 'balance',
+  'site', 'model', 'key', 'status', 'latency', 'balance',
   'endpoint', 'checkedAt', 'prompt', 'userAgent', 'reason',
 ];
 
 const DEFAULT_COLUMN_WIDTHS: Partial<Record<ResultColumnKey, number>> = {
-  keys: 200,
+  key: 150,
   endpoint: 170,
   checkedAt: 150,
   prompt: 200,
@@ -77,8 +77,23 @@ const DEFAULT_COLUMN_WIDTHS: Partial<Record<ResultColumnKey, number>> = {
  */
 const DEFAULT_HIDDEN_COLUMNS: ResultColumnKey[] = ['prompt', 'userAgent'];
 
-const COLUMN_LAYOUT_STORAGE_KEY = 'metapi.modelProbe.results.columns.v1';
+const COLUMN_LAYOUT_STORAGE_KEY = 'metapi.modelProbe.results.columns.v2';
 const MIN_COLUMN_WIDTH = 80;
+
+/**
+ * Fallback width for a column the operator has never resized.
+ *
+ * Every column needs one, because the table is sized by content rather than
+ * stretched to the viewport: see the `<table>` style for why.
+ */
+const FALLBACK_COLUMN_WIDTH = 140;
+
+/**
+ * 全部 maps to the server's own ceiling rather than to "no limit": the endpoint
+ * caps `limit` at 500 anyway, so pretending otherwise would silently truncate.
+ */
+const PAGE_SIZE_OPTIONS = [50, 100, 500] as const;
+const ALL_PAGE_SIZE = 500;
 
 type ColumnLayout = {
   hidden: ResultColumnKey[];
@@ -182,15 +197,49 @@ const KEY_STATUS_COLORS: Record<ModelProbeKeyResultStatus, string> = {
  * unnamed additional key falls back to its row id so two nameless keys stay
  * tellable apart, matching how the task log describes them.
  */
-function describeKeyLabel(entry: ModelProbeKeyResult): string {
+function describeKeyLabel(entry: { isPrimary: boolean; tokenName: string; tokenId: number }): string {
   if (entry.isPrimary) return '主 Key';
   return entry.tokenName ? entry.tokenName : `Key #${entry.tokenId}`;
 }
 
 const SORT_LABELS: Record<ModelProbeResultSortBy, string> = {
+  site: '站点',
+  model: '模型',
+  status: '状态',
+  key: 'Key',
   latency: '响应速度',
   balance: '站点余额',
+  endpoint: '接口',
   checkedAt: '探测时间',
+  prompt: '提示词',
+  userAgent: 'User-Agent',
+  reason: '原因',
+};
+
+/**
+ * The shortcut toolbar's fields. Deliberately a subset: the column headers cover
+ * all eleven, and eleven toolbar buttons would be noise.
+ */
+const TOOLBAR_SORT_FIELDS: ModelProbeResultSortBy[] = ['latency', 'balance', 'checkedAt'];
+
+/**
+ * Which direction a column opens on when first clicked.
+ *
+ * The useful default differs by column: fastest first for latency, richest first
+ * for balance, newest first for a timestamp, and A→Z for anything textual.
+ */
+const SORT_DEFAULT_ORDER: Record<ModelProbeResultSortBy, 'asc' | 'desc'> = {
+  site: 'asc',
+  model: 'asc',
+  status: 'asc',
+  key: 'asc',
+  latency: 'asc',
+  balance: 'desc',
+  endpoint: 'asc',
+  checkedAt: 'desc',
+  prompt: 'asc',
+  userAgent: 'asc',
+  reason: 'asc',
 };
 
 const hintStyle: React.CSSProperties = {
@@ -366,12 +415,21 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
   };
 
   const handleSort = (sortBy: ModelProbeResultSortBy) => {
-    // Same field again flips direction; a new field starts at its most useful
-    // direction — fastest first for latency, richest first for balance.
+    // Same field again flips direction; a new field opens on whichever direction is
+    // most useful for that column.
     const sameField = query.sortBy === sortBy;
-    const defaultOrder: 'asc' | 'desc' = sortBy === 'latency' ? 'asc' : 'desc';
-    const order: 'asc' | 'desc' = sameField ? (query.order === 'asc' ? 'desc' : 'asc') : defaultOrder;
+    const order: 'asc' | 'desc' = sameField
+      ? (query.order === 'asc' ? 'desc' : 'asc')
+      : SORT_DEFAULT_ORDER[sortBy];
     applyQuery({ sortBy, order });
+  };
+
+  /**
+   * Page size resets the offset with it: keeping offset 100 while shrinking the page
+   * to 50 would silently skip a page rather than resize the current one.
+   */
+  const handlePageSize = (limit: number) => {
+    setQuery((prev) => ({ ...prev, limit, offset: 0 }));
   };
 
   const siteOptions = useMemo(() => [
@@ -381,9 +439,9 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
 
   const statusOptions = useMemo(() => [
     { value: '', label: '全部状态' },
-    ...(Object.keys(STATUS_LABELS) as ModelProbeResultStatus[]).map((value) => ({
+    ...(Object.keys(KEY_STATUS_LABELS) as ModelProbeKeyResultStatus[]).map((value) => ({
       value,
-      label: STATUS_LABELS[value],
+      label: KEY_STATUS_LABELS[value],
     })),
   ], []);
 
@@ -466,7 +524,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     const siteLabel = applied.siteId === undefined
       ? '全部站点'
       : (siteNameById.get(applied.siteId) ?? `站点 #${applied.siteId}`);
-    const statusLabel = applied.status === undefined ? '全部状态' : STATUS_LABELS[applied.status];
+    const statusLabel = applied.status === undefined ? '全部状态' : KEY_STATUS_LABELS[applied.status];
     const sortBy = applied.sortBy ?? 'checkedAt';
     const order = applied.order === 'asc' ? '升序' : '降序';
     const modelLabel = applied.model ? `模型 ${applied.model}` : '全部模型';
@@ -505,7 +563,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
           data-testid="model-probe-results-status"
           size="sm"
           value={query.status ?? ''}
-          onChange={(value) => applyQuery({ status: (value || undefined) as ModelProbeResultStatus | undefined })}
+          onChange={(value) => applyQuery({ status: (value || undefined) as ModelProbeKeyResultStatus | undefined })}
           options={statusOptions}
         />
       </div>
@@ -560,7 +618,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
 
   const sortButtons = (
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-      {(Object.keys(SORT_LABELS) as ModelProbeResultSortBy[]).map((field) => {
+      {TOOLBAR_SORT_FIELDS.map((field) => {
         const active = query.sortBy === field;
         return (
           <button
@@ -586,9 +644,9 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     </div>
   );
 
-  const renderStatus = (status: ModelProbeResultStatus) => (
-    <span style={{ color: STATUS_COLORS[status], fontWeight: 600, fontSize: 12 }}>
-      {STATUS_LABELS[status]}
+  const renderStatus = (status: ModelProbeKeyResultStatus) => (
+    <span style={{ color: KEY_STATUS_COLORS[status], fontWeight: 600, fontSize: 12 }}>
+      {KEY_STATUS_LABELS[status]}
     </span>
   );
 
@@ -609,47 +667,10 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
   };
 
   const offset = query.offset ?? 0;
+  const pageSize = query.limit ?? PAGE_SIZE;
   const canPrev = offset > 0;
-  const canNext = offset + PAGE_SIZE < total;
+  const canNext = offset + pageSize < total;
 
-  /**
-   * One line per key that was listed for this site×model.
-   *
-   * Renders EVERY key, including the ones that were never probed: 「已停用」 and
-   * 「密钥不可用」 are distinct facts from 「未确定」, and an operator paying per key
-   * needs to see that a key contributed nothing because it was switched off, not
-   * because the model failed for it.
-   *
-   * The primary key is labelled rather than left to its empty stored `tokenName`
-   * — it lives on the account row and has no `account_tokens` name — and it comes
-   * first because the server already ordered on the sentinel.
-   */
-  const renderKeyResults = (row: ModelProbeResult): React.ReactNode => {
-    const keys = keyResultsFor(row);
-    if (keys.length === 0) return PLACEHOLDER;
-
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-        {keys.map((entry) => (
-          <div
-            key={entry.id}
-            data-testid={`model-probe-key-result-${entry.id}`}
-            style={{ display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12 }}
-          >
-            <span style={{ color: 'var(--color-text-muted)', flex: '0 0 auto' }}>
-              {describeKeyLabel(entry)}
-            </span>
-            <span style={{ color: KEY_STATUS_COLORS[entry.status], fontWeight: 600 }}>
-              {KEY_STATUS_LABELS[entry.status]}
-            </span>
-            {entry.latencyMs !== null && (
-              <span style={{ color: 'var(--color-text-muted)' }}>{formatLatency(entry.latencyMs)}</span>
-            )}
-          </div>
-        ))}
-      </div>
-    );
-  };
 
   const renderMobileRows = () => (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -667,8 +688,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
             <MobileField label="响应" value={formatLatency(row.latencyMs)} />
             <MobileField label="接口" value={formatText(row.endpointUsed)} stacked />
             <MobileField label="探测时间" value={formatCheckedAt(row.checkedAt)} />
-            {/* Cards have no columns, so the key breakdown is always shown here. */}
-            <MobileField label="Key 结果" value={renderKeyResults(row)} stacked />
+            <MobileField label="Key" value={describeKeyLabel(row)} />
             <MobileField label="原因" value={renderReason(row)} stacked />
           </div>
         </MobileCard>
@@ -689,8 +709,16 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
         return <span style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: 12 }}>{row.modelName}</span>;
       case 'status':
         return renderStatus(row.status);
-      case 'keys':
-        return renderKeyResults(row);
+      case 'key':
+        return (
+          <span
+            data-testid={`model-probe-result-key-${row.id}`}
+            style={{ fontSize: 12, wordBreak: 'break-word' }}
+            title={row.isPrimary ? '账号自带的主 Key，路由转发用的就是它' : undefined}
+          >
+            {describeKeyLabel(row)}
+          </span>
+        );
       case 'latency':
         return formatLatency(row.latencyMs);
       case 'balance':
@@ -710,10 +738,18 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     }
   };
 
-  const SORTABLE_COLUMNS: Partial<Record<ResultColumnKey, ModelProbeResultSortBy>> = {
+  const SORTABLE_COLUMNS: Record<ResultColumnKey, ModelProbeResultSortBy> = {
+    site: 'site',
+    model: 'model',
+    status: 'status',
+    key: 'key',
     latency: 'latency',
     balance: 'balance',
+    endpoint: 'endpoint',
     checkedAt: 'checkedAt',
+    prompt: 'prompt',
+    userAgent: 'userAgent',
+    reason: 'reason',
   };
 
   /**
@@ -794,25 +830,66 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
 
   const renderDesktopRows = () => (
     <div data-testid="model-probe-results-table" style={{ overflowX: 'auto' }}>
-      <table className="data-table" style={{ width: '100%', tableLayout: 'fixed' }}>
+      {/*
+        `width: max-content` with `minWidth: 100%`, NOT `width: 100%`.
+
+        With a 100%-wide fixed layout the browser has to keep the total constant, so
+        widening one column takes the space back from its neighbours — dragging the
+        Key column narrowed 模型 next to it and clipped its content, which is not what
+        a resize handle means. Sized by content instead, a drag grows the table and
+        the wrapper scrolls; every column therefore needs an explicit width, hence
+        FALLBACK_COLUMN_WIDTH.
+      */}
+      <table className="data-table" style={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+        <colgroup>
+          {visibleColumns.map((key) => (
+            <col key={key} style={{ width: layout.widths[key] ?? DEFAULT_COLUMN_WIDTHS[key] ?? FALLBACK_COLUMN_WIDTH }} />
+          ))}
+        </colgroup>
         <thead>
           <tr>
             {visibleColumns.map((key) => {
               const sortKey = SORTABLE_COLUMNS[key];
-              const width = layout.widths[key] ?? DEFAULT_COLUMN_WIDTHS[key];
+              const width = layout.widths[key] ?? DEFAULT_COLUMN_WIDTHS[key] ?? FALLBACK_COLUMN_WIDTH;
+              const active = query.sortBy === sortKey;
               return (
                 <th
                   key={key}
                   data-testid={`model-probe-results-header-${key}`}
-                  style={{ position: 'relative', ...(width ? { width } : {}) }}
-                  /*
-                    `aria-sort` stays on the header, the only ARIA-valid surface for
-                    it, and only the sortable columns carry it — marking every column
-                    'none' would be noise.
-                  */
-                  {...(sortKey ? { 'aria-sort': ariaSortFor(sortKey) } : {})}
+                  style={{ position: 'relative' }}
+                  aria-sort={ariaSortFor(sortKey)}
                 >
-                  {COLUMN_LABELS[key]}
+                  {/*
+                    The label is the click target, not the whole `<th>`: the resize
+                    handle sits in the same cell, and a header-wide handler would make
+                    every drag also re-sort the page.
+                  */}
+                  <button
+                    type="button"
+                    data-testid={`model-probe-results-sort-${key}`}
+                    onClick={() => handleSort(sortKey)}
+                    aria-label={sortButtonLabel(sortKey, active)}
+                    aria-pressed={active}
+                    style={{
+                      appearance: 'none',
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      margin: 0,
+                      font: 'inherit',
+                      color: active ? 'var(--color-primary)' : 'inherit',
+                      fontWeight: active ? 700 : undefined,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    {COLUMN_LABELS[key]}
+                    <span aria-hidden="true" style={{ fontSize: 10, opacity: active ? 1 : 0.35 }}>
+                      {active ? (query.order === 'asc' ? '▲' : '▼') : '↕'}
+                    </span>
+                  </button>
                   <span
                     data-testid={`model-probe-results-resize-${key}`}
                     role="separator"
@@ -820,11 +897,7 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
                     aria-label={`调整${COLUMN_LABELS[key]}列宽`}
                     onPointerDown={(event) => {
                       event.stopPropagation();
-                      startColumnResize(
-                        key,
-                        event.clientX,
-                        width ?? MIN_COLUMN_WIDTH,
-                      );
+                      startColumnResize(key, event.clientX, width);
                     }}
                     style={{
                       position: 'absolute',
@@ -866,6 +939,14 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          {/*
+            A three-field shortcut, not a mirror of the eleven column headers.
+            Headers are the complete sort control; this stays because it is the ONLY
+            one that exists while the table is loading or empty — and because these
+            three are the cross-cutting questions ("what is fastest", "which site has
+            money left", "what did I just probe") an operator asks without hunting for
+            a column.
+          */}
           {sortButtons}
           {/* Desktop only: the mobile view is cards, which have no columns to configure. */}
           {!isMobile && columnSettings}
@@ -918,30 +999,53 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
         </div>
       ) : isMobile ? renderMobileRows() : renderDesktopRows()}
 
-      {(canPrev || canNext) && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
-          <button
-            type="button"
-            data-testid="model-probe-results-prev"
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
+        <label
+          style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--color-text-muted)' }}
+        >
+          每页
+          <select
+            data-testid="model-probe-results-page-size"
+            value={String(pageSize)}
+            onChange={(event) => handlePageSize(Number(event.target.value))}
+            disabled={loading}
             className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-            onClick={() => setQuery((prev) => ({ ...prev, offset: Math.max(0, (prev.offset ?? 0) - PAGE_SIZE) }))}
-            disabled={!canPrev || loading}
+            style={{ border: '1px solid var(--color-border)', padding: '4px 8px' }}
           >
-            上一页
-          </button>
-          <button
-            type="button"
-            data-testid="model-probe-results-next"
-            className="btn btn-ghost"
-            style={{ border: '1px solid var(--color-border)' }}
-            onClick={() => setQuery((prev) => ({ ...prev, offset: (prev.offset ?? 0) + PAGE_SIZE }))}
-            disabled={!canNext || loading}
-          >
-            下一页
-          </button>
-        </div>
-      )}
+            {PAGE_SIZE_OPTIONS.map((size) => (
+              <option key={size} value={size}>
+                {size === ALL_PAGE_SIZE ? `全部（最多 ${ALL_PAGE_SIZE}）` : String(size)}
+              </option>
+            ))}
+          </select>
+          条
+        </label>
+
+        {(canPrev || canNext) && (
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              type="button"
+              data-testid="model-probe-results-prev"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setQuery((prev) => ({ ...prev, offset: Math.max(0, (prev.offset ?? 0) - pageSize) }))}
+              disabled={!canPrev || loading}
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              data-testid="model-probe-results-next"
+              className="btn btn-ghost"
+              style={{ border: '1px solid var(--color-border)' }}
+              onClick={() => setQuery((prev) => ({ ...prev, offset: (prev.offset ?? 0) + pageSize }))}
+              disabled={!canNext || loading}
+            >
+              下一页
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

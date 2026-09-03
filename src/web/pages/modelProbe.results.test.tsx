@@ -75,6 +75,11 @@ const SITES = [
   },
 ];
 
+/**
+ * A row is one KEY's verdict for one model, so every fixture carries a key identity.
+ * `tokenId: 0` is the sentinel for the account's own primary key, which has no
+ * `account_tokens` row and therefore no stored name.
+ */
 const SUPPORTED_ROW = {
   id: 1,
   siteId: 4,
@@ -82,6 +87,9 @@ const SUPPORTED_ROW = {
   accountId: 21,
   accountUsername: 'ops@example.com',
   balance: 12.5,
+  tokenId: 0,
+  tokenName: '',
+  isPrimary: true,
   modelName: 'gpt-4o',
   status: 'supported' as const,
   latencyMs: 843,
@@ -102,6 +110,9 @@ const SKIPPED_ROW = {
   accountId: null,
   accountUsername: null,
   balance: null,
+  tokenId: 0,
+  tokenName: '',
+  isPrimary: true,
   modelName: 'claude-3-5-sonnet',
   status: 'skipped' as const,
   latencyMs: null,
@@ -215,10 +226,9 @@ describe('ModelProbe results table', () => {
       expect(row).not.toContain('0.00');
       expect(row).not.toContain('1970');
       expect(row).not.toContain('Invalid Date');
-      // Seven, not six, since the per-key column joined: this fixture sends no
-      // `keyItems`, and an absent key breakdown is a placeholder like any other
-      // null cell — it must not read as "one key, no verdict".
-      expect(row.match(/—/g)).toHaveLength(7);
+      // Six: the Key column always names a key, because a row IS one key's verdict —
+      // it is never a placeholder. Every other nullable cell must be one.
+      expect(row.match(/—/g)).toHaveLength(6);
     } finally {
       root.unmount();
     }
@@ -384,7 +394,7 @@ describe('ModelProbe results pagination', () => {
       await click(findByTestId(root.root, 'model-probe-results-next'));
       expect(Number(lastResultsQuery().offset)).toBeGreaterThan(0);
 
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      await click(findByTestId(root.root, 'model-probe-results-sort-latency'));
       expect(lastResultsQuery()).toMatchObject({ sortBy: 'latency', offset: 0 });
     } finally {
       root.unmount();
@@ -396,7 +406,7 @@ describe('ModelProbe results sorting', () => {
   it('sorts by response speed', async () => {
     const root = await renderPage();
     try {
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      await click(findByTestId(root.root, 'model-probe-results-sort-latency'));
       expect(lastResultsQuery()).toMatchObject({ sortBy: 'latency', order: 'asc' });
     } finally {
       root.unmount();
@@ -406,7 +416,7 @@ describe('ModelProbe results sorting', () => {
   it('sorts by site balance', async () => {
     const root = await renderPage();
     try {
-      await click(findByTestId(root.root, 'model-probe-sort-balance'));
+      await click(findByTestId(root.root, 'model-probe-results-sort-balance'));
       expect(lastResultsQuery()).toMatchObject({ sortBy: 'balance', order: 'desc' });
     } finally {
       root.unmount();
@@ -416,9 +426,9 @@ describe('ModelProbe results sorting', () => {
   it('toggles the direction when the same sort field is clicked again', async () => {
     const root = await renderPage();
     try {
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      await click(findByTestId(root.root, 'model-probe-results-sort-latency'));
       expect(lastResultsQuery()).toMatchObject({ sortBy: 'latency', order: 'asc' });
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      await click(findByTestId(root.root, 'model-probe-results-sort-latency'));
       expect(lastResultsQuery()).toMatchObject({ sortBy: 'latency', order: 'desc' });
     } finally {
       root.unmount();
@@ -544,38 +554,49 @@ describe('ModelProbe results staleness', () => {
 });
 
 describe('ModelProbe results sort accessibility', () => {
-  function headerWithText(root: ReactTestInstance, text: string): ReactTestInstance {
-    return root.find((node) => node.type === 'th' && collectText(node).trim() === text);
+  /**
+   * By testid, not by header text: the label now sits inside the sort button next to
+   * a direction glyph, so matching the cell's whole text would break on the arrow.
+   */
+  function header(root: ReactTestInstance, key: string): ReactTestInstance {
+    return findByTestId(root, `model-probe-results-header-${key}`);
   }
 
   it('reports the active sort direction as aria-sort on the column header', async () => {
     const root = await renderPage();
     try {
       // Default is 探测时间 descending.
-      expect(headerWithText(root.root, '探测时间').props['aria-sort']).toBe('descending');
-      expect(headerWithText(root.root, '响应').props['aria-sort']).toBe('none');
-      expect(headerWithText(root.root, '余额').props['aria-sort']).toBe('none');
+      expect(header(root.root, 'checkedAt').props['aria-sort']).toBe('descending');
+      expect(header(root.root, 'latency').props['aria-sort']).toBe('none');
+      expect(header(root.root, 'balance').props['aria-sort']).toBe('none');
 
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      await click(findByTestId(root.root, 'model-probe-results-sort-latency'));
       // 响应速度 starts ascending — fastest first.
-      expect(headerWithText(root.root, '响应').props['aria-sort']).toBe('ascending');
-      expect(headerWithText(root.root, '探测时间').props['aria-sort']).toBe('none');
+      expect(header(root.root, 'latency').props['aria-sort']).toBe('ascending');
+      expect(header(root.root, 'checkedAt').props['aria-sort']).toBe('none');
 
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
-      expect(headerWithText(root.root, '响应').props['aria-sort']).toBe('descending');
+      await click(findByTestId(root.root, 'model-probe-results-sort-latency'));
+      expect(header(root.root, 'latency').props['aria-sort']).toBe('descending');
     } finally {
       root.unmount();
     }
   });
 
-  it('leaves aria-sort off columns that cannot be sorted', async () => {
+  /**
+   * Every column is sortable now, so every header reports a state. The inverse used
+   * to be asserted here — that text columns carried no `aria-sort` — and keeping that
+   * assertion would pin the old behaviour rather than the requested one.
+   */
+  it('reports a sort state on every column, because every column sorts', async () => {
     const root = await renderPage();
     try {
-      // aria-sort on a non-sortable header would promise an interaction that
-      // does not exist.
-      for (const text of ['站点 / 账号', '模型', '状态', '接口', '原因']) {
-        expect(headerWithText(root.root, text).props['aria-sort'], text).toBeUndefined();
+      for (const key of ['site', 'model', 'status', 'key', 'endpoint', 'reason']) {
+        expect(header(root.root, key).props['aria-sort'], key).toBe('none');
       }
+
+      await click(findByTestId(root.root, 'model-probe-results-sort-model'));
+      // Text columns open A→Z, which is the only useful default for a name.
+      expect(header(root.root, 'model').props['aria-sort']).toBe('ascending');
     } finally {
       root.unmount();
     }
@@ -584,17 +605,17 @@ describe('ModelProbe results sort accessibility', () => {
   it('states the direction in the sort button name, not only in the arrow glyph', async () => {
     const root = await renderPage();
     try {
-      const active = findByTestId(root.root, 'model-probe-sort-checkedAt');
+      const active = findByTestId(root.root, 'model-probe-results-sort-checkedAt');
       // The ↑ / ↓ glyph is visual-only; the accessible name has to carry it.
       expect(active.props['aria-label']).toContain('降序');
       expect(active.props['aria-pressed']).toBe(true);
 
-      const inactive = findByTestId(root.root, 'model-probe-sort-balance');
+      const inactive = findByTestId(root.root, 'model-probe-results-sort-balance');
       expect(inactive.props['aria-pressed']).toBe(false);
       expect(inactive.props['aria-label']).not.toContain('当前');
 
-      await click(findByTestId(root.root, 'model-probe-sort-checkedAt'));
-      expect(findByTestId(root.root, 'model-probe-sort-checkedAt').props['aria-label']).toContain('升序');
+      await click(findByTestId(root.root, 'model-probe-results-sort-checkedAt'));
+      expect(findByTestId(root.root, 'model-probe-results-sort-checkedAt').props['aria-label']).toContain('升序');
     } finally {
       root.unmount();
     }
@@ -605,7 +626,7 @@ describe('ModelProbe results sort accessibility', () => {
     try {
       // aria-sort is only valid on columnheader / rowheader / gridcell.
       for (const field of ['latency', 'balance', 'checkedAt']) {
-        expect(findByTestId(root.root, `model-probe-sort-${field}`).props['aria-sort'], field).toBeUndefined();
+        expect(findByTestId(root.root, `model-probe-results-sort-${field}`).props['aria-sort'], field).toBeUndefined();
       }
     } finally {
       root.unmount();
@@ -681,7 +702,7 @@ describe('ModelProbe results safety and layout', () => {
  * them unasked would crowd a table already reported as too wide.
  */
 describe('ModelProbe results column layout', () => {
-  const STORAGE_KEY = 'metapi.modelProbe.results.columns.v1';
+  const STORAGE_KEY = 'metapi.modelProbe.results.columns.v2';
   let store: Record<string, string>;
 
   /**
@@ -821,17 +842,17 @@ describe('ModelProbe results column layout', () => {
     }
   });
 
-  it('keeps aria-sort on the sortable headers only', async () => {
+  it('reports sort state on every header, since every column sorts', async () => {
     const root = await renderPage();
     try {
-      // Regression guard for the registry rewrite: the sortable columns must keep
-      // reporting sort state, and the rest must not start claiming it.
+      // Regression guard for the registry rewrite: every column reports its state,
+      // and exactly one of them is the active sort.
       expect(findByTestId(root.root, 'model-probe-results-header-checkedAt').props['aria-sort'])
         .toBe('descending');
       expect(findByTestId(root.root, 'model-probe-results-header-latency').props['aria-sort'])
         .toBe('none');
       expect(findByTestId(root.root, 'model-probe-results-header-model').props['aria-sort'])
-        .toBeUndefined();
+        .toBe('none');
     } finally {
       root.unmount();
     }
@@ -990,69 +1011,103 @@ describe('ModelProbe per-key results', () => {
     };
   }
 
-  it('names every key beside its own verdict, and labels the primary key', async () => {
+  /**
+   * Rows, not a breakdown inside one cell: the page lists `model_probe_key_results`,
+   * so three keys on one model are three rows. `keyItems` still rides along for the
+   * 仅备用 Key filter, which is a comparison BETWEEN a model's key rows.
+   */
+  const PRIMARY_RESULT_ROW = {
+    ...SUPPORTED_ROW,
+    id: 501,
+    tokenId: 0,
+    tokenName: '',
+    isPrimary: true,
+    status: 'unsupported' as const,
+    latencyMs: null,
+    httpStatus: 404,
+    failureKind: 'model_missing',
+    reason: '无可用渠道',
+  };
+
+  const BACKUP_RESULT_ROW = {
+    ...PRIMARY_RESULT_ROW,
+    id: 502,
+    tokenId: 77,
+    tokenName: 'group-b',
+    isPrimary: false,
+    status: 'supported' as const,
+    latencyMs: 412,
+    httpStatus: 200,
+    failureKind: null,
+    reason: null,
+  };
+
+  it('gives every key its own row, and labels the primary key', async () => {
     apiMock.getModelProbeResults.mockResolvedValue(
-      withKeys([SUPPORTED_ROW], [PRIMARY_KEY_ROW, BACKUP_KEY_ROW]),
+      withKeys([PRIMARY_RESULT_ROW, BACKUP_RESULT_ROW], [PRIMARY_KEY_ROW, BACKUP_KEY_ROW]),
     );
     const root = await renderPage();
     try {
-      const primary = collectText(findByTestId(root.root, 'model-probe-key-result-501'));
+      const primary = collectText(findByTestId(root.root, 'model-probe-result-row-501'));
       // The primary key stores an empty name — it lives on the account row — so the
       // panel must label it rather than render a blank cell.
       expect(primary).toContain('主 Key');
       expect(primary).toContain('不支持');
 
-      const backup = collectText(findByTestId(root.root, 'model-probe-key-result-502'));
+      const backup = collectText(findByTestId(root.root, 'model-probe-result-row-502'));
       expect(backup).toContain('group-b');
       expect(backup).toContain('可用');
       expect(backup).toContain('412');
+
+      // Same model on both rows: overlapping catalogs are exactly why the site-level
+      // row was an average of facts rather than a fact.
+      expect(primary).toContain('gpt-4o');
+      expect(backup).toContain('gpt-4o');
     } finally {
       root.unmount();
     }
   });
 
   it('distinguishes a key that was never probed from one that reached nothing', async () => {
-    apiMock.getModelProbeResults.mockResolvedValue(withKeys([SUPPORTED_ROW], [
-      PRIMARY_KEY_ROW,
-      { ...BACKUP_KEY_ROW, id: 503, tokenId: 78, tokenName: 'switched-off', status: 'disabled', latencyMs: null },
-      { ...BACKUP_KEY_ROW, id: 504, tokenId: 79, tokenName: 'masked', status: 'unavailable', latencyMs: null },
-    ]));
+    apiMock.getModelProbeResults.mockResolvedValue(withKeys([
+      PRIMARY_RESULT_ROW,
+      { ...BACKUP_RESULT_ROW, id: 503, tokenId: 78, tokenName: 'switched-off', status: 'disabled', latencyMs: null },
+      { ...BACKUP_RESULT_ROW, id: 504, tokenId: 79, tokenName: 'masked', status: 'unavailable', latencyMs: null },
+    ], []));
     const root = await renderPage();
     try {
       // Both states are the point of Q21=B: without them a key that was switched
       // off is simply absent, which reads as 「这个 key 探不到任何模型」 — a claim no
       // probe ever tested.
-      expect(collectText(findByTestId(root.root, 'model-probe-key-result-503'))).toContain('已停用');
-      expect(collectText(findByTestId(root.root, 'model-probe-key-result-504'))).toContain('密钥不可用');
+      expect(collectText(findByTestId(root.root, 'model-probe-result-row-503'))).toContain('已停用');
+      expect(collectText(findByTestId(root.root, 'model-probe-result-row-504'))).toContain('密钥不可用');
     } finally {
       root.unmount();
     }
   });
 
   it('falls back to the row id for an unnamed additional key', async () => {
-    apiMock.getModelProbeResults.mockResolvedValue(withKeys([SUPPORTED_ROW], [
-      PRIMARY_KEY_ROW,
-      { ...BACKUP_KEY_ROW, tokenName: '' },
-    ]));
+    apiMock.getModelProbeResults.mockResolvedValue(withKeys([
+      PRIMARY_RESULT_ROW,
+      { ...BACKUP_RESULT_ROW, tokenName: '' },
+    ], []));
     const root = await renderPage();
     try {
       // Two nameless keys must stay tellable apart, so the id is shown rather than
       // an empty label.
-      expect(collectText(findByTestId(root.root, 'model-probe-key-result-502'))).toContain('#77');
+      expect(collectText(findByTestId(root.root, 'model-probe-result-key-502'))).toContain('#77');
     } finally {
       root.unmount();
     }
   });
 
-  it('shows the placeholder when the server sent no key breakdown at all', async () => {
-    // An older server omits `keyItems` entirely. That must read as "no breakdown
-    // available", never as "one key".
-    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW]));
+  it('never shows a placeholder in the Key column, because a row IS a key', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([PRIMARY_RESULT_ROW]));
     const root = await renderPage();
     try {
-      const cell = collectText(findByTestId(root.root, 'model-probe-result-cell-keys-1'));
-      expect(cell).toContain('—');
-      expect(cell).not.toContain('主 Key');
+      const cell = collectText(findByTestId(root.root, 'model-probe-result-cell-key-501'));
+      expect(cell).not.toContain('—');
+      expect(cell).toContain('主 Key');
     } finally {
       root.unmount();
     }
@@ -1105,3 +1160,6 @@ describe('ModelProbe per-key results', () => {
     }
   });
 });
+
+
+

@@ -11,7 +11,12 @@ import {
   type BackgroundTask,
 } from './backgroundTaskService.js';
 import { compileInterestPatterns, matchesInterest, type InvalidInterestPattern } from './modelInterestFilter.js';
-import { loadModelProbeConfig, resolveModelProbeUserAgent, type ModelProbeConfig } from './modelProbeConfigService.js';
+import {
+  loadModelProbeConfig,
+  resolveEnabledInterestPatterns,
+  resolveModelProbeUserAgent,
+  type ModelProbeConfig,
+} from './modelProbeConfigService.js';
 import {
   discoverProbeKeysForActiveProbe,
   ModelProbeDiscoveryError,
@@ -236,12 +241,43 @@ export type ModelProbePreviewSite = {
   credentialVerified: boolean;
   discoveredCount: number;
   models: string[];
+  /**
+   * Probe targets contributed by this site, i.e. `Σ keys (models this key reaches)`.
+   *
+   * Distinct from `models.length`, which is the site-level UNION across keys. With
+   * three keys whose catalogs overlap the union is far smaller than the number of
+   * requests the sweep will actually issue, and this is the billable count.
+   */
+  targetCount: number;
+  /** Per-key breakdown, so the preview can show which key contributes what. */
+  keys: ModelProbePreviewKey[];
   liveFailure: ModelProbeLiveFailure | null;
   notes: string[];
 };
 
+export type ModelProbePreviewKey = {
+  tokenId: number;
+  tokenName: string;
+  isPrimary: boolean;
+  /** Null when this key will be probed; a reason when it will be skipped. */
+  skipReason: ProbeKeySkipReason | null;
+  discoveredCount: number;
+  modelCount: number;
+};
+
 export type ModelProbePreview = {
   sites: ModelProbePreviewSite[];
+  /**
+   * The number of probe requests a run over this set would issue — the per-key
+   * total, NOT the count of distinct models.
+   *
+   * It must be the same quantity `runActiveModelProbe` counts, because the
+   * confirmation gate authorizes this number and the runner refuses to exceed it.
+   * They disagreed once: the preview summed the site-level model union while the
+   * runner built a (key × model) product, so any site with more than one key made
+   * the authorized ceiling unreachable and every sweep was refused — after the
+   * operator had already confirmed. It also understated the cost by the same factor.
+   */
   totalModels: number;
   invalidPatterns: InvalidInterestPattern[];
   skipped: ModelProbeSkippedSite[];
@@ -658,11 +694,29 @@ async function discoverAcrossSites(input: {
   return { outcomes: ordered, skipped: orderedSkips };
 }
 
+/**
+ * Whether this key will actually be probed.
+ *
+ * The single predicate both the preview count and the runner's target loop use, so
+ * the authorized number and the executed number cannot drift apart again.
+ */
+function isProbableDiscoveryKey(key: DiscoveryKeyOutcome): boolean {
+  return key.skipReason === null && !!key.credential;
+}
+
+/** Probe requests one site's discovery would issue: the (key × model) product. */
+function countSiteProbeTargets(outcome: DiscoveryOutcome): number {
+  return outcome.keys.reduce(
+    (sum, key) => sum + (isProbableDiscoveryKey(key) ? key.models.length : 0),
+    0,
+  );
+}
+
 export async function previewActiveModelProbe(input?: { siteIds?: number[] }): Promise<ModelProbePreview> {
   const probeConfig = await loadModelProbeConfig();
   // Invalid entries are quarantined, not thrown: one bad regex must not blind the
   // whole preview, and the caller needs to see which entry was dropped.
-  const { patterns, invalid } = compileInterestPatterns(probeConfig.interestPatterns);
+  const { patterns, invalid } = compileInterestPatterns(resolveEnabledInterestPatterns(probeConfig));
 
   // Throws on an explicitly empty or unusable scope, before any discovery call.
   const { sites, skipped: skippedSites } = await resolveTargetSites(resolveModelProbeScope(input?.siteIds));
@@ -679,11 +733,21 @@ export async function previewActiveModelProbe(input?: { siteIds?: number[] }): P
     credentialVerified: outcome.source === 'live',
     discoveredCount: outcome.discovered.length,
     models: outcome.models,
+    targetCount: countSiteProbeTargets(outcome),
+    keys: outcome.keys.map((key) => ({
+      tokenId: key.tokenId,
+      tokenName: key.tokenName,
+      isPrimary: key.isPrimary,
+      skipReason: key.skipReason,
+      discoveredCount: key.discovered.length,
+      modelCount: isProbableDiscoveryKey(key) ? key.models.length : 0,
+    })),
     liveFailure: outcome.liveFailure,
     notes: outcome.notes,
   }));
 
-  const totalModels = previewSites.reduce((sum, entry) => sum + entry.models.length, 0);
+  // Per-key, matching the runner exactly. See `ModelProbePreview.totalModels`.
+  const totalModels = previewSites.reduce((sum, entry) => sum + entry.targetCount, 0);
 
   return {
     sites: previewSites,
@@ -767,7 +831,7 @@ async function runActiveModelProbe(
   const log = (message: string) => { appendBackgroundTaskLog(taskId, message); };
 
   const probeConfig = await loadModelProbeConfig();
-  const { patterns, invalid } = compileInterestPatterns(probeConfig.interestPatterns);
+  const { patterns, invalid } = compileInterestPatterns(resolveEnabledInterestPatterns(probeConfig));
   for (const entry of invalid) {
     log(`忽略无效的模型兴趣正则 "${entry.source}"：${entry.reason}`);
   }
@@ -819,7 +883,7 @@ async function runActiveModelProbe(
   // below now bound the per-key total rather than the model count.
   for (const outcome of outcomes) {
     for (const key of outcome.keys) {
-      if (key.skipReason !== null || !key.credential) continue;
+      if (!isProbableDiscoveryKey(key)) continue;
       for (const modelName of key.models) {
         targets.push({ discovery: outcome, key, modelName });
       }
@@ -844,7 +908,7 @@ async function runActiveModelProbe(
     }));
   }
 
-  log(`共 ${outcomes.length} 个站点、${targets.length} 个模型待探测，站点间并发 ${probeConfig.siteConcurrency}、站点内并发 ${probeConfig.modelConcurrency}`);
+  log(`共 ${outcomes.length} 个站点、${targets.length} 个 key×模型 待探测，站点间并发 ${probeConfig.siteConcurrency}、站点内并发 ${probeConfig.modelConcurrency}`);
 
   // Rows for keys that were LISTED but never probed (Q21=B). Written before the
   // probe loop because they cost nothing — no request leaves the process — and they
@@ -866,7 +930,7 @@ async function runActiveModelProbe(
   // yesterday's `supported` standing would claim it still serves that model.
   for (const outcome of outcomes) {
     for (const key of outcome.keys) {
-      if (key.skipReason === null && key.credential) continue;
+      if (isProbableDiscoveryKey(key)) continue;
       // 'unavailable' is also the fallback for the structurally-impossible
       // "no skip reason, no credential": the honest report is still that this key
       // was not probed.
@@ -1344,7 +1408,14 @@ async function upsertModelProbeKeyResult(input: {
     .run();
 }
 
-export type ModelProbeResultsSortBy = 'latency' | 'balance' | 'checkedAt';
+/**
+ * Every column the results table renders. Kept in step with
+ * `MODEL_PROBE_RESULT_SORT_FIELDS` in the payload contract, which is what rejects
+ * an unrecognized value at the route boundary.
+ */
+export type ModelProbeResultsSortBy =
+  | 'site' | 'model' | 'status' | 'key' | 'latency' | 'balance'
+  | 'endpoint' | 'checkedAt' | 'prompt' | 'userAgent' | 'reason';
 
 /**
  * Superset of `contracts/modelProbePayloads.ts`'s query type: that Zod schema
@@ -1361,6 +1432,19 @@ export type ModelProbeResultsQuery = {
   offset?: number;
 };
 
+/**
+ * One row of the results page: one KEY's verdict for one model.
+ *
+ * The page used to list `model_probe_results` (one row per site×model) with a
+ * per-key breakdown squeezed into a cell. It lists `model_probe_key_results`
+ * instead, because that is what the operator asked the feature for: three keys on
+ * one site have three separate answers, and overlapping catalogs make the site-level
+ * row an average of facts rather than a fact.
+ *
+ * `id` is the per-key row's id, so it stays a stable React key and a stable page
+ * tiebreaker. The site-scoped table is still written and still drives the routing
+ * sync — it is simply no longer what this page reads.
+ */
 export type ModelProbeResultView = {
   id: number;
   siteId: number;
@@ -1369,8 +1453,12 @@ export type ModelProbeResultView = {
   accountUsername: string | null;
   /** Account balance, joined in so the results page can sort by it. */
   balance: number | null;
+  tokenId: number;
+  /** Empty for the primary key, which has no `account_tokens` row to name it. */
+  tokenName: string;
+  isPrimary: boolean;
   modelName: string;
-  status: RuntimeModelProbeStatus;
+  status: ModelProbeKeyStatus;
   latencyMs: number | null;
   httpStatus: number | null;
   failureKind: string | null;
@@ -1430,12 +1518,12 @@ function normalizeResultStatus(value: unknown): RuntimeModelProbeStatus {
  * Exported for the cross-dialect rendering test: a SQLite-only suite cannot
  * otherwise see whether this is even legal SQL on the database production runs on.
  */
-export function buildModelProbeResultOrdering(sortColumn: Column, order: 'asc' | 'desc'): SQL[] {
+export function buildModelProbeResultOrdering(sortColumn: Column | SQL, order: 'asc' | 'desc'): SQL[] {
   const direction = order === 'asc' ? asc : desc;
   return [
     asc(sql`case when ${sortColumn} is null then 1 else 0 end`),
     direction(sortColumn),
-    direction(schema.modelProbeResults.id),
+    direction(schema.modelProbeKeyResults.id),
   ];
 }
 
@@ -1457,6 +1545,44 @@ export async function clearModelProbeResults(): Promise<void> {
   await db.delete(schema.modelProbeKeyResults).run();
 }
 
+/**
+ * Maps a sort field to the column it orders by.
+ *
+ * Every results column is sortable, so this covers all of them rather than the
+ * numeric few. Text columns sort case-insensitively — `lower()` rather than the
+ * raw column — because a table where `GPT-4o` sorts before `claude` purely on byte
+ * order reads as unsorted to the operator looking at it.
+ */
+function resolveModelProbeResultSortColumn(sortBy: string | undefined): Column | SQL {
+  switch (sortBy) {
+    case 'site':
+      return sql`lower(${schema.sites.name})`;
+    case 'model':
+      return sql`lower(${schema.modelProbeKeyResults.modelName})`;
+    case 'status':
+      return sql`lower(${schema.modelProbeKeyResults.status})`;
+    case 'key':
+      // Primary first within a name group: it is the key routing actually uses, and
+      // its stored name is empty, so ordering on the name alone would scatter it.
+      return sql`lower(${schema.modelProbeKeyResults.tokenName})`;
+    case 'latency':
+      return schema.modelProbeKeyResults.latencyMs;
+    case 'balance':
+      return schema.accounts.balance;
+    case 'endpoint':
+      return sql`lower(${schema.modelProbeKeyResults.endpointUsed})`;
+    case 'prompt':
+      return sql`lower(${schema.modelProbeKeyResults.promptUsed})`;
+    case 'userAgent':
+      return sql`lower(${schema.modelProbeKeyResults.userAgentUsed})`;
+    case 'reason':
+      return sql`lower(${schema.modelProbeKeyResults.reason})`;
+    case 'checkedAt':
+    default:
+      return schema.modelProbeKeyResults.checkedAt;
+  }
+}
+
 export async function listActiveModelProbeResults(query: ModelProbeResultsQuery): Promise<{
   items: ModelProbeResultView[];
   total: number;
@@ -1465,38 +1591,36 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
   const model = String(query.model || '').trim().toLowerCase();
   if (model) {
     const likeTerm = `%${model}%`;
-    conditions.push(sql<boolean>`lower(${schema.modelProbeResults.modelName}) like ${likeTerm}`);
+    conditions.push(sql<boolean>`lower(${schema.modelProbeKeyResults.modelName}) like ${likeTerm}`);
   }
   if (Number.isInteger(query.siteId) && (query.siteId as number) > 0) {
-    conditions.push(eq(schema.modelProbeResults.siteId, query.siteId as number));
+    conditions.push(eq(schema.modelProbeKeyResults.siteId, query.siteId as number));
   }
   const status = String(query.status || '').trim();
   if (status) {
-    conditions.push(eq(schema.modelProbeResults.status, status));
+    conditions.push(eq(schema.modelProbeKeyResults.status, status));
   }
   const where = conditions.length === 0
     ? undefined
     : (conditions.length === 1 ? conditions[0] : and(...conditions));
 
-  const sortColumn = query.sortBy === 'latency'
-    ? schema.modelProbeResults.latencyMs
-    : (query.sortBy === 'balance' ? schema.accounts.balance : schema.modelProbeResults.checkedAt);
+  const sortColumn = resolveModelProbeResultSortColumn(query.sortBy);
 
   const limit = Math.max(1, Math.min(MAX_RESULTS_LIMIT, Math.trunc(Number(query.limit) || DEFAULT_RESULTS_LIMIT)));
   const rawOffset = Math.trunc(Number(query.offset) || 0);
   const offset = rawOffset > 0 ? rawOffset : 0;
 
   let listQuery = db.select({
-    result: schema.modelProbeResults,
+    result: schema.modelProbeKeyResults,
     siteName: schema.sites.name,
     accountUsername: schema.accounts.username,
     balance: schema.accounts.balance,
   })
-    .from(schema.modelProbeResults)
-    .innerJoin(schema.sites, eq(schema.modelProbeResults.siteId, schema.sites.id))
-    // Left: accountId is nullable and an account may have been deleted, and such a
-    // row must still be listable.
-    .leftJoin(schema.accounts, eq(schema.modelProbeResults.accountId, schema.accounts.id));
+    .from(schema.modelProbeKeyResults)
+    .innerJoin(schema.sites, eq(schema.modelProbeKeyResults.siteId, schema.sites.id))
+    // Left: the account row may have been deleted, and such a verdict must still be
+    // listable rather than vanishing from the page.
+    .leftJoin(schema.accounts, eq(schema.modelProbeKeyResults.accountId, schema.accounts.id));
   if (where) listQuery = listQuery.where(where) as typeof listQuery;
 
   const rows = await listQuery
@@ -1506,9 +1630,9 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
     .all();
 
   let totalQuery = db.select({ total: sql<number>`count(*)` })
-    .from(schema.modelProbeResults)
-    .innerJoin(schema.sites, eq(schema.modelProbeResults.siteId, schema.sites.id))
-    .leftJoin(schema.accounts, eq(schema.modelProbeResults.accountId, schema.accounts.id));
+    .from(schema.modelProbeKeyResults)
+    .innerJoin(schema.sites, eq(schema.modelProbeKeyResults.siteId, schema.sites.id))
+    .leftJoin(schema.accounts, eq(schema.modelProbeKeyResults.accountId, schema.accounts.id));
   if (where) totalQuery = totalQuery.where(where) as typeof totalQuery;
   const totalRow = await totalQuery.get();
 
@@ -1520,8 +1644,11 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
       accountId: row.result.accountId ?? null,
       accountUsername: row.accountUsername ?? null,
       balance: row.balance ?? null,
+      tokenId: row.result.tokenId,
+      tokenName: row.result.tokenName || '',
+      isPrimary: row.result.tokenId === PRIMARY_PROBE_TOKEN_ID,
       modelName: row.result.modelName,
-      status: normalizeResultStatus(row.result.status),
+      status: normalizeKeyResultStatus(row.result.status),
       latencyMs: row.result.latencyMs ?? null,
       httpStatus: row.result.httpStatus ?? null,
       failureKind: row.result.failureKind ?? null,

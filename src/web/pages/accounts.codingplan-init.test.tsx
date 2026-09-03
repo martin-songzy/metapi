@@ -210,8 +210,8 @@ describe('Accounts CodingPlan initialization', () => {
         node.type === 'textarea'
         && node.props.placeholder === '粘贴 API Key'
       ));
-      const proxyRadio = root.root.find((node) => (
-        node.props?.['data-testid'] === 'account-apikey-proxy-entry-px_hk'
+      const proxySelect = root.root.find((node) => (
+        node.props?.['data-testid'] === 'account-apikey-proxy-select'
       ));
       const verifyButton = root.root.find((node) => (
         node.type === 'button'
@@ -226,7 +226,7 @@ describe('Accounts CodingPlan initialization', () => {
 
       await act(async () => {
         tokenInput.props.onChange({ target: { value: 'sk-proxy-demo' } });
-        proxyRadio.props.onChange({ target: { checked: true } });
+        proxySelect.props.onChange({ target: { value: 'px_hk' } });
       });
 
       await act(async () => {

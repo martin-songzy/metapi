@@ -355,6 +355,9 @@ describe('ModelProbe global configuration panel', () => {
       expect(apiMock.saveModelProbeConfig).toHaveBeenCalledTimes(1);
       expect(apiMock.saveModelProbeConfig).toHaveBeenCalledWith({
         interestPatterns: ['gpt-4o', 'claude-.*-sonnet'],
+        // Nothing switched off, so every pattern is active — the default for a
+        // pattern the operator has just typed.
+        disabledInterestPatterns: [],
         prompts: ['hi'],
         userAgents: buildConfig().userAgents,
         defaultUserAgentId: 'claude-code',

@@ -351,6 +351,8 @@ describe('model probe API routes', () => {
           siteName: '主站',
           source: 'live',
           credentialVerified: true,
+          targetCount: 0,
+          keys: [],
           discoveredCount: 3,
           models: ['gpt-5', 'gpt-5-mini'],
           liveFailure: null,
@@ -749,6 +751,8 @@ describe('model probe API routes', () => {
             siteName: '主站',
             source: 'cached',
             credentialVerified: false,
+            targetCount: 0,
+            keys: [],
             discoveredCount: 0,
             models: [],
             liveFailure: { kind: 'empty_unknown', status: null, message: 'no models' },
@@ -769,6 +773,8 @@ describe('model probe API routes', () => {
             siteName: '主站',
             source: 'cached',
             credentialVerified: false,
+            targetCount: 0,
+            keys: [],
             discoveredCount: 1,
             models: ['gpt-5'],
             liveFailure: { kind: 'transport', status: 500, message: `boom for ${CREDENTIAL}` },
@@ -992,6 +998,8 @@ describe('model probe API routes', () => {
           siteName: '主站',
           source: 'live',
           credentialVerified: true,
+          targetCount: 0,
+          keys: [],
           discoveredCount: 1,
           models: ['gpt-5'],
           liveFailure: null,
@@ -1018,6 +1026,8 @@ describe('model probe API routes', () => {
           siteName: '主站',
           source: 'live',
           credentialVerified: true,
+          targetCount: 0,
+          keys: [],
           discoveredCount: 90,
           models: ['gpt-5'],
           liveFailure: null,
@@ -1353,3 +1363,4 @@ describe('model probe API routes', () => {
     });
   });
 });
+

@@ -51,6 +51,14 @@ export function modelProbeEndpointOptions(): Array<{ value: ModelProbeEndpointTy
  */
 export type ModelProbeConfigDraft = {
   interestPatternsText: string;
+  /**
+   * Patterns switched OFF for the next sweep.
+   *
+   * A DISABLE list rather than a selection of enabled ones, so a pattern the
+   * operator has just typed is active without an extra click, and toggling one off
+   * for a narrower sweep never means deleting a regex they will want back.
+   */
+  disabledInterestPatterns: string[];
   promptsText: string;
   errorKeywordsText: string;
   defaultUserAgentId: string;
@@ -131,6 +139,7 @@ export function joinConfigLines(values: readonly string[]): string {
 export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfigDraft {
   return {
     interestPatternsText: joinConfigLines(config.interestPatterns),
+    disabledInterestPatterns: [...(config.disabledInterestPatterns ?? [])],
     promptsText: joinConfigLines(config.prompts),
     errorKeywordsText: joinConfigLines(config.errorKeywords),
     defaultUserAgentId: config.defaultUserAgentId,
@@ -153,8 +162,15 @@ export function configPayloadFromDraft(
   limits: ModelProbeConfigLimits,
   saved: Pick<ModelProbeConfig, 'siteConcurrency' | 'modelConcurrency' | 'timeoutMs' | 'maxTokens'>,
 ): ModelProbeConfigPayload {
+  const patterns = splitConfigLines(draft.interestPatternsText);
   return {
-    interestPatterns: splitConfigLines(draft.interestPatternsText),
+    interestPatterns: patterns,
+    // Narrowed to patterns that still exist in the textarea: an entry left over
+    // from a regex the operator just deleted would switch off a DIFFERENT pattern
+    // if the same text were typed again later.
+    disabledInterestPatterns: draft.disabledInterestPatterns.filter(
+      (pattern) => patterns.includes(pattern),
+    ),
     prompts: splitConfigLines(draft.promptsText),
     userAgents: draft.userAgents.map((preset) => ({ ...preset })),
     defaultUserAgentId: draft.defaultUserAgentId,

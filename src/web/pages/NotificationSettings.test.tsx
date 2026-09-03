@@ -159,12 +159,11 @@ describe('NotificationSettings', () => {
 
       // Telegram picks from the pool like everything else; there is no address field
       // here any more, and 不走代理 is the stored default.
-      const directRadio = root.root.find((node) => node.props?.['data-testid'] === 'telegram-proxy-direct');
-      expect(directRadio.props.checked).toBe(true);
+      const proxySelect = root.root.find((node) => node.props?.['data-testid'] === 'telegram-proxy-select');
+      expect(proxySelect.props.value).toBe('__direct__');
 
-      const entryRadio = root.root.find((node) => node.props?.['data-testid'] === 'telegram-proxy-entry-px_hk');
       await act(async () => {
-        entryRadio.props.onChange({ target: { checked: true } });
+        proxySelect.props.onChange({ target: { value: 'px_hk' } });
       });
 
       const saveButton = root.root.find((node) => (

@@ -34,6 +34,7 @@ import {
   queueActiveModelProbe,
   type ModelProbeKeyResultView,
   type ModelProbePreview,
+  type ModelProbePreviewKey,
   type ModelProbeResultView,
   type ModelProbeSkippedSite,
 } from './modelProbeRunService.js';
@@ -196,8 +197,20 @@ export type ModelProbePreviewSiteResponse = {
   credentialVerified: boolean;
   discoveredCount: number;
   models: string[];
+  /** Probe requests this site contributes: the (key × model) product, not `models.length`. */
+  targetCount: number;
+  keys: ModelProbePreviewKeyResponse[];
   liveFailure: ModelProbeLiveFailureResponse | null;
   notes: string[];
+};
+
+export type ModelProbePreviewKeyResponse = {
+  tokenId: number;
+  tokenName: string;
+  isPrimary: boolean;
+  skipReason: ModelProbePreviewKey['skipReason'];
+  discoveredCount: number;
+  modelCount: number;
 };
 
 export type ModelProbeSkippedSiteResponse = {
@@ -230,6 +243,18 @@ export function toModelProbePreviewResponse(preview: ModelProbePreview): ModelPr
       credentialVerified: site.credentialVerified,
       discoveredCount: site.discoveredCount,
       models: [...site.models],
+      targetCount: site.targetCount,
+      // Key NAMES are operator-authored labels, never credentials: the discovery
+      // structures carry the secret in a sibling field that is deliberately not
+      // projected here.
+      keys: site.keys.map((key) => ({
+        tokenId: key.tokenId,
+        tokenName: key.tokenName,
+        isPrimary: key.isPrimary,
+        skipReason: key.skipReason,
+        discoveredCount: key.discoveredCount,
+        modelCount: key.modelCount,
+      })),
       liveFailure: site.liveFailure
         ? {
           kind: site.liveFailure.kind,
@@ -266,6 +291,11 @@ export function toModelProbeResultResponse(item: ModelProbeResultView): ModelPro
     accountId: item.accountId,
     accountUsername: item.accountUsername,
     balance: item.balance,
+    tokenId: item.tokenId,
+    // An operator-authored label, not a credential: the key's VALUE is never
+    // selected into the view this projects from.
+    tokenName: item.tokenName,
+    isPrimary: item.isPrimary,
     modelName: item.modelName,
     status: item.status,
     latencyMs: item.latencyMs,

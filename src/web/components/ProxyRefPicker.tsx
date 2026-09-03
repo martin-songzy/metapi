@@ -21,19 +21,31 @@ export type ProxyRefPickerProps = {
   value: string | null;
   onChange: (next: string | null) => void;
   allowInherit?: boolean;
-  /** Shown under the radio group as 最终生效, so the layered answer is never a guess. */
+  /** Shown under the control as 最终生效, so the layered answer is never a guess. */
   effectiveUrl?: string | null;
   effectiveSource?: string | null;
   disabled?: boolean;
   idPrefix?: string;
 };
 
-const rowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 8,
-  padding: '6px 0',
+/**
+ * The sentinel `<option>` value standing in for `null`.
+ *
+ * A select cannot carry a non-string value, and the empty string is already what a
+ * browser reports for "nothing chosen" — using it for 不走代理 would make an
+ * unmounted or reset control silently mean "go direct".
+ */
+const DIRECT_OPTION_VALUE = '__direct__';
+
+const selectStyle: CSSProperties = {
+  width: '100%',
+  padding: '8px 10px',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius-sm)',
+  background: 'var(--color-bg)',
+  color: 'var(--color-text-primary)',
   fontSize: 13,
+  outline: 'none',
 };
 
 function maskProxyCredentials(url: string): string {
@@ -60,57 +72,48 @@ export function ProxyRefPicker({
   disabled = false,
   idPrefix = 'proxy-ref',
 }: ProxyRefPickerProps) {
-  const groupName = `${idPrefix}-group`;
+  const selectValue = value === null ? DIRECT_OPTION_VALUE : value;
 
   return (
     <div data-testid={`${idPrefix}-picker`}>
-      {allowInherit && (
-        <label style={rowStyle}>
-          <input
-            type="radio"
-            name={groupName}
-            data-testid={`${idPrefix}-inherit`}
-            checked={value === PROXY_REF_INHERIT}
-            disabled={disabled}
-            onChange={() => onChange(PROXY_REF_INHERIT)}
-          />
-          <span>跟随站点</span>
-        </label>
-      )}
-
-      <label style={rowStyle}>
-        <input
-          type="radio"
-          name={groupName}
-          data-testid={`${idPrefix}-direct`}
-          checked={value === null}
-          disabled={disabled}
-          onChange={() => onChange(null)}
-        />
-        <span>不走代理</span>
-      </label>
-
-      {entries.map((entry) => (
-        <label key={entry.id} style={rowStyle}>
-          <input
-            type="radio"
-            name={groupName}
-            data-testid={`${idPrefix}-entry-${entry.id}`}
-            checked={value === entry.id}
-            disabled={disabled}
-            onChange={() => onChange(entry.id)}
-          />
-          <span>{entry.name}</span>
-          <span style={{ color: 'var(--color-text-muted)', fontSize: 12 }}>
-            {maskProxyCredentials(entry.url)}
-          </span>
-        </label>
-      ))}
+      <select
+        data-testid={`${idPrefix}-select`}
+        value={selectValue}
+        disabled={disabled}
+        onChange={(event) => {
+          const next = event.target.value;
+          onChange(next === DIRECT_OPTION_VALUE ? null : next);
+        }}
+        style={selectStyle}
+      >
+        {allowInherit && (
+          <option data-testid={`${idPrefix}-inherit`} value={PROXY_REF_INHERIT}>跟随站点</option>
+        )}
+        <option data-testid={`${idPrefix}-direct`} value={DIRECT_OPTION_VALUE}>不走代理</option>
+        {entries.map((entry) => (
+          <option key={entry.id} data-testid={`${idPrefix}-entry-${entry.id}`} value={entry.id}>
+            {entry.name} — {maskProxyCredentials(entry.url)}
+          </option>
+        ))}
+        {/*
+          A reference to a deleted entry keeps its own option rather than snapping the
+          control to the first one: silently re-pointing a site at a DIFFERENT proxy on
+          open is the failure this whole consolidation exists to remove. It reads as
+          "no proxy" at request time, and this says so.
+        */}
+        {selectValue !== PROXY_REF_INHERIT
+          && selectValue !== DIRECT_OPTION_VALUE
+          && !entries.some((entry) => entry.id === selectValue) && (
+          <option data-testid={`${idPrefix}-missing`} value={selectValue}>
+            引用的代理已删除（按不走代理处理）
+          </option>
+        )}
+      </select>
 
       {entries.length === 0 && (
         <div
           data-testid={`${idPrefix}-empty`}
-          style={{ fontSize: 12, color: 'var(--color-text-muted)', padding: '6px 0' }}
+          style={{ fontSize: 12, color: 'var(--color-text-muted)', paddingTop: 6 }}
         >
           代理池为空。地址统一在「设置 → 代理池」里添加，这里只做选择。
         </div>

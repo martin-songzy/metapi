@@ -871,6 +871,8 @@ describe('modelProbeRunService', () => {
       await setInterest(['^gpt-'], { syncToRouting: true });
       await db.insert(schema.modelAvailability).values({
         accountId: account.id,
+        tokenId: 0,
+        tokenName: '',
         modelName: 'gpt-4o',
         available: true,
       }).run();
@@ -906,6 +908,8 @@ describe('modelProbeRunService', () => {
       await setInterest(['^gpt-'], { syncToRouting: true });
       await db.insert(schema.modelAvailability).values({
         accountId: account.id,
+        tokenId: 0,
+        tokenName: '',
         modelName: 'gpt-4o',
         available: true,
       }).run();
@@ -937,6 +941,8 @@ describe('modelProbeRunService', () => {
       await setInterest(['^gpt-']);
       await db.insert(schema.modelAvailability).values({
         accountId: account.id,
+        tokenId: 0,
+        tokenName: '',
         modelName: 'gpt-4o',
         available: true,
       }).run();
@@ -1747,10 +1753,12 @@ describe('modelProbeRunService', () => {
       await db.update(schema.accounts).set({ balance: 99 })
         .where(eq(schema.accounts.id, beta.account.id)).run();
 
-      await db.insert(schema.modelProbeResults).values([
+      await db.insert(schema.modelProbeKeyResults).values([
         {
           siteId: alpha.site.id,
           accountId: alpha.account.id,
+          tokenId: 0,
+          tokenName: '',
           modelName: 'gpt-4o',
           status: 'supported',
           latencyMs: 300,
@@ -1759,6 +1767,8 @@ describe('modelProbeRunService', () => {
         {
           siteId: alpha.site.id,
           accountId: alpha.account.id,
+          tokenId: 0,
+          tokenName: '',
           modelName: 'claude-opus',
           status: 'unsupported',
           latencyMs: 100,
@@ -1767,6 +1777,8 @@ describe('modelProbeRunService', () => {
         {
           siteId: beta.site.id,
           accountId: beta.account.id,
+          tokenId: 0,
+          tokenName: '',
           modelName: 'gpt-5',
           status: 'inconclusive',
           latencyMs: 200,
@@ -1849,10 +1861,12 @@ describe('modelProbeRunService', () => {
       await db.update(schema.accounts).set({ balance: null })
         .where(eq(schema.accounts.id, unmeasured.account.id)).run();
 
-      await db.insert(schema.modelProbeResults).values([
+      await db.insert(schema.modelProbeKeyResults).values([
         {
           siteId: measured.site.id,
           accountId: measured.account.id,
+          tokenId: 0,
+          tokenName: '',
           modelName: 'fast-model',
           status: 'supported',
           latencyMs: 120,
@@ -1861,6 +1875,8 @@ describe('modelProbeRunService', () => {
         {
           siteId: measured.site.id,
           accountId: measured.account.id,
+          tokenId: 0,
+          tokenName: '',
           modelName: 'slow-model',
           status: 'supported',
           latencyMs: 900,
@@ -1870,6 +1886,8 @@ describe('modelProbeRunService', () => {
           // A timeout: recorded, but with no measurement to sort by.
           siteId: unmeasured.site.id,
           accountId: unmeasured.account.id,
+          tokenId: 0,
+          tokenName: '',
           modelName: 'timed-out-model',
           status: 'inconclusive',
           latencyMs: null,
@@ -2162,3 +2180,5 @@ describe('modelProbeRunService', () => {
     });
   });
 });
+
+

@@ -44,6 +44,7 @@ import {
 } from './modelProbeDiscoveryService.js';
 import { loadModelProbeConfig, resolveModelProbeUserAgent } from './modelProbeConfigService.js';
 import { compileInterestPatterns, matchesInterest } from './modelInterestFilter.js';
+import { resolveEnabledInterestPatterns } from './modelProbeConfigService.js';
 import { chooseModelProbePrompt } from './modelProbePrompts.js';
 import { normalizeModelProbeEndpointType } from '../../shared/modelProbeEndpointTypes.js';
 
@@ -523,7 +524,10 @@ export async function probeSiteModels(
   const credentialVerified = discovery.source === 'live';
   const scope = (options?.scope ?? (site.postRefreshProbeScope === 'all' ? 'all' : 'single')) as 'single' | 'all';
 
-  const { patterns: interestPatterns } = compileInterestPatterns(probeConfig.interestPatterns);
+  // The ENABLED subset, not every stored pattern: an operator narrowing a sweep to
+  // "only opus" switches patterns off rather than deleting them.
+  const enabledInterestPatterns = resolveEnabledInterestPatterns(probeConfig);
+  const { patterns: interestPatterns } = compileInterestPatterns(enabledInterestPatterns);
   const interestMatched = discoveredModels.filter((modelName) => matchesInterest(modelName, interestPatterns));
 
   // scope 'all' means every interest-matched live model — not every discovered
@@ -534,8 +538,8 @@ export async function probeSiteModels(
     if (interestMatched.length === 0) {
       return failure(
         scope,
-        probeConfig.interestPatterns.length === 0
-          ? '未配置模型兴趣正则：请先在模型探测设置中添加正则，否则不会探测任何模型'
+        enabledInterestPatterns.length === 0
+          ? '没有启用的模型兴趣正则：请先在模型探测设置中添加或勾选正则，否则不会探测任何模型'
           : `实时发现的 ${discoveredModels.length} 个模型均未匹配模型兴趣正则，未执行探测`,
       );
     }
@@ -561,8 +565,8 @@ export async function probeSiteModels(
       if (!fallback) {
         return failure(
           scope,
-          probeConfig.interestPatterns.length === 0
-            ? '未配置模型兴趣正则：请先在模型探测设置中添加正则，或显式指定要探测的模型'
+          enabledInterestPatterns.length === 0
+            ? '没有启用的模型兴趣正则：请先在模型探测设置中添加或勾选正则，或显式指定要探测的模型'
             : `实时发现的 ${discoveredModels.length} 个模型均未匹配模型兴趣正则，请调整正则或显式指定模型`,
         );
       }

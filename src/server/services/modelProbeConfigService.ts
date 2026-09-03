@@ -9,6 +9,17 @@ export type ModelProbeUserAgentPreset = { id: string; label: string; value: stri
 
 export type ModelProbeConfig = {
   interestPatterns: string[];
+  /**
+   * Patterns present in `interestPatterns` but switched OFF for the next sweep.
+   *
+   * A DISABLE list, not an enable list, so a newly added pattern is active by
+   * default and an operator can narrow a sweep ("only opus this time") without
+   * deleting regexes they will want back. Same shape as `site_disabled_models`.
+   *
+   * Entries that no longer appear in `interestPatterns` are dropped on normalize,
+   * so deleting a pattern and re-adding it does not resurrect it switched off.
+   */
+  disabledInterestPatterns: string[];
   prompts: string[];
   userAgents: ModelProbeUserAgentPreset[];
   defaultUserAgentId: string;
@@ -21,6 +32,21 @@ export type ModelProbeConfig = {
   maxTokens: number;
   syncToRouting: boolean;
 };
+
+/**
+ * The patterns a sweep actually filters on.
+ *
+ * One helper rather than an inline filter at each call site: several places branch
+ * on "are there any patterns at all?" to decide whether to fall back to probing
+ * everything, and those branches reading `interestPatterns.length` while discovery
+ * compiled the enabled subset is exactly how "all patterns off" would come to mean
+ * "probe every model" instead of "probe nothing".
+ */
+export function resolveEnabledInterestPatterns(config: ModelProbeConfig): string[] {
+  if (config.disabledInterestPatterns.length === 0) return config.interestPatterns;
+  const disabled = new Set(config.disabledInterestPatterns);
+  return config.interestPatterns.filter((pattern) => !disabled.has(pattern));
+}
 
 export const MODEL_PROBE_CONFIG_SETTING_KEY = 'model_probe_config_v1';
 
@@ -131,6 +157,7 @@ const DEFAULT_ERROR_KEYWORDS: readonly string[] = [
 export function getDefaultModelProbeConfig(): ModelProbeConfig {
   return {
     interestPatterns: [],
+    disabledInterestPatterns: [],
     prompts: [...DEFAULT_MODEL_PROBE_PROMPTS],
     userAgents: DEFAULT_USER_AGENT_PRESETS.map((preset) => ({ ...preset })),
     defaultUserAgentId: DEFAULT_USER_AGENT_PRESETS[0]!.id,
@@ -251,13 +278,19 @@ export function normalizeModelProbeConfig(input: unknown): ModelProbeConfig {
   const defaultUserAgentId = [requestedDefaultId, defaults.defaultUserAgentId, userAgents[0]?.id]
     .find((candidate): candidate is string => Boolean(candidate) && knownIds.has(candidate as string))
     ?? '';
+  const interestPatterns = normalizeStringList(record.interestPatterns, defaults.interestPatterns, {
+    caseInsensitive: false,
+  });
 
   return {
     // Left uncapped on purpose: compileInterestPatterns owns the 50/200 limits
     // and reports them as save-time rejections.
-    interestPatterns: normalizeStringList(record.interestPatterns, defaults.interestPatterns, {
+    interestPatterns,
+    // Narrowed to patterns that still exist: a stale entry would silently switch
+    // off a DIFFERENT pattern later if the same text were added back.
+    disabledInterestPatterns: normalizeStringList(record.disabledInterestPatterns, defaults.disabledInterestPatterns, {
       caseInsensitive: false,
-    }),
+    }).filter((pattern) => interestPatterns.includes(pattern)),
     prompts: normalizeStringList(record.prompts, defaults.prompts, {
       caseInsensitive: false,
       maxCount: MODEL_PROBE_MAX_PROMPT_COUNT,

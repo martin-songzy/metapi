@@ -50,6 +50,13 @@ const MAX_USER_AGENT_PRESET_COUNT = 20;
 const modelProbeConfigPayloadSchema = z.object({
   interestPatterns: z.array(z.string().max(MAX_INTEREST_PATTERN_LENGTH))
     .max(MAX_INTEREST_PATTERN_COUNT).optional(),
+  /**
+   * Which stored patterns are switched OFF for the next sweep. Bounded by the same
+   * caps as `interestPatterns` because it is a subset of it — the config service
+   * additionally drops any entry that no longer names a stored pattern.
+   */
+  disabledInterestPatterns: z.array(z.string().max(MAX_INTEREST_PATTERN_LENGTH))
+    .max(MAX_INTEREST_PATTERN_COUNT).optional(),
   prompts: z.array(z.string().max(MAX_PROMPT_LENGTH)).max(MAX_PROMPT_COUNT).optional(),
   userAgents: z.array(userAgentPresetSchema).max(MAX_USER_AGENT_PRESET_COUNT).optional(),
   defaultUserAgentId: z.string().trim().optional(),
@@ -119,9 +126,30 @@ const modelProbeRunPayloadSchema = z.object({
   confirmedTargetCount: z.number().int().nonnegative().optional(),
 }).strict();
 
-export const MODEL_PROBE_RESULT_STATUSES = ['supported', 'unsupported', 'inconclusive', 'skipped'] as const;
+/**
+ * Filterable statuses on the results page.
+ *
+ * Includes the two per-key-only states, because the page lists per-key rows: a key
+ * that was switched off or had no usable credential produces a row, and an operator
+ * narrowing to 「密钥不可用」 is a real question the site-scoped vocabulary could not
+ * express.
+ */
+export const MODEL_PROBE_RESULT_STATUSES = [
+  'supported', 'unsupported', 'inconclusive', 'skipped', 'disabled', 'unavailable',
+] as const;
 
-export const MODEL_PROBE_RESULT_SORT_FIELDS = ['latency', 'balance', 'checkedAt'] as const;
+/**
+ * Every column the results table renders is sortable, so this list mirrors that
+ * table's columns rather than the two or three that happen to be numeric.
+ *
+ * Kept as an explicit allow-list, not an open string: the service maps each entry
+ * to a real column, and an unrecognized value must be a 400 rather than fall
+ * through to a table silently ordered by something else.
+ */
+export const MODEL_PROBE_RESULT_SORT_FIELDS = [
+  'site', 'model', 'status', 'key', 'latency', 'balance',
+  'endpoint', 'checkedAt', 'prompt', 'userAgent', 'reason',
+] as const;
 export const MODEL_PROBE_RESULT_SORT_ORDERS = ['asc', 'desc'] as const;
 
 /** Substring filter on the model name; the service lowercases and LIKEs it. */

@@ -80,6 +80,29 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
   );
   const hasNoPatterns = patternCount === 0;
 
+  /**
+   * Toggles are derived from the TEXTAREA, not from the last saved config, so a
+   * regex the operator just typed can be switched off before the first save.
+   */
+  const draftPatterns = useMemo(
+    () => splitConfigLines(draft.interestPatternsText),
+    [draft.interestPatternsText],
+  );
+  const disabledPatternSet = useMemo(
+    () => new Set(draft.disabledInterestPatterns),
+    [draft.disabledInterestPatterns],
+  );
+  const enabledPatternCount = draftPatterns.filter((pattern) => !disabledPatternSet.has(pattern)).length;
+
+  const togglePattern = (pattern: string) => {
+    setDraft((prev) => {
+      const disabled = new Set(prev.disabledInterestPatterns);
+      if (disabled.has(pattern)) disabled.delete(pattern);
+      else disabled.add(pattern);
+      return { ...prev, disabledInterestPatterns: [...disabled] };
+    });
+  };
+
   const userAgentOptions = draft.userAgents.map((preset) => ({
     value: preset.id,
     label: preset.label,
@@ -143,6 +166,72 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
         <div style={hintStyle}>
           只有匹配到的模型才会被探测。已配置 {patternCount} 条，最多 {limits.maxInterestPatterns} 条，单条最长 {limits.maxInterestPatternLength} 个字符。
         </div>
+
+        {patternCount > 0 && (
+          <div
+            data-testid="model-probe-pattern-toggles"
+            style={{
+              marginTop: 10,
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '10px 12px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>
+                本轮启用（{enabledPatternCount}/{patternCount}）
+              </div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  data-testid="model-probe-patterns-select-all"
+                  className="btn btn-ghost btn-sm"
+                  style={{ border: '1px solid var(--color-border)' }}
+                  onClick={() => setDraft((prev) => ({ ...prev, disabledInterestPatterns: [] }))}
+                >
+                  全选
+                </button>
+                <button
+                  type="button"
+                  data-testid="model-probe-patterns-select-none"
+                  className="btn btn-ghost btn-sm"
+                  style={{ border: '1px solid var(--color-border)' }}
+                  onClick={() => setDraft((prev) => ({ ...prev, disabledInterestPatterns: [...draftPatterns] }))}
+                >
+                  全不选
+                </button>
+              </div>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
+              {draftPatterns.map((pattern) => (
+                <label
+                  key={pattern}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, padding: '2px 0' }}
+                >
+                  <input
+                    type="checkbox"
+                    data-testid={`model-probe-pattern-toggle-${pattern}`}
+                    checked={!disabledPatternSet.has(pattern)}
+                    onChange={() => togglePattern(pattern)}
+                  />
+                  <code style={{ fontSize: 12 }}>{pattern}</code>
+                </label>
+              ))}
+            </div>
+            <div style={{ ...hintStyle, marginTop: 6 }}>
+              取消勾选只是本轮不用，正则仍然保留。保存全局配置后对下一次预览和探测生效。
+            </div>
+          </div>
+        )}
+
+        {patternCount > 0 && enabledPatternCount === 0 && (
+          <div className="alert alert-warning" data-testid="model-probe-no-enabled-patterns-warning" style={{ marginTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4 }}>所有正则都已取消勾选，不会探测任何模型</div>
+            <div style={{ fontSize: 12, lineHeight: 1.6 }}>
+              这和「一条正则都没配」是同一个结果：没有启用的规则等于不匹配任何模型。至少勾选一条再发起探测。
+            </div>
+          </div>
+        )}
 
         {hasNoPatterns && (
           <div className="alert alert-warning" data-testid="model-probe-empty-patterns-warning" style={{ marginTop: 10 }}>
