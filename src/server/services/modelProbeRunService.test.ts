@@ -382,7 +382,7 @@ describe('modelProbeRunService', () => {
   }
 
   async function setInterest(patterns: string[], overrides: Record<string, unknown> = {}) {
-    await saveModelProbeConfig({
+    return saveModelProbeConfig({
       ...getDefaultModelProbeConfig(),
       interestPatterns: patterns,
       ...overrides,
@@ -444,6 +444,48 @@ describe('modelProbeRunService', () => {
       for (const entry of preview.sites) {
         expect(entry.models).toEqual([]);
       }
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+    });
+
+    /**
+     * The per-pattern checkboxes in the global panel store a DISABLE list, so an
+     * operator can narrow one sweep to "just the opus rules" without deleting the
+     * regexes they will want back next time.
+     *
+     * Asserted on the preview because that is the shared path: the run compiles the
+     * same `resolveEnabledInterestPatterns` result, so a preview that respects the
+     * toggle and a run that ignored it would reintroduce exactly the count
+     * disagreement the per-key fix removed.
+     */
+    it('probes only the patterns still switched on, and keeps the others stored', async () => {
+      const { site, account } = await seedSite();
+      const stored = await setInterest(['^gpt-', '^claude-'], {
+        disabledInterestPatterns: ['^gpt-'],
+      });
+      primeDiscovery([{ site, account, models: ['gpt-4o', 'claude-3', 'gemini-2.5-pro'] }]);
+
+      const preview = await service.previewActiveModelProbe();
+
+      expect(preview.sites[0]?.models).toEqual(['claude-3']);
+      expect(preview.totalModels).toBe(1);
+      // Switched off, not deleted: the regex is still there for the next sweep.
+      expect(stored.interestPatterns).toEqual(['^gpt-', '^claude-']);
+      expect(stored.disabledInterestPatterns).toEqual(['^gpt-']);
+    });
+
+    it('probes nothing when every pattern is switched off, exactly as when none is configured', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-', '^claude-'], {
+        disabledInterestPatterns: ['^gpt-', '^claude-'],
+      });
+      primeDiscovery([{ site, account, models: ['gpt-4o', 'claude-3'] }]);
+
+      const preview = await service.previewActiveModelProbe();
+
+      // The panel warns about this state rather than treating an all-off list as
+      // "no filter": an empty enabled set matches nothing, it does not match all.
+      expect(preview.totalModels).toBe(0);
+      expect(preview.sites[0]?.models).toEqual([]);
       expect(probeRuntimeModelMock).not.toHaveBeenCalled();
     });
 
@@ -1649,6 +1691,90 @@ describe('modelProbeRunService', () => {
       // because forwarding uses the primary credential.
       const availability = await db.select().from(schema.modelAvailability).all();
       expect(availability.every((row) => row.available === false)).toBe(true);
+    });
+
+    /**
+     * The reported failure, in miniature: every sweep was refused before spending
+     * anything, and re-previewing produced the same two numbers again.
+     *
+     * `models` is the site-level UNION across keys — what an operator reads as
+     * "which models will be probed here" — while the runner enqueues one probe per
+     * (key, model). A site with three keys therefore recounted at up to 3x the
+     * authorized number, `modelProbeAuthorizedTargetCeiling` refused it, and the
+     * operator saw "confirmed 63, rediscovered 122" with no way to proceed.
+     *
+     * Sized so the OLD number is refused rather than merely different: 6 models x
+     * 3 keys is 18 targets, and an authorization of 6 permits at most 16.
+     */
+    it('authorizes the per-key target count, not the site union, so a multi-key sweep can run', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      const models = Array.from({ length: 6 }, (_unused, index) => `gpt-${index}`);
+      primeDiscovery([{ site, account, models }]);
+      await seedToken(account.id, 'group-b', { token: 'sk-b' });
+      await seedToken(account.id, 'group-c', { token: 'sk-c' });
+      // Fully overlapping on purpose: the union stays 6 whatever the key axis does,
+      // so preview and runner can only agree if BOTH count per key.
+      fetchTokenAccessibleModelsMock.mockResolvedValue(models);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      const preview = await service.previewActiveModelProbe();
+      expect(preview.sites[0]?.models).toHaveLength(6);
+      expect(preview.sites[0]?.targetCount).toBe(18);
+      // The per-key breakdown backs the number instead of asking the operator to
+      // trust it: three probable keys, six models each.
+      expect(preview.sites[0]?.keys.map((key) => key.modelCount)).toEqual([6, 6, 6]);
+      expect(preview.totalModels).toBe(18);
+
+      const { finished } = await runProbe({ authorizedTargetCount: preview.totalModels });
+
+      expect(finished?.status).toBe('succeeded');
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(18);
+    }, 30_000);
+
+    it('still refuses a sweep authorized for the union alone, which is what the gate used to send', async () => {
+      // Paired with the test above so the fix cannot be mistaken for loosening the
+      // gate: the counter was wrong, the ceiling was not. An authorization that
+      // genuinely covers only the union must still refuse a per-key sweep.
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      const models = Array.from({ length: 6 }, (_unused, index) => `gpt-${index}`);
+      primeDiscovery([{ site, account, models }]);
+      await seedToken(account.id, 'group-b', { token: 'sk-b' });
+      await seedToken(account.id, 'group-c', { token: 'sk-c' });
+      fetchTokenAccessibleModelsMock.mockResolvedValue(models);
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      const { finished } = await runProbe({ authorizedTargetCount: models.length });
+
+      expect(finished?.status).toBe('failed');
+      expect(probeRuntimeModelMock).not.toHaveBeenCalled();
+    });
+
+    /**
+     * A skipped key contributes no probes, so it must contribute nothing to the
+     * number the gate authorizes either. Counting it would inflate the estimate and
+     * make the confirm dialog overstate the spend — the opposite error from the one
+     * above, and the reason preview and runner share one predicate rather than two
+     * matching filters.
+     */
+    it('leaves a key that will be skipped out of the authorized count', async () => {
+      const { site, account } = await seedSite();
+      await setInterest(['^gpt-']);
+      primeDiscovery([{ site, account, models: ['gpt-4o', 'gpt-5'] }]);
+      await seedToken(account.id, 'switched-off', { enabled: false });
+      await seedToken(account.id, 'masked', { valueStatus: 'masked_pending' });
+      probeRuntimeModelMock.mockResolvedValue(probeResult());
+
+      const preview = await service.previewActiveModelProbe();
+      // Two models on the primary key alone; the two unusable keys add nothing.
+      expect(preview.totalModels).toBe(2);
+      expect(preview.sites[0]?.keys.filter((key) => key.skipReason !== null)).toHaveLength(2);
+
+      const { finished } = await runProbe({ authorizedTargetCount: preview.totalModels });
+
+      expect(finished?.status).toBe('succeeded');
+      expect(probeRuntimeModelMock).toHaveBeenCalledTimes(2);
     });
 
     it('keeps two accounts\' primary keys apart despite the shared sentinel id', async () => {

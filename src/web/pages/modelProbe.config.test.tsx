@@ -52,6 +52,7 @@ async function flushMicrotasks() {
 function buildConfig(overrides: Record<string, unknown> = {}) {
   return {
     interestPatterns: [],
+    disabledInterestPatterns: [],
     prompts: ['hi'],
     userAgents: [
       { id: 'claude-code', label: 'Claude Code', value: 'claude-cli/2.1.63 (external, cli)' },
@@ -334,6 +335,141 @@ describe('ModelProbe global configuration panel', () => {
       await flushMicrotasks();
 
       expect(apiMock.saveModelProbeConfig).not.toHaveBeenCalled();
+    } finally {
+      root.unmount();
+    }
+  });
+
+  /**
+   * The toggles exist so a sweep can be narrowed to a couple of rules — "which
+   * sites serve opus" — without deleting regexes the operator wants back. They
+   * store a DISABLE list, so the default for a pattern is ON.
+   */
+  it('ticks every pattern by default, because a stored regex is meant to be active', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({ interestPatterns: ['^gpt-', '^claude-', '^gemini-'] }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      const toggles = findByTestId(root.root, 'model-probe-pattern-toggles');
+      expect(collectText(toggles)).toContain('本轮启用（3/3）');
+      for (const pattern of ['^gpt-', '^claude-', '^gemini-']) {
+        expect(findByTestId(root.root, `model-probe-pattern-toggle-${pattern}`).props.checked).toBe(true);
+      }
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('sends the unticked patterns as a disable list and keeps them in the textarea', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({ interestPatterns: ['^gpt-', '^claude-', '^gemini-'] }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-pattern-toggle-^gpt-').props.onChange();
+      });
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.saveModelProbeConfig).toHaveBeenCalledWith(expect.objectContaining({
+        // Still configured — narrowing a sweep is not deleting a rule.
+        interestPatterns: ['^gpt-', '^claude-', '^gemini-'],
+        disabledInterestPatterns: ['^gpt-'],
+      }));
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('switches every pattern off and back on in one click', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({ interestPatterns: ['^gpt-', '^claude-'] }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-patterns-select-none').props.onClick();
+      });
+
+      // All off is not "no filter": an empty enabled set matches nothing, so the
+      // panel says so rather than letting the operator queue a sweep of nothing.
+      expect(collectText(root.root)).toContain('所有正则都已取消勾选，不会探测任何模型');
+      expect(collectText(findByTestId(root.root, 'model-probe-pattern-toggles'))).toContain('本轮启用（0/2）');
+
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-patterns-select-all').props.onClick();
+      });
+
+      expect(collectText(root.root)).not.toContain('所有正则都已取消勾选');
+      expect(collectText(findByTestId(root.root, 'model-probe-pattern-toggles'))).toContain('本轮启用（2/2）');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('lets a pattern typed just now be switched off before the first save', async () => {
+    const root = await renderPage();
+    try {
+      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
+      await act(async () => {
+        textarea.props.onChange({ target: { value: '^gpt-\n^claude-' } });
+      });
+
+      // Toggles read the TEXTAREA, not the last saved config, or a pattern would
+      // have to be saved once before it could be narrowed away.
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-pattern-toggle-^claude-').props.onChange();
+      });
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.saveModelProbeConfig).toHaveBeenCalledWith(expect.objectContaining({
+        interestPatterns: ['^gpt-', '^claude-'],
+        disabledInterestPatterns: ['^claude-'],
+      }));
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('drops a disable entry once its pattern is deleted from the textarea', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({
+        interestPatterns: ['^gpt-', '^claude-'],
+        disabledInterestPatterns: ['^gpt-'],
+      }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
+      await act(async () => {
+        textarea.props.onChange({ target: { value: '^claude-' } });
+      });
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      // Kept, the stale entry would switch off a DIFFERENT rule as soon as the same
+      // text was typed again months later.
+      expect(apiMock.saveModelProbeConfig).toHaveBeenCalledWith(expect.objectContaining({
+        interestPatterns: ['^claude-'],
+        disabledInterestPatterns: [],
+      }));
     } finally {
       root.unmount();
     }

@@ -241,6 +241,42 @@ describe('modelProbeConfigService', () => {
       expect(config.errorKeywords).toEqual(['Model Not Found']);
     });
 
+    /**
+     * The per-pattern checkboxes store a DISABLE list rather than a selection of
+     * enabled ones, so a regex the operator has just typed is active without an
+     * extra click and narrowing one sweep never means deleting a pattern.
+     */
+    it('resolves the enabled patterns as the ones not switched off', () => {
+      const config = service.normalizeModelProbeConfig({
+        interestPatterns: ['^gpt-', '^claude-', '^gemini-'],
+        disabledInterestPatterns: ['^claude-'],
+      });
+
+      expect(service.resolveEnabledInterestPatterns(config)).toEqual(['^gpt-', '^gemini-']);
+      // An empty disable list is the common case and must not copy or reorder.
+      expect(service.resolveEnabledInterestPatterns({
+        ...config,
+        disabledInterestPatterns: [],
+      })).toEqual(['^gpt-', '^claude-', '^gemini-']);
+      // All off resolves to nothing, which matches nothing — NOT to "no filter",
+      // which would probe every model an upstream lists.
+      expect(service.resolveEnabledInterestPatterns({
+        ...config,
+        disabledInterestPatterns: ['^gpt-', '^claude-', '^gemini-'],
+      })).toEqual([]);
+    });
+
+    it('drops a disabled entry that no longer names a configured pattern', () => {
+      // Left over from a regex the operator deleted. Kept, it would switch off a
+      // DIFFERENT pattern the moment the same text was typed again.
+      const config = service.normalizeModelProbeConfig({
+        interestPatterns: ['^gpt-'],
+        disabledInterestPatterns: ['^gpt-', '^deleted-'],
+      });
+
+      expect(config.disabledInterestPatterns).toEqual(['^gpt-']);
+    });
+
     it('keeps regexes that differ only by escape case, which are semantically opposite', () => {
       // A lowercased dedupe key would collapse these pairs and silently drop one.
       const config = service.normalizeModelProbeConfig({
@@ -424,6 +460,34 @@ describe('modelProbeConfigService', () => {
     it('accepts valid regex patterns unchanged', async () => {
       const saved = await service.saveModelProbeConfig({ interestPatterns: ['^gpt-5.*$', 'claude-(opus|sonnet)'] });
       expect(saved.interestPatterns).toEqual(['^gpt-5.*$', 'claude-(opus|sonnet)']);
+    });
+
+    it('round-trips which patterns are switched off for the next sweep', async () => {
+      const saved = await service.saveModelProbeConfig({
+        interestPatterns: ['^gpt-', '^claude-'],
+        disabledInterestPatterns: ['^gpt-'],
+      });
+      expect(saved.disabledInterestPatterns).toEqual(['^gpt-']);
+
+      // Through the settings row, not just the return value: the toggle has to
+      // survive a restart or the next sweep silently widens back to every pattern.
+      await expect(service.loadModelProbeConfig()).resolves.toMatchObject({
+        interestPatterns: ['^gpt-', '^claude-'],
+        disabledInterestPatterns: ['^gpt-'],
+      });
+    });
+
+    it('validates a pattern that is switched off too, rather than storing a broken regex', async () => {
+      // Being disabled is a per-sweep state, not a reason to skip validation: the
+      // pattern stays stored, and accepting it here would move the failure to
+      // whenever the operator ticks it back on.
+      await expect(service.saveModelProbeConfig({
+        interestPatterns: ['^gpt-', '([unclosed'],
+        disabledInterestPatterns: ['([unclosed'],
+      })).rejects.toThrow(/\(\[unclosed/);
+
+      const rows = await db.select().from(schema.settings).all();
+      expect(rows).toHaveLength(0);
     });
   });
 

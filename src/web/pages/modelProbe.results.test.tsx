@@ -400,6 +400,48 @@ describe('ModelProbe results pagination', () => {
       root.unmount();
     }
   });
+
+  it('asks the server for the chosen page size, and offers a 全部 option', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW], undefined, 400));
+    const root = await renderPage();
+    try {
+      const select = findByTestId(root.root, 'model-probe-results-page-size');
+      // 50 / 100 / 全部. 「全部」 is a bounded page, not an unlimited fetch: the
+      // panel must never ask the server for every row it happens to hold.
+      expect(select.props.children.map((option: ReactTestInstance) => option.props.value))
+        .toEqual([50, 100, 500]);
+      expect(collectText(select)).toContain('全部');
+
+      await act(async () => {
+        select.props.onChange({ target: { value: '100' } });
+      });
+      await flushMicrotasks();
+
+      expect(lastResultsQuery()).toMatchObject({ limit: 100, offset: 0 });
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('returns to the first page when the page size changes', async () => {
+    apiMock.getModelProbeResults.mockResolvedValue(resultsResponse([SUPPORTED_ROW], undefined, 400));
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-results-next'));
+      expect(Number(lastResultsQuery().offset)).toBe(50);
+
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-results-page-size').props.onChange({ target: { value: '500' } });
+      });
+      await flushMicrotasks();
+
+      // Offset 50 under a 500-row page is page 1.1 — a window no page button can
+      // reach, and one whose 上一页 would then land on a negative offset.
+      expect(lastResultsQuery()).toMatchObject({ limit: 500, offset: 0 });
+    } finally {
+      root.unmount();
+    }
+  });
 });
 
 describe('ModelProbe results sorting', () => {
@@ -876,6 +918,41 @@ describe('ModelProbe results column layout', () => {
       });
       expect(propagationStopped).toBe(true);
       expect(lastResultsQuery().sortBy).toBe('checkedAt');
+    } finally {
+      root.unmount();
+    }
+  });
+  it('sizes every column from a colgroup, so a drag widens the table instead of its neighbour', async () => {
+    // A stored width for ONE column, which is what proves the `col` elements carry
+    // per-column widths instead of one shared style.
+    store[STORAGE_KEY] = JSON.stringify({ hidden: ['prompt', 'userAgent'], widths: { key: 320 } });
+    const root = await renderPage();
+    try {
+      const table = findByTestId(root.root, 'model-probe-results-table')
+        .find((node) => node.type === 'table');
+      // The three properties that make the fix work, together. Under `width: '100%'`
+      // a fixed layout has to keep the total constant, so widening one column takes
+      // the space back from the next one and clips it — the reported bug.
+      expect(table.props.style).toMatchObject({
+        width: 'max-content',
+        minWidth: '100%',
+        tableLayout: 'fixed',
+      });
+
+      const headerKeys = table.findAll((node) => node.type === 'th')
+        .map((th) => String(th.props['data-testid']).replace('model-probe-results-header-', ''));
+      const widths = table.find((node) => node.type === 'colgroup')
+        .findAll((node) => node.type === 'col')
+        .map((col) => col.props.style.width);
+
+      // One `col` per visible column: a missing entry shifts every width after it
+      // onto the wrong column.
+      expect(widths).toHaveLength(headerKeys.length);
+      expect(widths[headerKeys.indexOf('key')]).toBe(320);
+      // The neighbour keeps its own width rather than absorbing the difference, and
+      // no column is left unsized — which a content-sized table cannot express.
+      expect(widths[headerKeys.indexOf('model')]).not.toBe(320);
+      expect(widths.every((width) => typeof width === 'number' && width >= 80)).toBe(true);
     } finally {
       root.unmount();
     }
