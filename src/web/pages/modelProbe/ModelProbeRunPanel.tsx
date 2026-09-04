@@ -82,6 +82,33 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState('');
 
+  /**
+   * Only sites a sweep can actually probe are offered as scope.
+   *
+   * A disabled site is skipped by the runner whatever the operator ticks — it comes
+   * back under 跳过的站点 with `site_disabled` — so listing it as a choice offered a
+   * decision that had no effect. A missing status counts as active, matching the
+   * server's own reading of legacy rows.
+   */
+  const selectableSites = useMemo(
+    () => sites.filter((site) => (site.status || 'active') !== 'disabled'),
+    [sites],
+  );
+  const hiddenDisabledSiteCount = sites.length - selectableSites.length;
+
+  /**
+   * A ticked site that has since been disabled is dropped from the selection, not
+   * merely hidden: keeping it would send a scope naming a site the panel no longer
+   * shows, and the sweep would then report a skip the operator cannot explain.
+   */
+  useEffect(() => {
+    setScopeSiteIds((prev) => {
+      const selectable = new Set(selectableSites.map((site) => site.id));
+      const next = prev.filter((id) => selectable.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [selectableSites]);
+
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
   /** Set only for `run_limit_exceeded`: rendered as a dead end, with no confirm. */
@@ -763,9 +790,13 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           站点范围（不勾选表示全部符合条件的站点）
         </div>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          {sites.length === 0 ? (
-            <span style={hintStyle}>还没有可探测的站点。</span>
-          ) : sites.map((site) => (
+          {selectableSites.length === 0 ? (
+            <span style={hintStyle}>
+              {hiddenDisabledSiteCount > 0
+                ? '所有站点都已停用，没有可探测的站点。'
+                : '还没有可探测的站点。'}
+            </span>
+          ) : selectableSites.map((site) => (
             <label key={site.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
               <input
                 type="checkbox"
@@ -777,6 +808,15 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
             </label>
           ))}
         </div>
+        {/*
+          Named rather than silently absent: a site vanishing from this list with no
+          explanation reads as data loss, and the reason is one an operator can act on.
+        */}
+        {hiddenDisabledSiteCount > 0 && (
+          <div style={{ ...hintStyle, marginTop: 6 }} data-testid="model-probe-scope-disabled-note">
+            {hiddenDisabledSiteCount} 个已停用的站点未列出：探测会跳过它们，在站点管理里重新启用后才会出现。
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>

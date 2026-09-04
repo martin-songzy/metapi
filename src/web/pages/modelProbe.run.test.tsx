@@ -780,6 +780,75 @@ describe('ModelProbe run scope', () => {
       root.unmount();
     }
   });
+
+  /**
+   * A disabled site is skipped by the runner whatever is ticked — it comes back under
+   * 跳过的站点 with `site_disabled` — so offering it as scope offered a decision that
+   * could not take effect.
+   */
+  it('offers only sites a sweep can probe, and says how many were left out', async () => {
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [
+        SITES[0],
+        { ...SITES[1], status: 'disabled' },
+      ],
+    });
+
+    const root = await renderPage();
+    try {
+      expect(hasTestId(root.root, 'model-probe-scope-site-4')).toBe(true);
+      expect(hasTestId(root.root, 'model-probe-scope-site-9')).toBe(false);
+      // Named rather than silently absent: a site vanishing with no explanation
+      // reads as data loss.
+      expect(collectText(findByTestId(root.root, 'model-probe-scope-disabled-note'))).toContain('1');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('treats a missing status as active, matching how the server reads legacy rows', async () => {
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [{ ...SITES[0], status: undefined }],
+    });
+
+    const root = await renderPage();
+    try {
+      expect(hasTestId(root.root, 'model-probe-scope-site-4')).toBe(true);
+      expect(hasTestId(root.root, 'model-probe-scope-disabled-note')).toBe(false);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('drops a selected site from the scope once it is disabled', async () => {
+    apiMock.runModelProbe.mockResolvedValue(queued());
+    apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
+
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-scope-site-9').props.onChange({ target: { checked: true } });
+      });
+      await click(findByTestId(root.root, 'model-probe-preview-button'));
+      expect(apiMock.previewModelProbe).toHaveBeenLastCalledWith({ siteIds: [9] });
+
+      // The page reloads its site list; site 9 has since been disabled elsewhere.
+      apiMock.getModelProbeSites.mockResolvedValue({
+        success: true,
+        sites: [SITES[0], { ...SITES[1], status: 'disabled' }],
+      });
+      await click(findByTestId(root.root, 'model-probe-refresh-button'));
+
+      // Kept, the scope would name a site the panel no longer shows, and the sweep
+      // would report a skip the operator cannot explain.
+      await click(findByTestId(root.root, 'model-probe-preview-button'));
+      expect(apiMock.previewModelProbe).toHaveBeenLastCalledWith({});
+    } finally {
+      root.unmount();
+    }
+  });
 });
 
 describe('ModelProbe run lifecycle', () => {

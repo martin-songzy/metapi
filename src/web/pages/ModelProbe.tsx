@@ -96,6 +96,7 @@ export default function ModelProbe() {
         <div className="page-actions">
           <button
             type="button"
+            data-testid="model-probe-refresh-button"
             className="btn btn-ghost"
             style={{ border: '1px solid var(--color-border)', padding: '8px 14px' }}
             onClick={() => { void load(true); }}
