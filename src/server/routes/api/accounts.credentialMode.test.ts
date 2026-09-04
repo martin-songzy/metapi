@@ -129,6 +129,76 @@ describe('accounts credential mode', { timeout: 15_000 }, () => {
     expect(parsedExtra.credentialMode).toBe('apikey');
   });
 
+  /**
+   * Three pages can each store a credential and none of the columns is unique, so
+   * pasting one key into two of them produced two rows that look like two keys. The
+   * duplicate then collects double weight in weighted routing, and a cooldown
+   * recorded against one channel leaves the other hammering the same upstream key.
+   */
+  it('refuses a second connection carrying a credential the site already holds', async () => {
+    getModelsMock.mockResolvedValue(['gpt-4o-mini']);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Duplicate Guard Site',
+      url: 'https://duplicate-guard.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: { siteId: site.id, username: 'first-conn', accessToken: 'sk-same-key', credentialMode: 'apikey' },
+    });
+    expect(first.statusCode).toBe(200);
+
+    getModelsMock.mockClear();
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: { siteId: site.id, username: 'second-conn', accessToken: 'sk-same-key', credentialMode: 'apikey' },
+    });
+
+    expect(second.statusCode).toBe(400);
+    // Names WHERE it already lives: the operator has three pages to look on, and
+    // "duplicate" alone leaves them hunting.
+    expect((second.json() as { message?: string }).message).toContain('first-conn');
+    // Refused before any upstream request, so a duplicate paste costs nothing.
+    expect(getModelsMock).not.toHaveBeenCalled();
+    expect(await db.select().from(schema.accounts).all()).toHaveLength(1);
+  });
+
+  it('still allows the same credential on a different site', async () => {
+    // Scoped per site on purpose: one key legitimately works on two relays that
+    // front the same upstream, and those are two independent channels.
+    getModelsMock.mockResolvedValue(['gpt-4o-mini']);
+
+    const alpha = await db.insert(schema.sites).values({
+      name: 'Shared Key Alpha',
+      url: 'https://shared-alpha.example.com',
+      platform: 'new-api',
+    }).returning().get();
+    const beta = await db.insert(schema.sites).values({
+      name: 'Shared Key Beta',
+      url: 'https://shared-beta.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: { siteId: alpha.id, accessToken: 'sk-cross-site', credentialMode: 'apikey' },
+    });
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: { siteId: beta.id, accessToken: 'sk-cross-site', credentialMode: 'apikey' },
+    });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(await db.select().from(schema.accounts).all()).toHaveLength(2);
+  });
+
   it('stores account proxy settings when adding a connection', async () => {
     getModelsMock.mockResolvedValueOnce(['gpt-4o-mini']);
 

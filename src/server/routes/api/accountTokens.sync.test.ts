@@ -741,6 +741,121 @@ describe('account tokens sync routes with site status', () => {
     });
   });
 
+  it('names an unnamed manual token key-N, counting past the names already taken', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, token: 'sk-unnamed-one' },
+    });
+    expect(first.statusCode).toBe(200);
+    // `key-1`, not `default`: the old shape named the first row `default` and later
+    // ones `token-N`, so a list of auto-named keys read as two different kinds of
+    // thing — and the probe results table then showed 「主 Key」 beside 「default」.
+    expect(first.json()).toMatchObject({ token: expect.objectContaining({ name: 'key-1' }) });
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, token: 'sk-unnamed-two' },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ token: expect.objectContaining({ name: 'key-2' }) });
+
+    // A name an operator typed by hand occupies the slot, so the generator steps
+    // over it instead of colliding with the uniqueness check.
+    const named = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, name: 'key-3', token: 'sk-named-three' },
+    });
+    expect(named.statusCode).toBe(200);
+
+    const fourth = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, token: 'sk-unnamed-four' },
+    });
+    expect(fourth.statusCode).toBe(200);
+    expect(fourth.json()).toMatchObject({ token: expect.objectContaining({ name: 'key-4' }) });
+  });
+
+  it('refuses a manual token whose value duplicates one the site already holds', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, name: 'original', token: 'sk-duplicate-value' },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/account-tokens',
+      payload: { accountId: account.id, name: 'copy', token: 'sk-duplicate-value' },
+    });
+
+    expect(second.statusCode).toBe(400);
+    // The NAME is free, so the old name-only check accepted this and stored the same
+    // key twice under two labels.
+    //
+    // Reported as a connection rather than as the 「original」 token because creating
+    // the first token promoted its value to the account's own preferred credential
+    // (`accounts.api_token`), and accounts are checked first. Either answer is true;
+    // this is the one an operator reading about routing impact needs.
+    expect((second.json() as { message?: string }).message).toContain('该凭据已存在');
+    expect((second.json() as { message?: string }).message).toContain('连接');
+
+    const rows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(rows).toHaveLength(1);
+  });
+
+  it('lets an edit keep its own value, and refuses one that takes a sibling\'s', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    const alpha = await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'alpha',
+      token: 'sk-alpha-value',
+      enabled: true,
+      valueStatus: 'ready' as any,
+    }).returning().get();
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'beta',
+      token: 'sk-beta-value',
+      enabled: true,
+      valueStatus: 'ready' as any,
+    }).run();
+
+    // Re-sending a row's own value must not read as a duplicate of itself, or no
+    // token could ever be renamed without also changing its key.
+    const selfSave = await app.inject({
+      method: 'PUT',
+      url: `/api/account-tokens/${alpha.id}`,
+      payload: { name: 'alpha-renamed', token: 'sk-alpha-value' },
+    });
+    expect(selfSave.statusCode).toBe(200);
+
+    const collide = await app.inject({
+      method: 'PUT',
+      url: `/api/account-tokens/${alpha.id}`,
+      payload: { token: 'sk-beta-value' },
+    });
+    expect(collide.statusCode).toBe(400);
+    expect((collide.json() as { message?: string }).message).toContain('beta');
+
+    const stored = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.id, alpha.id))
+      .get();
+    expect(stored?.token).toBe('sk-alpha-value');
+  });
+
   it('creates token via upstream api and syncs into local store when manual token is omitted', async () => {
     const { account, site } = await seedAccount({ siteStatus: 'active' });
     createApiTokenMock.mockResolvedValue(true);

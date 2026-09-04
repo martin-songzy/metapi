@@ -9,6 +9,10 @@ import {
   type AccountCredentialMode,
 } from './accountExtraConfig.js';
 import { parseSiteProxyUrlInput, withAccountProxyOverride } from './siteProxy.js';
+import {
+  describeDuplicateCredential,
+  findDuplicateCredentialOnSite,
+} from './credentialDuplicateGuard.js';
 import { runWithSiteApiEndpointPool } from './siteApiEndpointService.js';
 import { type AccountCreatePayload } from '../contracts/accountsRoutePayloads.js';
 import { convergeAccountMutation } from './accountMutationWorkflow.js';
@@ -173,6 +177,20 @@ export async function createManualAccount({
   const parsedProxyUrl = parseSiteProxyUrlInput(body.proxyUrl);
   if (parsedProxyUrl.present && !parsedProxyUrl.valid) {
     throw new Error('Invalid proxy URL format');
+  }
+
+  /**
+   * Refused BEFORE any upstream verification request, so a duplicate paste costs
+   * nothing. Checked here rather than in the route because both the single and the
+   * batch create path go through this function, and the batch path reports per-item
+   * failures — a duplicate in a pasted list should fail that one item, not the batch.
+   */
+  const duplicateCredential = await findDuplicateCredentialOnSite({
+    siteId: site.id,
+    credential: rawAccessToken,
+  });
+  if (duplicateCredential) {
+    throw new Error(describeDuplicateCredential(duplicateCredential));
   }
 
   if (credentialMode === 'apikey') {

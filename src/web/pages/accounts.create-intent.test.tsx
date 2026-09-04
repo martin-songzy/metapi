@@ -65,7 +65,7 @@ describe('Accounts create intent handling', () => {
     try {
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('添加 Session 连接');
-      expect(rendered).not.toContain('添加 API Key 连接');
+      expect(rendered).not.toContain('添加直连 Key');
 
       const selects = root.root.findAllByType(ModernSelect);
       expect(selects[1]?.props.value).toBe('10');
@@ -78,7 +78,7 @@ describe('Accounts create intent handling', () => {
     const root = await renderAccounts('/accounts?segment=apikey&create=1&siteId=10');
     try {
       const rendered = JSON.stringify(root.toJSON());
-      expect(rendered).toContain('添加 API Key 连接');
+      expect(rendered).toContain('添加直连 Key');
 
       const selects = root.root.findAllByType(ModernSelect);
       expect(selects[1]?.props.value).toBe('10');
@@ -127,7 +127,7 @@ describe('Accounts create intent handling', () => {
     try {
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).not.toContain('添加 Session 连接');
-      expect(rendered).not.toContain('添加 API Key 连接');
+      expect(rendered).not.toContain('添加直连 Key');
     } finally {
       root?.unmount();
     }

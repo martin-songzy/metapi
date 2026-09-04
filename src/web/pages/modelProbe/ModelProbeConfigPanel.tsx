@@ -6,10 +6,14 @@ import ResponsiveFormGrid from '../../components/ResponsiveFormGrid.js';
 import {
   configDraftFromConfig,
   configPayloadFromDraft,
+  createModelProbePatternRow,
   customUserAgentPresetValue,
-  findInvalidInterestPatterns,
+  findInvalidPatternRows,
   hasCustomUserAgentPreset,
-  splitConfigLines,
+  patternRowsFromText,
+  patternRowsToDisabled,
+  patternRowsToPatterns,
+  patternRowsToText,
   withCustomUserAgentValue,
   MODEL_PROBE_CUSTOM_UA_PRESET_ID,
   type ModelProbeConfigDraft,
@@ -64,43 +68,75 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
   const toast = useToast();
   const [draft, setDraft] = useState<ModelProbeConfigDraft>(() => configDraftFromConfig(config));
   const [saving, setSaving] = useState(false);
+  /**
+   * The batch editor's buffer, or `null` while the row list is showing.
+   *
+   * Held here rather than in the draft because it is a VIEW of the rows: the rows
+   * stay authoritative, and an abandoned paste must not leave the draft holding text
+   * nobody applied.
+   */
+  const [batchText, setBatchText] = useState<string | null>(null);
 
   // Re-seed whenever the page reloads the config so a refresh discards a stale draft.
   useEffect(() => {
     setDraft(configDraftFromConfig(config));
+    setBatchText(null);
   }, [config]);
 
   const patternIssues = useMemo(
-    () => findInvalidInterestPatterns(draft.interestPatternsText, limits),
-    [draft.interestPatternsText, limits],
+    () => findInvalidPatternRows(draft.patternRows, limits),
+    [draft.patternRows, limits],
   );
-  const patternCount = useMemo(
-    () => splitConfigLines(draft.interestPatternsText).length,
-    [draft.interestPatternsText],
+  const issueByRow = useMemo(
+    () => new Map(patternIssues.map((issue) => [issue.id, issue.reason])),
+    [patternIssues],
   );
+
+  const patterns = useMemo(() => patternRowsToPatterns(draft.patternRows), [draft.patternRows]);
+  const disabledPatterns = useMemo(() => patternRowsToDisabled(draft.patternRows), [draft.patternRows]);
+  const patternCount = patterns.length;
+  const enabledPatternCount = patternCount - disabledPatterns.length;
   const hasNoPatterns = patternCount === 0;
 
-  /**
-   * Toggles are derived from the TEXTAREA, not from the last saved config, so a
-   * regex the operator just typed can be switched off before the first save.
-   */
-  const draftPatterns = useMemo(
-    () => splitConfigLines(draft.interestPatternsText),
-    [draft.interestPatternsText],
-  );
-  const disabledPatternSet = useMemo(
-    () => new Set(draft.disabledInterestPatterns),
-    [draft.disabledInterestPatterns],
-  );
-  const enabledPatternCount = draftPatterns.filter((pattern) => !disabledPatternSet.has(pattern)).length;
+  const updateRow = (id: string, source: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      patternRows: prev.patternRows.map((row) => (row.id === id ? { ...row, source } : row)),
+    }));
+  };
 
-  const togglePattern = (pattern: string) => {
-    setDraft((prev) => {
-      const disabled = new Set(prev.disabledInterestPatterns);
-      if (disabled.has(pattern)) disabled.delete(pattern);
-      else disabled.add(pattern);
-      return { ...prev, disabledInterestPatterns: [...disabled] };
-    });
+  const toggleRow = (id: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      patternRows: prev.patternRows.map((row) => (row.id === id ? { ...row, enabled: !row.enabled } : row)),
+    }));
+  };
+
+  const removeRow = (id: string) => {
+    setDraft((prev) => ({
+      ...prev,
+      patternRows: prev.patternRows.filter((row) => row.id !== id),
+    }));
+  };
+
+  const addRow = () => {
+    setDraft((prev) => ({
+      ...prev,
+      patternRows: [...prev.patternRows, createModelProbePatternRow()],
+    }));
+  };
+
+  const setAllEnabled = (enabled: boolean) => {
+    setDraft((prev) => ({
+      ...prev,
+      patternRows: prev.patternRows.map((row) => ({ ...row, enabled })),
+    }));
+  };
+
+  const applyBatchText = () => {
+    const text = batchText ?? '';
+    setDraft((prev) => ({ ...prev, patternRows: patternRowsFromText(text, prev.patternRows) }));
+    setBatchText(null);
   };
 
   const userAgentOptions = draft.userAgents.map((preset) => ({
@@ -151,33 +187,61 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <div style={fieldLabelStyle}>模型匹配正则（每行一条，忽略大小写）</div>
-        <textarea
-          data-testid="model-probe-interest-patterns"
-          value={draft.interestPatternsText}
-          onChange={(event) => setDraft((prev) => ({ ...prev, interestPatternsText: event.target.value }))}
-          placeholder={'例如：\ngpt-4o\n^claude-.*-sonnet'}
-          aria-invalid={patternIssues.length > 0}
-          style={{
-            ...textareaStyle,
-            borderColor: patternIssues.length > 0 ? 'var(--color-danger)' : 'var(--color-border)',
-          }}
-        />
-        <div style={hintStyle}>
-          只有匹配到的模型才会被探测。已配置 {patternCount} 条，最多 {limits.maxInterestPatterns} 条，单条最长 {limits.maxInterestPatternLength} 个字符。
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+          <div style={{ ...fieldLabelStyle, marginBottom: 0 }}>模型匹配正则（忽略大小写）</div>
+          <button
+            type="button"
+            data-testid="model-probe-patterns-batch-toggle"
+            className="btn btn-ghost btn-sm"
+            style={{ border: '1px solid var(--color-border)' }}
+            onClick={() => setBatchText((prev) => (prev === null ? patternRowsToText(draft.patternRows) : null))}
+          >
+            {batchText === null ? '批量编辑' : '返回列表'}
+          </button>
         </div>
 
-        {patternCount > 0 && (
+        {batchText !== null ? (
+          <div data-testid="model-probe-patterns-batch">
+            <textarea
+              data-testid="model-probe-interest-patterns"
+              value={batchText}
+              onChange={(event) => setBatchText(event.target.value)}
+              placeholder={'例如：\ngpt-4o\n^claude-.*-sonnet'}
+              style={textareaStyle}
+            />
+            <div style={hintStyle}>
+              每行一条，适合一次粘贴多条。应用后已有正则保持原来的勾选状态，新增的默认启用。
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                type="button"
+                data-testid="model-probe-patterns-batch-apply"
+                className="btn btn-ghost btn-sm"
+                style={{ border: '1px solid var(--color-border)' }}
+                onClick={applyBatchText}
+              >
+                应用
+              </button>
+              <button
+                type="button"
+                data-testid="model-probe-patterns-batch-cancel"
+                className="btn btn-ghost btn-sm"
+                onClick={() => setBatchText(null)}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        ) : (
           <div
             data-testid="model-probe-pattern-toggles"
             style={{
-              marginTop: 10,
               border: '1px solid var(--color-border)',
               borderRadius: 'var(--radius-sm)',
               padding: '10px 12px',
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>
                 本轮启用（{enabledPatternCount}/{patternCount}）
               </div>
@@ -187,7 +251,7 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
                   data-testid="model-probe-patterns-select-all"
                   className="btn btn-ghost btn-sm"
                   style={{ border: '1px solid var(--color-border)' }}
-                  onClick={() => setDraft((prev) => ({ ...prev, disabledInterestPatterns: [] }))}
+                  onClick={() => setAllEnabled(true)}
                 >
                   全选
                 </button>
@@ -196,30 +260,78 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
                   data-testid="model-probe-patterns-select-none"
                   className="btn btn-ghost btn-sm"
                   style={{ border: '1px solid var(--color-border)' }}
-                  onClick={() => setDraft((prev) => ({ ...prev, disabledInterestPatterns: [...draftPatterns] }))}
+                  onClick={() => setAllEnabled(false)}
                 >
                   全不选
                 </button>
+                <button
+                  type="button"
+                  data-testid="model-probe-patterns-add"
+                  className="btn btn-ghost btn-sm"
+                  style={{ border: '1px solid var(--color-border)' }}
+                  onClick={addRow}
+                >
+                  + 添加一条
+                </button>
               </div>
             </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 16px' }}>
-              {draftPatterns.map((pattern) => (
-                <label
-                  key={pattern}
-                  style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, padding: '2px 0' }}
-                >
-                  <input
-                    type="checkbox"
-                    data-testid={`model-probe-pattern-toggle-${pattern}`}
-                    checked={!disabledPatternSet.has(pattern)}
-                    onChange={() => togglePattern(pattern)}
-                  />
-                  <code style={{ fontSize: 12 }}>{pattern}</code>
-                </label>
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {draft.patternRows.length === 0 && (
+                <div data-testid="model-probe-pattern-rows-empty" style={{ ...hintStyle, marginTop: 0 }}>
+                  还没有正则。点「+ 添加一条」，或用「批量编辑」一次粘贴多条。
+                </div>
+              )}
+              {draft.patternRows.map((row, index) => {
+                const reason = issueByRow.get(row.id);
+                return (
+                  <div key={row.id} data-testid={`model-probe-pattern-row-${index}`}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <input
+                        type="checkbox"
+                        data-testid={`model-probe-pattern-toggle-${index}`}
+                        aria-label={`本轮启用 ${row.source || `第 ${index + 1} 条`}`}
+                        checked={row.enabled}
+                        onChange={() => toggleRow(row.id)}
+                      />
+                      <input
+                        type="text"
+                        data-testid={`model-probe-pattern-input-${index}`}
+                        value={row.source}
+                        onChange={(event) => updateRow(row.id, event.target.value)}
+                        placeholder="例如 gpt-4o 或 ^claude-.*-sonnet"
+                        aria-invalid={Boolean(reason)}
+                        style={{
+                          ...numberInputStyle,
+                          flex: 1,
+                          fontFamily: 'var(--font-mono, monospace)',
+                          borderColor: reason ? 'var(--color-danger)' : 'var(--color-border)',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        data-testid={`model-probe-pattern-remove-${index}`}
+                        className="btn btn-link btn-link-danger btn-sm"
+                        aria-label={`删除 ${row.source || `第 ${index + 1} 条`}`}
+                        onClick={() => removeRow(row.id)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                    {reason && (
+                      <div
+                        data-testid={`model-probe-pattern-error-${index}`}
+                        style={{ fontSize: 12, color: 'var(--color-danger)', marginTop: 4, marginLeft: 26 }}
+                      >
+                        {reason}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-            <div style={{ ...hintStyle, marginTop: 6 }}>
-              取消勾选只是本轮不用，正则仍然保留。保存全局配置后对下一次预览和探测生效。
+            <div style={{ ...hintStyle, marginTop: 8 }}>
+              只有勾选的正则会用于下一次预览和探测；取消勾选不会删除正则。
+              已配置 {patternCount} 条，最多 {limits.maxInterestPatterns} 条，单条最长 {limits.maxInterestPatternLength} 个字符。
             </div>
           </div>
         )}
@@ -247,7 +359,7 @@ export default function ModelProbeConfigPanel({ config, limits, onSaved }: Model
             <div style={{ fontWeight: 600, marginBottom: 4 }}>以下正则无效，保存前请修正：</div>
             <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
               {patternIssues.map((issue) => (
-                <li key={issue.source}>
+                <li key={issue.id}>
                   <code>{issue.source}</code> — {issue.reason}
                 </li>
               ))}

@@ -161,6 +161,46 @@ function findByTestId(root: ReactTestInstance, testId: string): ReactTestInstanc
   return root.find((node) => node.props['data-testid'] === testId);
 }
 
+function patternInputCount(root: ReactTestInstance): number {
+  return root.findAll((node) => (
+    String(node.props['data-testid'] || '').startsWith('model-probe-pattern-input-')
+  )).length;
+}
+
+/**
+ * Enters several patterns at once through the batch editor.
+ *
+ * The list editor adds ONE blank row per click, so a multi-pattern fixture would
+ * otherwise need a click and a keystroke per line. The batch editor exists for the
+ * same reason for operators: pasting a dozen regexes is the common way to start.
+ */
+async function setPatternsViaBatch(root: ReactTestInstance, lines: string[]) {
+  await act(async () => {
+    findByTestId(root, 'model-probe-patterns-batch-toggle').props.onClick();
+  });
+  await act(async () => {
+    findByTestId(root, 'model-probe-interest-patterns').props.onChange({
+      target: { value: lines.join('\n') },
+    });
+  });
+  await act(async () => {
+    findByTestId(root, 'model-probe-patterns-batch-apply').props.onClick();
+  });
+}
+
+/** Adds one row and fills it in, the way an operator adds a single rule. */
+async function addPatternRow(root: ReactTestInstance, source: string) {
+  const index = patternInputCount(root);
+  await act(async () => {
+    findByTestId(root, 'model-probe-patterns-add').props.onClick();
+  });
+  await act(async () => {
+    findByTestId(root, `model-probe-pattern-input-${index}`).props.onChange({
+      target: { value: source },
+    });
+  });
+}
+
 function selectOptionLabels(select: ReactTestInstance): string[] {
   return select
     .findAll((node) => node.props.className === 'modern-select-option-label')
@@ -282,10 +322,7 @@ describe('ModelProbe global configuration panel', () => {
   it('drops the empty-pattern warning once a pattern is typed', async () => {
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
-      await act(async () => {
-        textarea.props.onChange({ target: { value: 'gpt-4o' } });
-      });
+      await addPatternRow(root.root, 'gpt-4o');
 
       expect(collectText(root.root)).not.toContain('未配置匹配规则，不会探测任何模型');
     } finally {
@@ -293,16 +330,35 @@ describe('ModelProbe global configuration panel', () => {
     }
   });
 
-  it('marks each invalid pattern and refuses to save', async () => {
+  it('keeps the empty-pattern warning for a row that has been added but not filled in', async () => {
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
       await act(async () => {
-        textarea.props.onChange({ target: { value: 'gpt-4o\n(unclosed\n[bad' } });
+        findByTestId(root.root, 'model-probe-patterns-add').props.onClick();
       });
 
-      const issues = findByTestId(root.root, 'model-probe-pattern-issues');
-      const issueText = collectText(issues);
+      // A blank row is not a pattern: it reaches neither the count nor the payload,
+      // so the warning that nothing will be probed is still the truth.
+      expect(collectText(root.root)).toContain('未配置匹配规则，不会探测任何模型');
+      expect(patternInputCount(root.root)).toBe(1);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('marks each invalid pattern on its own row and refuses to save', async () => {
+    const root = await renderPage();
+    try {
+      await setPatternsViaBatch(root.root, ['gpt-4o', '(unclosed', '[bad']);
+
+      // In place, which is the whole point of the merged editor: the operator does
+      // not have to match a name in a summary list back to a line of text.
+      expect(collectText(findByTestId(root.root, 'model-probe-pattern-error-1'))).toBeTruthy();
+      expect(collectText(findByTestId(root.root, 'model-probe-pattern-error-2'))).toBeTruthy();
+      expect(findByTestId(root.root, 'model-probe-pattern-input-1').props['aria-invalid']).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-pattern-input-0').props['aria-invalid']).toBe(false);
+
+      const issueText = collectText(findByTestId(root.root, 'model-probe-pattern-issues'));
       expect(issueText).toContain('(unclosed');
       expect(issueText).toContain('[bad');
       expect(issueText).not.toContain('gpt-4o');
@@ -321,13 +377,9 @@ describe('ModelProbe global configuration panel', () => {
   it('flags a pattern longer than the server-reported cap', async () => {
     const root = await renderPage();
     try {
-      const tooLong = 'a'.repeat(41);
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
-      await act(async () => {
-        textarea.props.onChange({ target: { value: tooLong } });
-      });
+      await addPatternRow(root.root, 'a'.repeat(41));
 
-      expect(collectText(findByTestId(root.root, 'model-probe-pattern-issues'))).toContain('40');
+      expect(collectText(findByTestId(root.root, 'model-probe-pattern-error-0'))).toContain('40');
 
       await act(async () => {
         findSaveConfigButton(root.root).props.onClick();
@@ -355,15 +407,19 @@ describe('ModelProbe global configuration panel', () => {
     try {
       const toggles = findByTestId(root.root, 'model-probe-pattern-toggles');
       expect(collectText(toggles)).toContain('本轮启用（3/3）');
-      for (const pattern of ['^gpt-', '^claude-', '^gemini-']) {
-        expect(findByTestId(root.root, `model-probe-pattern-toggle-${pattern}`).props.checked).toBe(true);
+      // One row per pattern, each carrying its own text and its own tick — the two
+      // used to be separate controls a screen apart.
+      expect(patternInputCount(root.root)).toBe(3);
+      for (const [index, pattern] of ['^gpt-', '^claude-', '^gemini-'].entries()) {
+        expect(findByTestId(root.root, `model-probe-pattern-toggle-${index}`).props.checked).toBe(true);
+        expect(findByTestId(root.root, `model-probe-pattern-input-${index}`).props.value).toBe(pattern);
       }
     } finally {
       root.unmount();
     }
   });
 
-  it('sends the unticked patterns as a disable list and keeps them in the textarea', async () => {
+  it('sends the unticked patterns as a disable list and keeps them in the list', async () => {
     apiMock.getModelProbeConfig.mockResolvedValue({
       success: true,
       config: buildConfig({ interestPatterns: ['^gpt-', '^claude-', '^gemini-'] }),
@@ -372,7 +428,7 @@ describe('ModelProbe global configuration panel', () => {
     const root = await renderPage();
     try {
       await act(async () => {
-        findByTestId(root.root, 'model-probe-pattern-toggle-^gpt-').props.onChange();
+        findByTestId(root.root, 'model-probe-pattern-toggle-0').props.onChange();
       });
       await act(async () => {
         findSaveConfigButton(root.root).props.onClick();
@@ -383,6 +439,34 @@ describe('ModelProbe global configuration panel', () => {
         // Still configured — narrowing a sweep is not deleting a rule.
         interestPatterns: ['^gpt-', '^claude-', '^gemini-'],
         disabledInterestPatterns: ['^gpt-'],
+      }));
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('deletes a row on demand, which is how a rule is actually removed', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({ interestPatterns: ['^gpt-', '^claude-'] }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-pattern-remove-0').props.onClick();
+      });
+      expect(patternInputCount(root.root)).toBe(1);
+      expect(findByTestId(root.root, 'model-probe-pattern-input-0').props.value).toBe('^claude-');
+
+      await act(async () => {
+        findSaveConfigButton(root.root).props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.saveModelProbeConfig).toHaveBeenCalledWith(expect.objectContaining({
+        interestPatterns: ['^claude-'],
+        disabledInterestPatterns: [],
       }));
     } finally {
       root.unmount();
@@ -420,15 +504,13 @@ describe('ModelProbe global configuration panel', () => {
   it('lets a pattern typed just now be switched off before the first save', async () => {
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
-      await act(async () => {
-        textarea.props.onChange({ target: { value: '^gpt-\n^claude-' } });
-      });
+      await addPatternRow(root.root, '^gpt-');
+      await addPatternRow(root.root, '^claude-');
 
-      // Toggles read the TEXTAREA, not the last saved config, or a pattern would
-      // have to be saved once before it could be narrowed away.
+      // The tick lives on the row being typed, so a rule can be narrowed away
+      // without ever having been saved once.
       await act(async () => {
-        findByTestId(root.root, 'model-probe-pattern-toggle-^claude-').props.onChange();
+        findByTestId(root.root, 'model-probe-pattern-toggle-1').props.onChange();
       });
       await act(async () => {
         findSaveConfigButton(root.root).props.onClick();
@@ -444,7 +526,7 @@ describe('ModelProbe global configuration panel', () => {
     }
   });
 
-  it('drops a disable entry once its pattern is deleted from the textarea', async () => {
+  it('drops a disable entry once its pattern is retyped as something else', async () => {
     apiMock.getModelProbeConfig.mockResolvedValue({
       success: true,
       config: buildConfig({
@@ -455,20 +537,21 @@ describe('ModelProbe global configuration panel', () => {
     });
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
+      expect(findByTestId(root.root, 'model-probe-pattern-toggle-0').props.checked).toBe(false);
+      // Editing the text of an unticked row: the row stays unticked, so what gets
+      // disabled is the NEW pattern. The old entry cannot survive to switch off a
+      // different rule that later happens to share its text.
       await act(async () => {
-        textarea.props.onChange({ target: { value: '^claude-' } });
+        findByTestId(root.root, 'model-probe-pattern-input-0').props.onChange({ target: { value: '^gemini-' } });
       });
       await act(async () => {
         findSaveConfigButton(root.root).props.onClick();
       });
       await flushMicrotasks();
 
-      // Kept, the stale entry would switch off a DIFFERENT rule as soon as the same
-      // text was typed again months later.
       expect(apiMock.saveModelProbeConfig).toHaveBeenCalledWith(expect.objectContaining({
-        interestPatterns: ['^claude-'],
-        disabledInterestPatterns: [],
+        interestPatterns: ['^gemini-', '^claude-'],
+        disabledInterestPatterns: ['^gemini-'],
       }));
     } finally {
       root.unmount();
@@ -478,10 +561,7 @@ describe('ModelProbe global configuration panel', () => {
   it('sends the whole config on save because the server replaces it wholesale', async () => {
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
-      await act(async () => {
-        textarea.props.onChange({ target: { value: 'gpt-4o\n  \nclaude-.*-sonnet' } });
-      });
+      await setPatternsViaBatch(root.root, ['gpt-4o', '  ', 'claude-.*-sonnet']);
 
       await act(async () => {
         findSaveConfigButton(root.root).props.onClick();
@@ -710,10 +790,7 @@ describe('ModelProbe global configuration panel', () => {
   it('flags patterns beyond the server-reported count cap', async () => {
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
-      await act(async () => {
-        textarea.props.onChange({ target: { value: 'one\ntwo\nthree\nfour' } });
-      });
+      await setPatternsViaBatch(root.root, ['one', 'two', 'three', 'four']);
 
       const issues = collectText(findByTestId(root.root, 'model-probe-pattern-issues'));
       expect(issues).toContain('four');
@@ -721,6 +798,9 @@ describe('ModelProbe global configuration panel', () => {
       expect(issues).not.toContain('50');
       // The first three are within the cap and must not be flagged.
       expect(issues).not.toContain('one');
+      // Marked on the row that overflows, not on the ones that fit.
+      expect(findByTestId(root.root, 'model-probe-pattern-input-3').props['aria-invalid']).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-pattern-input-2').props['aria-invalid']).toBe(false);
 
       await act(async () => {
         findSaveConfigButton(root.root).props.onClick();
@@ -748,21 +828,75 @@ describe('ModelProbe global configuration panel', () => {
     }
   });
 
-  it('marks the pattern field invalid for assistive technology, not only in prose', async () => {
+  it('marks the pattern row invalid for assistive technology, not only in prose', async () => {
     const root = await renderPage();
     try {
-      const textarea = findByTestId(root.root, 'model-probe-interest-patterns');
-      expect(textarea.props['aria-invalid']).toBe(false);
+      await addPatternRow(root.root, 'gpt-4o');
+      expect(findByTestId(root.root, 'model-probe-pattern-input-0').props['aria-invalid']).toBe(false);
 
       await act(async () => {
-        textarea.props.onChange({ target: { value: '(unclosed' } });
+        findByTestId(root.root, 'model-probe-pattern-input-0').props.onChange({ target: { value: '(unclosed' } });
       });
 
-      // Removing this left 15/15 green while a screen-reader user lost the
+      // Removing this left the suite green while a screen-reader user lost the
       // field-level invalid signal entirely.
-      const marked = findByTestId(root.root, 'model-probe-interest-patterns');
+      const marked = findByTestId(root.root, 'model-probe-pattern-input-0');
       expect(marked.props['aria-invalid']).toBe(true);
       expect(marked.props.style?.borderColor).toBe('var(--color-danger)');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('keeps the toggles when a paste replaces the list, instead of re-enabling everything', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({
+        interestPatterns: ['^gpt-', '^claude-'],
+        disabledInterestPatterns: ['^gpt-'],
+      }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      // A paste is an edit of the LIST, not a reset of the switches: retyping a line
+      // the operator had switched off must not quietly widen the next sweep.
+      await setPatternsViaBatch(root.root, ['^gpt-', '^claude-', '^gemini-']);
+
+      expect(findByTestId(root.root, 'model-probe-pattern-toggle-0').props.checked).toBe(false);
+      expect(findByTestId(root.root, 'model-probe-pattern-toggle-1').props.checked).toBe(true);
+      // A pattern the paste introduced is active without an extra click.
+      expect(findByTestId(root.root, 'model-probe-pattern-toggle-2').props.checked).toBe(true);
+      expect(collectText(findByTestId(root.root, 'model-probe-pattern-toggles'))).toContain('本轮启用（2/3）');
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('abandons the batch buffer on 取消, leaving the list as it was', async () => {
+    apiMock.getModelProbeConfig.mockResolvedValue({
+      success: true,
+      config: buildConfig({ interestPatterns: ['^gpt-'] }),
+      limits: buildLimits(),
+    });
+    const root = await renderPage();
+    try {
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-patterns-batch-toggle').props.onClick();
+      });
+      // Seeded from the rows, so 批量编辑 is an edit of what is already there rather
+      // than a blank slate that would silently drop the list on apply.
+      expect(findByTestId(root.root, 'model-probe-interest-patterns').props.value).toBe('^gpt-');
+
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-interest-patterns').props.onChange({ target: { value: 'discarded' } });
+      });
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-patterns-batch-cancel').props.onClick();
+      });
+
+      expect(patternInputCount(root.root)).toBe(1);
+      expect(findByTestId(root.root, 'model-probe-pattern-input-0').props.value).toBe('^gpt-');
     } finally {
       root.unmount();
     }

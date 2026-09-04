@@ -44,21 +44,38 @@ export function modelProbeEndpointOptions(): Array<{ value: ModelProbeEndpointTy
 }
 
 /**
- * The panels edit the multi-line fields as raw text rather than as arrays: an
+ * One editable row of the interest-pattern list.
+ *
+ * `id` exists so React keeps an input mounted while its text changes. Keying rows
+ * by the pattern itself (as the old read-only checkbox list did) would remount the
+ * input on every keystroke and drop the caret, and two blank rows — the state right
+ * after 「添加一条」 twice — would collide on the same key.
+ */
+export type ModelProbePatternRow = {
+  id: string;
+  source: string;
+  /** False means "keep this regex, but do not use it in the next sweep". */
+  enabled: boolean;
+};
+
+let patternRowSeq = 0;
+
+export function createModelProbePatternRow(source = '', enabled = true): ModelProbePatternRow {
+  patternRowSeq += 1;
+  return { id: `pattern-row-${patternRowSeq}`, source, enabled };
+}
+
+/**
+ * The panels edit prompts and keywords as raw text rather than as arrays: an
  * operator mid-edit can legitimately hold a blank or duplicate line, and
  * re-splitting on every keystroke would move the caret. Text is split into a list
  * only when the form is submitted.
+ *
+ * Interest patterns are the exception — they carry a per-pattern enabled flag, so
+ * they are held as rows and only serialised to text while the batch editor is open.
  */
 export type ModelProbeConfigDraft = {
-  interestPatternsText: string;
-  /**
-   * Patterns switched OFF for the next sweep.
-   *
-   * A DISABLE list rather than a selection of enabled ones, so a pattern the
-   * operator has just typed is active without an extra click, and toggling one off
-   * for a narrower sweep never means deleting a regex they will want back.
-   */
-  disabledInterestPatterns: string[];
+  patternRows: ModelProbePatternRow[];
   promptsText: string;
   errorKeywordsText: string;
   defaultUserAgentId: string;
@@ -136,10 +153,84 @@ export function joinConfigLines(values: readonly string[]): string {
   return values.join('\n');
 }
 
+/**
+ * Rows for the list editor. A pattern named by `disabledInterestPatterns` starts
+ * unticked; everything else starts ticked, which is why the stored shape is a
+ * DISABLE list — a pattern the operator has just typed is active without an extra
+ * click, and narrowing a sweep never means deleting a regex they want back.
+ */
+export function patternRowsFromConfig(config: ModelProbeConfig): ModelProbePatternRow[] {
+  const disabled = new Set(config.disabledInterestPatterns ?? []);
+  return config.interestPatterns.map((source) => createModelProbePatternRow(source, !disabled.has(source)));
+}
+
+/**
+ * The patterns a save would send: trimmed, blanks dropped, first of any duplicate
+ * pair kept. Blank rows are the normal state right after 「添加一条」, so they are
+ * not an error — they simply do not exist yet.
+ */
+export function patternRowsToPatterns(rows: readonly ModelProbePatternRow[]): string[] {
+  const seen = new Set<string>();
+  const patterns: string[] = [];
+  for (const row of rows) {
+    const source = row.source.trim();
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+    patterns.push(source);
+  }
+  return patterns;
+}
+
+/**
+ * Which of those patterns are switched off. Derived from the surviving patterns
+ * rather than from the rows, so a blank or duplicate row cannot contribute an entry
+ * that names no configured pattern.
+ */
+export function patternRowsToDisabled(rows: readonly ModelProbePatternRow[]): string[] {
+  const patterns = new Set(patternRowsToPatterns(rows));
+  const disabled = new Set<string>();
+  for (const row of rows) {
+    const source = row.source.trim();
+    if (!source || !patterns.has(source)) continue;
+    // A duplicated pattern is one pattern: it is off only if every row naming it is
+    // off, so the ticked copy wins. Otherwise saving would switch off a regex the
+    // operator can see ticked.
+    if (row.enabled) disabled.delete(source);
+    else if (!disabled.has(source) && !rows.some((other) => other.enabled && other.source.trim() === source)) {
+      disabled.add(source);
+    }
+  }
+  return [...disabled];
+}
+
+/**
+ * Parses the batch editor's text back into rows, preserving the enabled state of
+ * patterns that already existed. Retyping a line an operator had switched off must
+ * not silently switch it back on — a paste is an edit of the LIST, not a reset of
+ * the toggles.
+ */
+export function patternRowsFromText(
+  text: string,
+  previous: readonly ModelProbePatternRow[],
+): ModelProbePatternRow[] {
+  const enabledBySource = new Map<string, boolean>();
+  for (const row of previous) {
+    const source = row.source.trim();
+    if (!source) continue;
+    enabledBySource.set(source, (enabledBySource.get(source) ?? false) || row.enabled);
+  }
+  return splitConfigLines(text).map((source) => (
+    createModelProbePatternRow(source, enabledBySource.get(source) ?? true)
+  ));
+}
+
+export function patternRowsToText(rows: readonly ModelProbePatternRow[]): string {
+  return joinConfigLines(rows.map((row) => row.source.trim()).filter(Boolean));
+}
+
 export function configDraftFromConfig(config: ModelProbeConfig): ModelProbeConfigDraft {
   return {
-    interestPatternsText: joinConfigLines(config.interestPatterns),
-    disabledInterestPatterns: [...(config.disabledInterestPatterns ?? [])],
+    patternRows: patternRowsFromConfig(config),
     promptsText: joinConfigLines(config.prompts),
     errorKeywordsText: joinConfigLines(config.errorKeywords),
     defaultUserAgentId: config.defaultUserAgentId,
@@ -162,15 +253,9 @@ export function configPayloadFromDraft(
   limits: ModelProbeConfigLimits,
   saved: Pick<ModelProbeConfig, 'siteConcurrency' | 'modelConcurrency' | 'timeoutMs' | 'maxTokens'>,
 ): ModelProbeConfigPayload {
-  const patterns = splitConfigLines(draft.interestPatternsText);
   return {
-    interestPatterns: patterns,
-    // Narrowed to patterns that still exist in the textarea: an entry left over
-    // from a regex the operator just deleted would switch off a DIFFERENT pattern
-    // if the same text were typed again later.
-    disabledInterestPatterns: draft.disabledInterestPatterns.filter(
-      (pattern) => patterns.includes(pattern),
-    ),
+    interestPatterns: patternRowsToPatterns(draft.patternRows),
+    disabledInterestPatterns: patternRowsToDisabled(draft.patternRows),
     prompts: splitConfigLines(draft.promptsText),
     userAgents: draft.userAgents.map((preset) => ({ ...preset })),
     defaultUserAgentId: draft.defaultUserAgentId,
@@ -231,26 +316,38 @@ export function clampDraftInteger(text: string, min: number, max: number, fallba
 }
 
 export type ModelProbePatternIssue = {
+  /** The row this issue belongs to, so the panel can mark it in place. */
+  id: string;
   source: string;
   reason: string;
 };
 
 /**
  * Mirrors the server's `compileInterestPatterns` rejection rules so a bad regex
- * is marked in place instead of coming back as a 400 that names a pattern the
+ * is marked on its own row instead of coming back as a 400 that names a pattern the
  * operator has to hunt for. The caps come from the server-reported limits, never
  * from a local constant.
+ *
+ * Blank rows and duplicates are skipped rather than reported: neither reaches the
+ * server (see `patternRowsToPatterns`), and a blank row is simply one the operator
+ * has not filled in yet.
  */
-export function findInvalidInterestPatterns(
-  text: string,
+export function findInvalidPatternRows(
+  rows: readonly ModelProbePatternRow[],
   limits: Pick<ModelProbeConfigLimits, 'maxInterestPatterns' | 'maxInterestPatternLength'>,
 ): ModelProbePatternIssue[] {
   const issues: ModelProbePatternIssue[] = [];
+  const seen = new Set<string>();
   let accepted = 0;
 
-  for (const source of splitConfigLines(text)) {
+  for (const row of rows) {
+    const source = row.source.trim();
+    if (!source || seen.has(source)) continue;
+    seen.add(source);
+
     if (source.length > limits.maxInterestPatternLength) {
       issues.push({
+        id: row.id,
         source,
         reason: `正则长度超过 ${limits.maxInterestPatternLength} 个字符`,
       });
@@ -258,6 +355,7 @@ export function findInvalidInterestPatterns(
     }
     if (accepted >= limits.maxInterestPatterns) {
       issues.push({
+        id: row.id,
         source,
         reason: `正则数量超过上限 ${limits.maxInterestPatterns} 条`,
       });
@@ -268,6 +366,7 @@ export function findInvalidInterestPatterns(
       accepted += 1;
     } catch (error) {
       issues.push({
+        id: row.id,
         source,
         reason: error instanceof Error ? error.message : '不是合法的正则表达式',
       });

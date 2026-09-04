@@ -239,6 +239,14 @@ export type ProbeKeyCandidate = {
 export type SelectedProbeKeys = {
   account: AccountRow;
   keys: ProbeKeyCandidate[];
+  /**
+   * Names of `account_tokens` rows dropped because their value IS the primary key's.
+   *
+   * Not an error and not a skipped key: the same credential listed twice is one key.
+   * Reported so the operator can see why a row they can point at in 令牌分发池 has no
+   * line of its own in the results table.
+   */
+  duplicateTokenNames: string[];
 };
 
 /**
@@ -283,11 +291,34 @@ async function selectProbeKeys(siteId: number): Promise<SelectedProbeKeys | null
     .orderBy(asc(schema.accountTokens.id))
     .all();
 
+  const duplicateTokenNames: string[] = [];
+
   for (const token of [...tokens].sort((left, right) => (left.id ?? 0) - (right.id ?? 0))) {
     if (token.id == null) continue;
     if (primaryTokenId != null && token.id === primaryTokenId) continue;
 
     const credential = usableCredentialValue(token.token);
+
+    /**
+     * The same credential under a different row is ONE key, so it is dropped rather
+     * than probed again.
+     *
+     * Not a rare shape: the legacy backfill in `src/server/db/index.ts` copies
+     * `accounts.api_token` into an `account_tokens` row named `default` for every
+     * session account, so every upgraded database starts here. Probing it a second
+     * time spent real quota twice per model and printed one key as two rows —
+     * 「主 Key」 and 「default」 — which reads as two keys disagreeing about the same
+     * catalogue.
+     *
+     * The id check above cannot catch it: it only fires when the PRIMARY resolved to
+     * a managed row, and an account carrying `api_token` resolves to the sentinel 0
+     * instead, which no `account_tokens.id` can equal.
+     */
+    if (credential != null && credential === selected.credential) {
+      duplicateTokenNames.push(token.name || `#${token.id}`);
+      continue;
+    }
+
     const ready = token.valueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY
       && isUsableAccountToken(token)
       && credential != null;
@@ -307,7 +338,7 @@ async function selectProbeKeys(siteId: number): Promise<SelectedProbeKeys | null
     });
   }
 
-  return { account, keys };
+  return { account, keys, duplicateTokenNames };
 }
 
 /** Maps a resolved managed credential back to its row id, for dedupe against additional keys. */
@@ -643,7 +674,7 @@ export async function discoverProbeKeysForActiveProbe(input: {
     );
   }
 
-  const { account, keys } = selected;
+  const { account, keys, duplicateTokenNames } = selected;
 
   // A dead primary key is downgraded from fatal to per-key here: it must not hide
   // models that a secondary key can still reach. Site-level codes are rethrown
@@ -689,6 +720,10 @@ export async function discoverProbeKeysForActiveProbe(input: {
 
   const proxyUrl = await resolveChannelProxyUrl(site, account.extraConfig);
 
+  const duplicateNote = duplicateTokenNames.length > 0
+    ? [`以下令牌与主 Key 的值相同，已合并为一个 Key，不会重复探测：${duplicateTokenNames.join('、')}`]
+    : [];
+
   const discovered: ProbeKeyDiscovery[] = [{
     tokenId: primaryKey.tokenId,
     tokenName: primaryKey.tokenName,
@@ -700,7 +735,10 @@ export async function discoverProbeKeysForActiveProbe(input: {
     liveFailure: primaryTarget?.source === 'cached'
       ? primaryTarget.liveFailure
       : (primaryError?.liveFailure ?? null),
-    notes: primaryTarget?.notes ?? (primaryError ? [primaryError.message] : []),
+    notes: [
+      ...(primaryTarget?.notes ?? (primaryError ? [primaryError.message] : [])),
+      ...duplicateNote,
+    ],
   }];
 
   for (const key of additionalKeys) {

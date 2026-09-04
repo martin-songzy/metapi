@@ -85,12 +85,14 @@ describe('Accounts segmented connections view', () => {
 
       const rendered = JSON.stringify(root.toJSON());
       expect(rendered).toContain('连接管理');
-      expect(rendered).toContain('账号管理');
-      expect(rendered).toContain('API Key管理');
-      expect(rendered).toContain('账号令牌管理');
-      expect(rendered).toContain('用于签到、余额、状态维护');
-      expect(rendered).toContain('只有 Base URL + Key 时使用，只负责代理调用');
-      expect(rendered).toContain('从账号同步或手动维护，供路由实际调用');
+      expect(rendered).toContain('完整账号');
+      expect(rendered).toContain('直连 Key');
+      expect(rendered).toContain('令牌分发池');
+      // The tooltips carry the distinction the labels only hint at: what credential
+      // each segment needs, and what it can therefore do.
+      expect(rendered).toContain('可签到、查余额');
+      expect(rendered).toContain('不能签到也查不到余额');
+      expect(rendered).toContain('由「同步站点令牌」拉取或手动新增');
       expect(rendered).toContain('Key Site');
       expect(rendered).not.toContain('仅代理');
       expect(rendered).not.toContain('session-user');
@@ -98,7 +100,7 @@ describe('Accounts segmented connections view', () => {
       const segmentButtons = root.root.findAll((node) => {
         if (node.type !== 'button') return false;
         const text = collectText(node);
-        return text === '账号管理' || text === 'API Key管理' || text === '账号令牌管理';
+        return text === '完整账号' || text === '直连 Key' || text === '令牌分发池';
       });
       expect(segmentButtons).toHaveLength(3);
       expect(segmentButtons[0]?.props['data-tooltip-side']).toBe('bottom');
@@ -139,5 +141,106 @@ describe('Accounts segmented connections view', () => {
     } finally {
       root?.unmount();
     }
+  });
+
+  /**
+   * The edit form used to render every field for every connection.
+   *
+   * 启用签到 was merely a lie on a 直连 Key — it persisted and the scheduler skipped
+   * the account anyway, because check-in needs a session. Access Token was worse:
+   * `isApiKeyConnection` on the server falls back to "access_token is empty" when
+   * `extra_config.credentialMode` is absent (older rows), so typing into it moved the
+   * connection out of this segment entirely.
+   */
+  describe('edit panel fields by credential kind', () => {
+    const EDIT_SITES = [{ id: 11, name: 'Key Site', platform: 'new-api', status: 'active' }];
+
+    function accountRow(overrides: Record<string, unknown>) {
+      return {
+        id: 2,
+        username: 'keyholder',
+        accessToken: '',
+        apiToken: 'sk-apikey',
+        status: 'active',
+        credentialMode: 'apikey',
+        capabilities: { canCheckin: false, canRefreshBalance: false, proxyOnly: true },
+        site: { id: 11, name: 'Key Site', platform: 'new-api', status: 'active', url: 'https://key.example.com' },
+        ...overrides,
+      };
+    }
+
+    function findByTestId(root: ReactTestInstance, testId: string): ReactTestInstance {
+      return root.find((node) => node.props['data-testid'] === testId);
+    }
+
+    function hasTestId(root: ReactTestInstance, testId: string): boolean {
+      return root.findAll((node) => node.props['data-testid'] === testId).length > 0;
+    }
+
+    async function openEditPanel(account: Record<string, unknown>, segment: 'apikey' | 'session') {
+      apiMock.getAccounts.mockResolvedValue([account]);
+      apiMock.getSites.mockResolvedValue(EDIT_SITES);
+      apiMock.getAccountTokens.mockResolvedValue([]);
+
+      let root!: WebTestRenderer;
+      await act(async () => {
+        root = create(
+          <MemoryRouter initialEntries={[`/accounts?segment=${segment}`]}>
+            <ToastProvider>
+              <Accounts />
+            </ToastProvider>
+          </MemoryRouter>,
+        );
+      });
+      await flushMicrotasks();
+
+      const editButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).trim() === '编辑'
+      ));
+      await act(async () => {
+        editButton.props.onClick({ stopPropagation() {} });
+      });
+      await flushMicrotasks();
+      return root;
+    }
+
+    it('hides 启用签到 and Access Token while editing a 直连 Key', async () => {
+      const root = await openEditPanel(accountRow({}), 'apikey');
+      try {
+        expect(JSON.stringify(root.toJSON())).toContain('编辑直连 Key');
+        expect(hasTestId(root.root, 'account-edit-checkin-enabled')).toBe(false);
+        expect(hasTestId(root.root, 'account-edit-access-token')).toBe(false);
+        // The one credential such a connection does have stays editable, labelled as
+        // the key it actually is rather than as an optional extra.
+        expect(findByTestId(root.root, 'account-edit-api-token').props.placeholder).toBe('API Key');
+      } finally {
+        root.unmount();
+      }
+    });
+
+    it('keeps both fields while editing a 完整账号', async () => {
+      // Paired control: the gate keys off the connection, it does not simply delete
+      // the fields for everyone.
+      const root = await openEditPanel(
+        accountRow({
+          id: 1,
+          username: 'session-user',
+          accessToken: 'session-token',
+          credentialMode: 'session',
+          capabilities: { canCheckin: true, canRefreshBalance: true, proxyOnly: false },
+        }),
+        'session',
+      );
+      try {
+        expect(JSON.stringify(root.toJSON())).toContain('编辑完整账号');
+        expect(hasTestId(root.root, 'account-edit-checkin-enabled')).toBe(true);
+        expect(findByTestId(root.root, 'account-edit-access-token').props.value).toBe('session-token');
+        expect(findByTestId(root.root, 'account-edit-api-token').props.placeholder).toBe('API Token（可选）');
+      } finally {
+        root.unmount();
+      }
+    });
   });
 });

@@ -528,6 +528,20 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+/**
+ * Issues a second request while the first is still in flight.
+ *
+ * Driven through the filter panel rather than a sort control on purpose: while the
+ * first response is pending the table is replaced by a spinner, so no column header
+ * — and no header sort button — exists to click.
+ */
+async function requestAgainWhileLoading(root: ReactTestInstance, model: string) {
+  await act(async () => {
+    findByTestId(root, 'model-probe-results-model').props.onChange({ target: { value: model } });
+  });
+  await click(findByTestId(root, 'model-probe-results-apply'));
+}
+
 describe('ModelProbe results staleness', () => {
   it('ignores a slow earlier response that lands after a newer one', async () => {
     const slow = deferred<unknown>();
@@ -538,8 +552,7 @@ describe('ModelProbe results staleness', () => {
 
     const root = await renderPage();
     try {
-      // Second request issued while the first is still in flight.
-      await click(findByTestId(root.root, 'model-probe-sort-latency'));
+      await requestAgainWhileLoading(root.root, 'fresh');
 
       await act(async () => {
         fast.resolve(resultsResponse(
@@ -561,7 +574,7 @@ describe('ModelProbe results staleness', () => {
       await flushMicrotasks();
 
       // The superseded response must not repaint the table, or the rows would
-      // disagree with the sort control that is rendered as active.
+      // disagree with the sort the echo reports as applied.
       const pageText = collectText(root.root);
       expect(pageText).not.toContain('STALE-MODEL');
       expect(pageText).toContain('FRESH-MODEL');
@@ -579,7 +592,7 @@ describe('ModelProbe results staleness', () => {
 
     const root = await renderPage();
     try {
-      await click(findByTestId(root.root, 'model-probe-sort-balance'));
+      await requestAgainWhileLoading(root.root, 'boom');
       expect(collectText(findByTestId(root.root, 'model-probe-results-error'))).toContain('结果查询失败');
 
       await act(async () => {

@@ -43,6 +43,14 @@ import { parseBatchApiKeys } from "../../shared/apiKeyBatch.js";
 
 type ConnectionsSegment = "session" | "apikey" | "tokens";
 
+/**
+ * The three segments differ by WHAT CREDENTIAL you hold, not by which platform the
+ * site runs — `isApiKeyConnection` in `src/server/routes/api/accountTokens.ts`
+ * decides membership from `extra_config.credentialMode`, never from
+ * `sites.platform`. The old labels ("账号管理 / API Key管理 / 账号令牌管理") read as
+ * three ways to store a key and gave no hint that the first needs a password, the
+ * second cannot check in, and the third is filled by syncing rather than by typing.
+ */
 const ACCOUNT_SEGMENTS: Array<{
   value: ConnectionsSegment;
   label: string;
@@ -52,22 +60,25 @@ const ACCOUNT_SEGMENTS: Array<{
 }> = [
   {
     value: "session",
-    label: "账号管理",
-    tooltip: "用于签到、余额、状态维护",
+    label: "完整账号",
+    tooltip:
+      "有用户名密码或 OAuth 的账号：可签到、查余额，并能自动同步出下面的令牌。需要站点提供管理接口。",
     tooltipSide: "bottom",
     tooltipAlign: "start",
   },
   {
     value: "apikey",
-    label: "API Key管理",
-    tooltip: "只有 Base URL + Key 时使用，只负责代理调用",
+    label: "直连 Key",
+    tooltip:
+      "只有 Base URL + 一个 Key 时用这里：只负责代理调用，不能签到也查不到余额。generic 等没有管理接口的站点只能走这一种。",
     tooltipSide: "bottom",
     tooltipAlign: "center",
   },
   {
     value: "tokens",
-    label: "账号令牌管理",
-    tooltip: "从账号同步或手动维护，供路由实际调用",
+    label: "令牌分发池",
+    tooltip:
+      "完整账号名下的多个令牌（不同分组 / 额度），由「同步站点令牌」拉取或手动新增，路由按它们实际转发。",
     tooltipSide: "bottom",
     tooltipAlign: "end",
   },
@@ -265,6 +276,21 @@ export default function Accounts() {
         ? parseBatchApiKeys(tokenForm.accessToken)
         : [],
     [activeSegment, tokenForm.accessToken],
+  );
+  /**
+   * True while editing a 直连 Key connection, which has no session credential.
+   *
+   * The edit form used to render every field for every connection, so an api-key
+   * connection was offered 启用签到 and Access Token — both meaningless there, and
+   * the second actively harmful: `isApiKeyConnection` on the server falls back to
+   * "access_token is empty" when `extra_config.credentialMode` is absent (older
+   * rows), so typing anything into it moved the connection into the 完整账号 segment
+   * and out of this one. 启用签到 was merely a lie: it persisted, and the scheduler
+   * skipped the account anyway because check-in needs a session.
+   */
+  const editingIsApiKeyConnection = useMemo(
+    () => Boolean(editingAccount) && resolveAccountCredentialMode(editingAccount) === "apikey",
+    [editingAccount],
   );
   const isBatchApiKeyInput =
     activeSegment === "apikey" && parsedApiKeys.length > 1;
@@ -1007,14 +1033,22 @@ export default function Accounts() {
     if (!editingAccount) return;
     setSavingEdit(true);
     try {
+      // Omitted rather than sent blank for a 直连 Key connection: the PUT applies
+      // only the keys present, so leaving them out cannot rewrite a credential the
+      // form never showed. See `editingIsApiKeyConnection`.
+      const sessionOnlyFields = editingIsApiKeyConnection
+        ? {}
+        : {
+          checkinEnabled: editForm.checkinEnabled,
+          accessToken: editForm.accessToken.trim(),
+        };
       await api.updateAccount(editingAccount.id, {
         username: editForm.username.trim() || undefined,
         status: editForm.status,
-        checkinEnabled: editForm.checkinEnabled,
+        ...sessionOnlyFields,
         unitCost: editForm.unitCost.trim()
           ? Number(editForm.unitCost.trim())
           : null,
-        accessToken: editForm.accessToken.trim(),
         apiToken: editForm.apiToken.trim() || null,
         isPinned: editForm.isPinned,
         refreshToken: editForm.refreshToken.trim() || null,
@@ -1598,7 +1632,7 @@ export default function Accounts() {
             onClose={closeAddPanel}
             title={
               activeSegment === "apikey"
-                ? "添加 API Key 连接"
+                ? "添加直连 Key"
                 : addMode === "login"
                   ? "账号密码登录"
                   : "添加 Session 连接"
@@ -2710,7 +2744,7 @@ export default function Accounts() {
           <CenteredModal
             open={Boolean(editingAccount)}
             onClose={closeEditPanel}
-            title="编辑账号"
+            title={editingIsApiKeyConnection ? "编辑直连 Key" : "编辑完整账号"}
             maxWidth={860}
             bodyStyle={{ display: "flex", flexDirection: "column", gap: 12 }}
             footer={
@@ -2777,39 +2811,48 @@ export default function Accounts() {
                   }
                   style={inputStyle}
                 />
-                <label
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    ...inputStyle,
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={editForm.checkinEnabled}
-                    onChange={(e) =>
-                      setEditForm((prev) => ({
-                        ...prev,
-                        checkinEnabled: e.target.checked,
-                      }))
-                    }
-                  />
-                  启用签到
-                </label>
+                {!editingIsApiKeyConnection && (
+                  <>
+                    <label
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        ...inputStyle,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        data-testid="account-edit-checkin-enabled"
+                        checked={editForm.checkinEnabled}
+                        onChange={(e) =>
+                          setEditForm((prev) => ({
+                            ...prev,
+                            checkinEnabled: e.target.checked,
+                          }))
+                        }
+                      />
+                      启用签到
+                    </label>
+                    <input
+                      placeholder="Access Token"
+                      data-testid="account-edit-access-token"
+                      value={editForm.accessToken}
+                      onChange={(e) =>
+                        setEditForm((prev) => ({
+                          ...prev,
+                          accessToken: e.target.value,
+                        }))
+                      }
+                      style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
+                    />
+                  </>
+                )}
                 <input
-                  placeholder="Access Token"
-                  value={editForm.accessToken}
-                  onChange={(e) =>
-                    setEditForm((prev) => ({
-                      ...prev,
-                      accessToken: e.target.value,
-                    }))
+                  placeholder={
+                    editingIsApiKeyConnection ? "API Key" : "API Token（可选）"
                   }
-                  style={{ ...inputStyle, fontFamily: "var(--font-mono)" }}
-                />
-                <input
-                  placeholder="API Token（可选）"
+                  data-testid="account-edit-api-token"
                   value={editForm.apiToken}
                   onChange={(e) =>
                     setEditForm((prev) => ({
@@ -3565,14 +3608,14 @@ export default function Accounts() {
                 </svg>
                 <div className="empty-state-title">
                   {activeSegment === "apikey"
-                    ? "暂无 API Key 连接"
+                    ? "暂无直连 Key"
                     : "暂无 Session 连接"}
                 </div>
                 <div className="empty-state-desc">
                   {activeSegment === "apikey"
                     ? sites.length > 0
-                      ? "请为现有站点补充 API Key 连接"
-                      : "请先添加站点，然后为站点补充 API Key 连接"
+                      ? "请为现有站点补充直连 Key"
+                      : "请先添加站点，然后为站点补充直连 Key"
                     : sites.length > 0
                       ? "请为现有站点添加 Session 连接"
                       : "请先添加站点，然后添加 Session 连接"}

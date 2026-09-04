@@ -180,10 +180,12 @@ describe('modelProbeRunService', () => {
     // Installed here rather than at module scope because it needs the real db, and
     // `vi.mock` factories are hoisted above every import.
     //
-    // Mirrors the two rules from `selectProbeKeys` that the run loop depends on:
+    // Mirrors the three rules from `selectProbeKeys` that the run loop depends on:
     // the primary key is FIRST in the array (position, never id, is the
-    // discriminator), and a key that will not be probed carries a `skipReason` with
-    // a null credential. The site's `models` is the UNION across keys (Q8=A).
+    // discriminator), a key that will not be probed carries a `skipReason` with
+    // a null credential, and a token row holding the primary key's own value is
+    // dropped rather than probed twice. The site's `models` is the UNION across
+    // keys (Q8=A).
     discoverProbeKeysForActiveProbeImpl = async (input: { siteId: number; timeoutMs: number }) => {
       const primary = await discoverModelsForActiveProbeMock(input) as {
         site: unknown; account: { id: number }; models: string[];
@@ -208,6 +210,9 @@ describe('modelProbeRunService', () => {
       }];
 
       for (const token of [...tokens].sort((left, right) => (left.id ?? 0) - (right.id ?? 0))) {
+        // Mirrors the value-level dedupe: a token row holding the primary key's own
+        // value is the same key, so it contributes no entry here either.
+        if ((token.token || '').trim() === CREDENTIAL) continue;
         const skipReason = token.enabled === false
           ? 'disabled'
           : (token.valueStatus === 'ready' ? null : 'credential_unavailable');

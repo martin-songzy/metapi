@@ -29,9 +29,19 @@ vi.mock('../../services/modelService.js', () => ({
   rebuildTokenRoutesFromAvailability: (...args: unknown[]) => rebuildTokenRoutesFromAvailabilityMock(...args),
 }));
 
+/**
+ * `isMaskedTokenValue` is mocked through even though this suite never asserts on it:
+ * `credentialDuplicateGuard`, which the create path calls before verifying anything,
+ * imports it from here. A partial factory leaves that binding `undefined`, and the
+ * guard then throws — surfacing as an unexplained 400 from POST /api/accounts rather
+ * than as a missing-export error.
+ */
 vi.mock('../../services/accountTokenService.js', () => ({
   ensureDefaultTokenForAccount: (...args: unknown[]) => ensureDefaultTokenForAccountMock(...args),
   syncTokensFromUpstream: (...args: unknown[]) => syncTokensFromUpstreamMock(...args),
+  isMaskedTokenValue: (value: string | null | undefined) => (
+    typeof value === 'string' && value.includes('*')
+  ),
 }));
 
 type DbModule = typeof import('../../db/index.js');

@@ -160,7 +160,7 @@ describe('Accounts mobile actions', () => {
       });
       await flushMicrotasks();
 
-      const apiKeySegmentButton = findButtonByText(root.root, 'API Key管理');
+      const apiKeySegmentButton = findButtonByText(root.root, '直连 Key');
       await act(async () => {
         apiKeySegmentButton.props.onClick();
       });

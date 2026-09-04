@@ -216,11 +216,6 @@ const SORT_LABELS: Record<ModelProbeResultSortBy, string> = {
   reason: '原因',
 };
 
-/**
- * The shortcut toolbar's fields. Deliberately a subset: the column headers cover
- * all eleven, and eleven toolbar buttons would be noise.
- */
-const TOOLBAR_SORT_FIELDS: ModelProbeResultSortBy[] = ['latency', 'balance', 'checkedAt'];
 
 /**
  * Which direction a column opens on when first clicked.
@@ -599,11 +594,6 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     </div>
   );
 
-  /**
-   * The arrow alone conveys direction visually only. `aria-sort` is not valid on a
-   * button (it belongs on `columnheader` / `rowheader` / `gridcell`), so direction
-   * lives in the accessible name here and on the table headers as `aria-sort`.
-   */
   const ariaSortFor = (field: ModelProbeResultSortBy): 'ascending' | 'descending' | 'none' => {
     if (query.sortBy !== field) return 'none';
     return query.order === 'asc' ? 'ascending' : 'descending';
@@ -615,34 +605,6 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
     const next = query.order === 'asc' ? '降序' : '升序';
     return `按${SORT_LABELS[field]}排序，当前${current}，点击改为${next}`;
   };
-
-  const sortButtons = (
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-      {TOOLBAR_SORT_FIELDS.map((field) => {
-        const active = query.sortBy === field;
-        return (
-          <button
-            key={field}
-            type="button"
-            data-testid={`model-probe-sort-${field}`}
-            aria-label={sortButtonLabel(field, active)}
-            aria-pressed={active}
-            className="btn btn-ghost"
-            style={{
-              border: `1px solid ${active ? 'var(--color-primary)' : 'var(--color-border)'}`,
-              color: active ? 'var(--color-primary)' : undefined,
-              padding: '6px 12px',
-              fontSize: 12,
-            }}
-            onClick={() => handleSort(field)}
-          >
-            {SORT_LABELS[field]}
-            {active ? (query.order === 'asc' ? ' ↑' : ' ↓') : ''}
-          </button>
-        );
-      })}
-    </div>
-  );
 
   const renderStatus = (status: ModelProbeKeyResultStatus) => (
     <span style={{ color: KEY_STATUS_COLORS[status], fontWeight: 600, fontSize: 12 }}>
@@ -939,15 +901,6 @@ export default function ModelProbeResultsPanel({ sites, isMobile, refreshToken, 
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          {/*
-            A three-field shortcut, not a mirror of the eleven column headers.
-            Headers are the complete sort control; this stays because it is the ONLY
-            one that exists while the table is loading or empty — and because these
-            three are the cross-cutting questions ("what is fastest", "which site has
-            money left", "what did I just probe") an operator asks without hunting for
-            a column.
-          */}
-          {sortButtons}
           {/* Desktop only: the mobile view is cards, which have no columns to configure. */}
           {!isMobile && columnSettings}
           <button

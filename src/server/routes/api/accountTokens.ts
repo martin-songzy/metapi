@@ -16,6 +16,10 @@ import {
   setDefaultToken,
 } from '../../services/accountTokenService.js';
 import { getAdapter } from '../../services/platforms/index.js';
+import {
+  describeDuplicateCredential,
+  findDuplicateCredentialOnSite,
+} from '../../services/credentialDuplicateGuard.js';
 import { getCredentialModeFromExtraConfig, resolvePlatformUserId } from '../../services/accountExtraConfig.js';
 import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { resolveChannelProxyUrl, withAccountProxyOverride } from '../../services/siteProxy.js';
@@ -494,16 +498,23 @@ function conflictsWithExistingTokenName(input: {
 }
 
 /**
- * Keeps the historical `default` / `token-N` shape but counts PAST the highest
- * occupied index instead of using `length + 1`. Deleting a middle row makes
- * `length + 1` land on a name that already exists, which the uniqueness check
- * above would then reject on an otherwise valid create.
+ * Auto-generated names are one shape, `key-1` / `key-2` / …, and the index is the
+ * first FREE one rather than `length + 1`.
+ *
+ * Two reasons it is not `default` for the first row and `token-N` after it, which is
+ * what this produced before. The two shapes made a list of auto-named keys read as
+ * two different kinds of thing, and the results table then showed 「主 Key」 next to
+ * 「default」 — three names for at most two concepts. And counting from `length + 1`
+ * lands on an occupied name as soon as a middle row is deleted, which the uniqueness
+ * check above would then reject on an otherwise valid create.
+ *
+ * Existing names are never rewritten: renaming a stored key would break the one
+ * label an operator has already learned to recognise in the probe results.
  */
 function nextAvailableTokenName(existing: ReadonlyArray<{ name: string | null }>): string {
-  if (existing.length === 0) return 'default';
   const taken = new Set(existing.map((row) => (row.name || '').trim().toLowerCase()));
-  for (let index = existing.length + 1; ; index += 1) {
-    const candidate = `token-${index}`;
+  for (let index = 1; ; index += 1) {
+    const candidate = `key-${index}`;
     if (!taken.has(candidate)) return candidate;
   }
 }
@@ -555,6 +566,19 @@ export async function accountTokensRoutes(app: FastifyInstance) {
         return reply.code(400).send({
           success: false,
           message: `该账号下已存在名为「${requestedName}」的 Key，请换一个名称`,
+        });
+      }
+
+      // Manual creates only. The sync path deliberately mirrors upstream, including
+      // a token whose value equals the account's own api_token.
+      const duplicate = await findDuplicateCredentialOnSite({
+        siteId: row.accounts.siteId,
+        credential: tokenValue,
+      });
+      if (duplicate) {
+        return reply.code(400).send({
+          success: false,
+          message: describeDuplicateCredential(duplicate),
         });
       }
 
@@ -873,6 +897,17 @@ export async function accountTokensRoutes(app: FastifyInstance) {
       const tokenValue = body.token.trim();
       if (!tokenValue) {
         return reply.code(400).send({ success: false, message: '令牌不能为空' });
+      }
+      const duplicate = await findDuplicateCredentialOnSite({
+        siteId: owner.siteId,
+        credential: tokenValue,
+        excludeTokenId: tokenId,
+      });
+      if (duplicate) {
+        return reply.code(400).send({
+          success: false,
+          message: describeDuplicateCredential(duplicate),
+        });
       }
       updates.token = tokenValue;
       nextValueStatus = isMaskedTokenValue(tokenValue)

@@ -943,5 +943,52 @@ describe('discoverModelsForActiveProbe', () => {
       expect(result.models).toEqual(['gpt-5.4']);
     });
   });
+
+  /**
+   * The key axis, where the same credential can legitimately appear twice.
+   *
+   * The legacy backfill in `src/server/db/index.ts` copies `accounts.api_token` into
+   * an `account_tokens` row named `default`, so on an upgraded database this is the
+   * NORMAL state rather than an edge case.
+   */
+  describe('per-key selection', () => {
+    it('merges an account token whose value is the primary key, and names it in the notes', async () => {
+      primeTables({
+        accounts: [account({ id: 1, apiToken: 'sk-shared' })],
+        accountTokens: [
+          { id: 11, accountId: 1, name: 'default', token: 'sk-shared', enabled: true, valueStatus: 'ready' },
+          { id: 12, accountId: 1, name: 'group-b', token: 'sk-other', enabled: true, valueStatus: 'ready' },
+        ],
+      });
+
+      const { discoverProbeKeysForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverProbeKeysForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      // The duplicate contributes no key of its own: probing it again would bill real
+      // quota twice per model and print one key as two rows — 「主 Key」 and 「default」.
+      expect(result.keys.map((key) => key.tokenId)).toEqual([0, 12]);
+      // Silence would leave the operator hunting for a row they can point at in
+      // 令牌分发池 but cannot find in the results table.
+      expect(result.keys[0]?.notes.join(' ')).toContain('default');
+    });
+
+    it('keeps a distinct token that merely belongs to the same account', async () => {
+      // Paired with the case above so the dedupe cannot pass by dropping every token:
+      // two different values are two keys, whatever account they hang off.
+      primeTables({
+        accounts: [account({ id: 1, apiToken: 'sk-primary' })],
+        accountTokens: [
+          { id: 21, accountId: 1, name: 'group-a', token: 'sk-a', enabled: true, valueStatus: 'ready' },
+          { id: 22, accountId: 1, name: 'group-b', token: 'sk-b', enabled: true, valueStatus: 'ready' },
+        ],
+      });
+
+      const { discoverProbeKeysForActiveProbe } = await import('./modelProbeDiscoveryService.js');
+      const result = await discoverProbeKeysForActiveProbe({ siteId: 7, timeoutMs: 500 });
+
+      expect(result.keys.map((key) => key.tokenId)).toEqual([0, 21, 22]);
+      expect(result.keys[0]?.notes.join(' ')).not.toContain('已合并');
+    });
+  });
 });
 

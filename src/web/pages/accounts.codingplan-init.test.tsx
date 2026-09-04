@@ -84,7 +84,7 @@ describe('Accounts CodingPlan initialization', () => {
       await flushMicrotasks();
 
       const rendered = JSON.stringify(root.toJSON());
-      expect(rendered).toContain('添加 API Key 连接');
+      expect(rendered).toContain('添加直连 Key');
       expect(rendered).toContain('阿里云 CodingPlan / OpenAI');
       expect(rendered).toContain('qwen3-coder-plus');
 
