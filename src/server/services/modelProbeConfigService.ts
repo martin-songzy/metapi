@@ -65,7 +65,7 @@ export const MODEL_PROBE_CONFIG_SETTING_KEY = 'model_probe_config_v1';
  * new per-site N), while sites pick up the new default of 5.
  */
 export const MODEL_PROBE_MIN_SITE_CONCURRENCY = 1;
-export const MODEL_PROBE_MAX_SITE_CONCURRENCY = 10;
+export const MODEL_PROBE_MAX_SITE_CONCURRENCY = 20;
 export const MODEL_PROBE_DEFAULT_SITE_CONCURRENCY = 5;
 export const MODEL_PROBE_MIN_MODEL_CONCURRENCY = 1;
 export const MODEL_PROBE_MAX_MODEL_CONCURRENCY = 8;

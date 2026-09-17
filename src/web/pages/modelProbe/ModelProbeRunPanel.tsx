@@ -78,6 +78,26 @@ function formatLogTime(value: string): string {
 export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: ModelProbeRunPanelProps) {
   const toast = useToast();
   const [scopeSiteIds, setScopeSiteIds] = useState<number[]>([]);
+
+  // 添加悬停样式
+  useEffect(() => {
+    const styleId = 'model-probe-site-hover-styles';
+    if (document.getElementById(styleId)) return;
+
+    const style = document.createElement('style');
+    style.id = styleId;
+    style.textContent = `
+      [data-testid^="model-probe-preview-site-"]:hover .model-probe-site-details {
+        display: block !important;
+      }
+    `;
+    document.head.appendChild(style);
+
+    return () => {
+      const existingStyle = document.getElementById(styleId);
+      if (existingStyle) existingStyle.remove();
+    };
+  }, []);
   const [preview, setPreview] = useState<ModelProbePreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState('');
@@ -431,40 +451,93 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
     </span>
   );
 
-  const renderPreviewSite = (site: ModelProbePreviewSite) => (
-    <div
-      key={site.siteId}
-      data-testid={`model-probe-preview-site-${site.siteId}`}
-      style={{
-        border: '1px solid var(--color-border)',
-        borderRadius: 'var(--radius-sm)',
-        padding: 12,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>{site.siteName}</span>
-        {renderCredentialBadge(site)}
-      </div>
-      <div style={hintStyle}>
-        {site.models.length} 个待探测模型 · 上游发现 {site.discoveredCount} 个
-      </div>
-      {site.liveFailure && (
-        <div style={{ ...hintStyle, color: 'var(--color-warning)' }}>
-          实时获取失败（{site.liveFailure.kind}
-          {site.liveFailure.status === null ? '' : ` / HTTP ${site.liveFailure.status}`}）：
-          {site.liveFailure.message}
+  const renderPreviewSite = (site: ModelProbePreviewSite) => {
+    const hasDetails = site.liveFailure || site.notes.length > 0;
+
+    return (
+      <div
+        key={site.siteId}
+        data-testid={`model-probe-preview-site-${site.siteId}`}
+        style={{
+          border: '1px solid var(--color-border)',
+          borderRadius: 'var(--radius-sm)',
+          padding: 12,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          position: 'relative',
+        }}
+      >
+        {/* 简要信息：一行显示 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 600, fontSize: 13 }}>{site.siteName}</span>
+          {renderCredentialBadge(site)}
+          <span style={hintStyle}>
+            {site.models.length} 个模型
+          </span>
         </div>
-      )}
-      {site.notes.length > 0 && (
-        <ul style={{ ...hintStyle, margin: 0, paddingLeft: 18 }}>
-          {site.notes.map((note, index) => <li key={`${site.siteId}-note-${index}`}>{note}</li>)}
-        </ul>
-      )}
-    </div>
-  );
+
+        {/* 悬停详情：桌面端鼠标移过时显示 */}
+        {!isMobile && hasDetails && (
+          <div
+            className="model-probe-site-details"
+            style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              marginTop: 4,
+              minWidth: '100%',
+              maxWidth: 400,
+              background: 'var(--color-bg)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-sm)',
+              padding: 12,
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              zIndex: 10,
+              display: 'none',
+            }}
+          >
+            <div style={{ ...hintStyle, marginBottom: 6 }}>
+              上游发现 {site.discoveredCount} 个模型
+            </div>
+            {site.liveFailure && (
+              <div style={{ ...hintStyle, color: 'var(--color-warning)', marginBottom: 6 }}>
+                实时获取失败（{site.liveFailure.kind}
+                {site.liveFailure.status === null ? '' : ` / HTTP ${site.liveFailure.status}`}）：
+                {site.liveFailure.message}
+              </div>
+            )}
+            {site.notes.length > 0 && (
+              <ul style={{ ...hintStyle, margin: 0, paddingLeft: 18 }}>
+                {site.notes.map((note, index) => <li key={`${site.siteId}-note-${index}`}>{note}</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+
+        {/* 移动端：直接展开显示详情 */}
+        {isMobile && (
+          <>
+            <div style={hintStyle}>
+              上游发现 {site.discoveredCount} 个模型
+            </div>
+            {site.liveFailure && (
+              <div style={{ ...hintStyle, color: 'var(--color-warning)' }}>
+                实时获取失败（{site.liveFailure.kind}
+                {site.liveFailure.status === null ? '' : ` / HTTP ${site.liveFailure.status}`}）：
+                {site.liveFailure.message}
+              </div>
+            )}
+            {site.notes.length > 0 && (
+              <ul style={{ ...hintStyle, margin: 0, paddingLeft: 18 }}>
+                {site.notes.map((note, index) => <li key={`${site.siteId}-note-${index}`}>{note}</li>)}
+              </ul>
+            )}
+          </>
+        )}
+      </div>
+    );
+  };
 
   const renderPreview = () => {
     if (!preview) return null;

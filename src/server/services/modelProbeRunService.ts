@@ -95,8 +95,11 @@ export const MAX_ACTIVE_PROBE_RUN_TARGETS = 300;
  * HTTP gate and the runner's own re-check must not be able to describe the same
  * threshold differently. The dependency only runs one way (the api service imports
  * this module, never the reverse), so this is the end that can own it.
+ *
+ * Set to Infinity to effectively disable the confirmation gate — the 300-target
+ * hard cap still applies, but nothing below it triggers a dialog.
  */
-export const MODEL_PROBE_CONFIRM_TARGET_THRESHOLD = 50;
+export const MODEL_PROBE_CONFIRM_TARGET_THRESHOLD = Infinity;
 
 /**
  * How far the freshly discovered target set may exceed what the gate authorized.
