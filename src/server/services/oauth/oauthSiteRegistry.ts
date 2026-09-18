@@ -34,7 +34,7 @@ export async function ensureOauthProviderSite(definition: OAuthProviderDefinitio
         name: definition.site.name,
         url: definition.site.url,
         platform: definition.site.platform,
-        status: 'active',
+        status: 'disabled', // OAuth 站点默认禁用
         isPinned: false,
         globalWeight: 1,
         sortOrder: await getNextSiteSortOrder(),

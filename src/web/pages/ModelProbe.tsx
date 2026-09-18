@@ -40,6 +40,7 @@ export default function ModelProbe() {
    * into its filters.
    */
   const [resultsRefreshToken, setResultsRefreshToken] = useState(0);
+  const [activeTab, setActiveTab] = useState<'probe' | 'settings'>('probe');
 
   const load = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -107,6 +108,36 @@ export default function ModelProbe() {
         </div>
       </div>
 
+      {/* 标签页导航 */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, borderBottom: '1px solid var(--color-border)' }}>
+        <button
+          type="button"
+          className={`btn btn-ghost ${activeTab === 'probe' ? 'active' : ''}`}
+          style={{
+            borderRadius: 0,
+            borderBottom: activeTab === 'probe' ? '2px solid var(--color-primary)' : '2px solid transparent',
+            fontWeight: activeTab === 'probe' ? 600 : 400,
+            padding: '8px 16px',
+          }}
+          onClick={() => setActiveTab('probe')}
+        >
+          发起探测
+        </button>
+        <button
+          type="button"
+          className={`btn btn-ghost ${activeTab === 'settings' ? 'active' : ''}`}
+          style={{
+            borderRadius: 0,
+            borderBottom: activeTab === 'settings' ? '2px solid var(--color-primary)' : '2px solid transparent',
+            fontWeight: activeTab === 'settings' ? 600 : 400,
+            padding: '8px 16px',
+          }}
+          onClick={() => setActiveTab('settings')}
+        >
+          设置
+        </button>
+      </div>
+
       {loading ? (
         <div className="card" style={{ padding: 24, textAlign: 'center' }}>
           <span className="spinner spinner-sm" />
@@ -136,28 +167,35 @@ export default function ModelProbe() {
               刷新失败：{refreshError}。下面显示的是上一次成功加载的数据，可能已经过时。
             </div>
           )}
-          <ModelProbeConfigPanel
-            config={config}
-            limits={limits}
-            onSaved={setConfig}
-          />
-          <ModelProbeSitesPanel
-            sites={sites}
-            userAgents={config.userAgents}
-            isMobile={isMobile}
-            onSaved={handleSiteSaved}
-          />
-          <ModelProbeRunPanel
-            sites={sites}
-            isMobile={isMobile}
-            onRunFinished={handleRunFinished}
-          />
-          <ModelProbeResultsPanel
-            sites={sites}
-            isMobile={isMobile}
-            refreshToken={resultsRefreshToken}
-            onResultsCleared={() => setResultsRefreshToken((token) => token + 1)}
-          />
+          {activeTab === 'probe' ? (
+            <>
+              <ModelProbeRunPanel
+                sites={sites}
+                isMobile={isMobile}
+                onRunFinished={handleRunFinished}
+              />
+              <ModelProbeResultsPanel
+                sites={sites}
+                isMobile={isMobile}
+                refreshToken={resultsRefreshToken}
+                onResultsCleared={() => setResultsRefreshToken((token) => token + 1)}
+              />
+            </>
+          ) : (
+            <>
+              <ModelProbeConfigPanel
+                config={config}
+                limits={limits}
+                onSaved={setConfig}
+              />
+              <ModelProbeSitesPanel
+                sites={sites}
+                userAgents={config.userAgents}
+                isMobile={isMobile}
+                onSaved={handleSiteSaved}
+              />
+            </>
+          )}
         </>
       )}
     </div>

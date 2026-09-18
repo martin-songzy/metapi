@@ -548,43 +548,41 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
         </div>
 
         {unverifiedSites.length > 0 && (
-          <div className="alert alert-warning" data-testid="model-probe-preview-unverified-warning">
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>
-              有 {unverifiedSites.length} 个站点用的是缓存模型列表，凭据未被验证
-            </div>
-            <div style={{ fontSize: 12, lineHeight: 1.7 }}>
-              {unverifiedSites.map((site) => site.siteName).join('、')}
-              ：实时获取模型列表没有成功，这里显示的是缓存内容。多数上游适配器在拿不到模型列表时只返回空数组，
-              所以密钥被吊销看起来和「暂时取不到」一模一样。把这些站点当作可用之前，请先确认它们的 API Key 仍然有效。
-            </div>
+          <div
+            className="alert alert-warning"
+            data-testid="model-probe-preview-unverified-warning"
+            style={{ cursor: 'help', position: 'relative' }}
+            title={`${unverifiedSites.map((site) => site.siteName).join('、')}：实时获取模型列表没有成功，这里显示的是缓存内容。多数上游适配器在拿不到模型列表时只返回空数组，所以密钥被吊销看起来和「暂时取不到」一模一样。把这些站点当作可用之前，请先确认它们的 API Key 仍然有效。`}
+          >
+            {unverifiedSites.length} 个站点用缓存列表（凭据未验证）— 鼠标悬停查看详情
           </div>
         )}
 
         {preview.exceedsRunLimit && (
           <div className="alert alert-error" data-testid="model-probe-preview-exceeds-limit">
-            本次匹配到的目标数量已超过服务端允许的单次上限，直接发起会被拒绝。请收窄模型匹配正则，或缩小站点范围。
+            目标数量超过单次上限，请收窄正则或缩小站点范围
           </div>
         )}
 
         {preview.invalidPatterns.length > 0 && (
-          <div className="alert alert-error" data-testid="model-probe-preview-invalid-patterns">
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>以下匹配正则无效，已被忽略：</div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
-              {preview.invalidPatterns.map((entry) => (
-                <li key={entry.source}><code>{entry.source}</code> — {entry.reason}</li>
-              ))}
-            </ul>
+          <div
+            className="alert alert-error"
+            data-testid="model-probe-preview-invalid-patterns"
+            style={{ cursor: 'help' }}
+            title={preview.invalidPatterns.map((entry) => `${entry.source} — ${entry.reason}`).join('\n')}
+          >
+            {preview.invalidPatterns.length} 条正则无效 — 鼠标悬停查看详情
           </div>
         )}
 
         {preview.skipped.length > 0 && (
-          <div className="alert alert-warning" data-testid="model-probe-preview-skipped">
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>以下站点本次不会被探测：</div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
-              {preview.skipped.map((skip) => (
-                <li key={skip.siteId}>{skip.siteName}（{skip.code}）：{skip.message}</li>
-              ))}
-            </ul>
+          <div
+            className="alert alert-warning"
+            data-testid="model-probe-preview-skipped"
+            style={{ cursor: 'help' }}
+            title={preview.skipped.map((skip) => `${skip.siteName}（${skip.code}）：${skip.message}`).join('\n')}
+          >
+            {preview.skipped.length} 个站点将被跳过 — 鼠标悬停查看详情
           </div>
         )}
 
@@ -605,25 +603,23 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   ) => (
     <>
       {invalidPatterns.length > 0 && (
-        <div className="alert alert-error" data-testid="model-probe-summary-invalid-patterns" style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>
-            本次有 {invalidPatterns.length} 条匹配正则无法编译，已被忽略，探测范围因此变小：
-          </div>
-          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
-            {invalidPatterns.map((entry) => (
-              <li key={entry.source}><code>{entry.source}</code> — {entry.reason}</li>
-            ))}
-          </ul>
+        <div
+          className="alert alert-error"
+          data-testid="model-probe-summary-invalid-patterns"
+          style={{ marginTop: 10, cursor: 'help' }}
+          title={invalidPatterns.map((entry) => `${entry.source} — ${entry.reason}`).join('\n')}
+        >
+          {invalidPatterns.length} 条正则无效 — 鼠标悬停查看详情
         </div>
       )}
       {skippedSites.length > 0 && (
-        <div className="alert alert-warning" data-testid="model-probe-summary-skipped-sites" style={{ marginTop: 10 }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>以下站点被跳过，没有产生任何结论：</div>
-          <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.7 }}>
-            {skippedSites.map((skip) => (
-              <li key={skip.siteId}>{skip.siteName}（{skip.code}）：{skip.message}</li>
-            ))}
-          </ul>
+        <div
+          className="alert alert-warning"
+          data-testid="model-probe-summary-skipped-sites"
+          style={{ marginTop: 10, cursor: 'help' }}
+          title={skippedSites.map((skip) => `${skip.siteName}（${skip.code}）：${skip.message}`).join('\n')}
+        >
+          {skippedSites.length} 个站点被跳过 — 鼠标悬停查看详情
         </div>
       )}
     </>
@@ -846,19 +842,19 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   const busy = previewing || starting;
 
   return (
-    <div className="card" data-testid="model-probe-run-panel" style={{ padding: 18, marginTop: 16 }}>
-      <div style={{ marginBottom: 12 }}>
+    <div className="card" data-testid="model-probe-run-panel" style={{ padding: 16, marginTop: 12 }}>
+      <div style={{ marginBottom: 10 }}>
         <div style={{ fontSize: 15, fontWeight: 600 }}>发起探测</div>
-        <div style={{ ...hintStyle, marginTop: 6 }}>
+        <div style={{ ...hintStyle, marginTop: 4 }}>
           探测会用站点自己的密钥发出真实请求，会消耗上游额度。先预览确认范围，再发起。
         </div>
-        <div style={{ ...hintStyle, marginTop: 6 }} data-testid="model-probe-run-dedupe-hint">
+        <div style={{ ...hintStyle, marginTop: 3 }} data-testid="model-probe-run-dedupe-hint">
           范围没有变化时再次发起并不会新开一次探测，服务端会识别出等价的任务，本页只是重新跟随它的进度；
           离开页面后回来也会自动接回仍在运行的那一次。
         </div>
       </div>
 
-      <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 10 }}>
         <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
           站点范围（不勾选表示全部符合条件的站点）
         </div>
