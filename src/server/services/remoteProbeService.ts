@@ -61,16 +61,19 @@ export type RemoteProbeAvailableResult = {
   checkedAt: string | null;
 };
 
+/** Counters shared by the run and status responses; `durationMs` only on run. */
+export type RemoteProbeSummary = {
+  totalProbed: number;
+  supported: number;
+  unsupported: number;
+  inconclusive: number;
+  durationMs?: number;
+};
+
 export type RemoteProbeRunResult = {
   status: 'completed' | 'running';
   taskId: string;
-  summary?: {
-    totalProbed: number;
-    supported: number;
-    unsupported: number;
-    inconclusive: number;
-    durationMs: number;
-  };
+  summary?: RemoteProbeSummary;
   available?: RemoteProbeAvailableResult[];
   message?: string;
 };
@@ -81,12 +84,7 @@ export type RemoteProbeStatusResult = {
     current: number;
     total: number;
   };
-  summary?: {
-    totalProbed: number;
-    supported: number;
-    unsupported: number;
-    inconclusive: number;
-  };
+  summary?: RemoteProbeSummary;
   available?: RemoteProbeAvailableResult[];
 };
 
@@ -120,6 +118,77 @@ export async function getRemoteProbeTargets(input: {
 }
 
 /**
+ * Task-scope registry: maps a queued probe task id to the site ids that sweep
+ * covers, so `/status` can report per-run results instead of the whole table.
+ *
+ * Kept here rather than inside the background task object on purpose — the task
+ * shape is shared with other features and its `result` slot is owned by the
+ * probe runner's summary. Entries die with their task: every read prunes scopes
+ * whose task has already expired, and queueing prunes the whole registry, so a
+ * leak would require unbounded operator-triggered probes with zero polls.
+ */
+const taskScopeByTaskId = new Map<string, number[]>();
+
+function rememberTaskScope(taskId: string, siteIds: number[] | undefined) {
+  // Lazy GC: drop scopes whose backing task is gone. Remote probes are
+  // operator-triggered and rare, so a full pass per queue is cheap.
+  for (const existingId of taskScopeByTaskId.keys()) {
+    if (!getBackgroundTask(existingId)) taskScopeByTaskId.delete(existingId);
+  }
+  if (siteIds && siteIds.length > 0) {
+    taskScopeByTaskId.set(taskId, siteIds);
+  }
+}
+
+function getTaskScope(taskId: string): number[] | undefined {
+  const scope = taskScopeByTaskId.get(taskId);
+  if (scope && !getBackgroundTask(taskId)) {
+    // Task expired between polls — the scope has nothing left to describe.
+    taskScopeByTaskId.delete(taskId);
+    return undefined;
+  }
+  return scope;
+}
+
+/**
+ * Fetch every result row for a scope, bypassing the page limit.
+ *
+ * `listActiveModelProbeResults` defaults to a 100-row page because it feeds a
+ * paginated UI. The remote API reports on a WHOLE sweep, so the totals and the
+ * available-model list would both be silently truncated for any real account
+ * set. Paging through with `offset` is equivalent and keeps the shared query
+ * function's contract (limit ≤ MAX_RESULTS_LIMIT) intact for its UI callers.
+ */
+async function listAllResultsForScope(siteIds?: number[]): Promise<ModelProbeResultView[]> {
+  const items: ModelProbeResultView[] = [];
+  const pageSize = 500;
+  let offset = 0;
+  while (true) {
+    const page = await listActiveModelProbeResults({
+      ...(siteIds && siteIds.length > 0 ? { siteIds } : {}),
+      sortBy: 'checkedAt',
+      order: 'desc',
+      limit: pageSize,
+      offset,
+    });
+    items.push(...page.items);
+    if (items.length >= page.total || page.items.length === 0) break;
+    offset += page.items.length;
+  }
+  return items;
+}
+
+function buildScopeSummary(items: ModelProbeResultView[], durationMs?: number) {
+  return {
+    totalProbed: items.length,
+    supported: items.filter((r) => r.status === 'supported').length,
+    unsupported: items.filter((r) => r.status === 'unsupported').length,
+    inconclusive: items.filter((r) => r.status === 'inconclusive').length,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
+}
+
+/**
  * Trigger a probe run and optionally wait for completion.
  *
  * For small sweeps (≤50 targets), waits synchronously and returns results.
@@ -133,11 +202,17 @@ export async function runRemoteProbe(input: RemoteProbeRunInput): Promise<Remote
   // Preview to get target count
   const preview = await previewActiveModelProbe(siteIds ? { siteIds } : undefined);
 
+  // The sites this sweep will actually touch, from the preview — the same
+  // resolution the queued runner will do. Scope the result reporting to these
+  // ids so a single-site probe does not read back the whole results table.
+  const scopeSiteIds = preview.sites.map((site) => site.siteId);
+
   // Queue the task
   const { task } = queueActiveModelProbe({
     siteIds,
     authorizedTargetCount: preview.totalModels,
   });
+  rememberTaskScope(task.id, scopeSiteIds);
 
   const startTime = Date.now();
 
@@ -158,22 +233,13 @@ export async function runRemoteProbe(input: RemoteProbeRunInput): Promise<Remote
 
     if (currentTask.status === 'succeeded') {
       const durationMs = Date.now() - startTime;
-      const results = await listActiveModelProbeResults({});
-      const available = filterAvailableResults(results.items);
-
-      const summary = {
-        totalProbed: results.total,
-        supported: results.items.filter((r) => r.status === 'supported').length,
-        unsupported: results.items.filter((r) => r.status === 'unsupported').length,
-        inconclusive: results.items.filter((r) => r.status === 'inconclusive').length,
-        durationMs,
-      };
+      const items = await listAllResultsForScope(scopeSiteIds);
 
       return {
         status: 'completed',
         taskId: task.id,
-        summary,
-        available: available.map(toRemoteProbeResult),
+        summary: buildScopeSummary(items, durationMs),
+        available: filterAvailableResults(items).map(toRemoteProbeResult),
       };
     }
 
@@ -202,18 +268,13 @@ export async function getRemoteProbeStatus(taskId: string): Promise<RemoteProbeS
   }
 
   if (task.status === 'succeeded') {
-    const results = await listActiveModelProbeResults({});
-    const available = filterAvailableResults(results.items);
+    const scopeSiteIds = getTaskScope(taskId);
+    const items = await listAllResultsForScope(scopeSiteIds);
 
     return {
       status: 'completed',
-      summary: {
-        totalProbed: results.total,
-        supported: results.items.filter((r) => r.status === 'supported').length,
-        unsupported: results.items.filter((r) => r.status === 'unsupported').length,
-        inconclusive: results.items.filter((r) => r.status === 'inconclusive').length,
-      },
-      available: available.map(toRemoteProbeResult),
+      summary: buildScopeSummary(items),
+      available: filterAvailableResults(items).map(toRemoteProbeResult),
     };
   }
 

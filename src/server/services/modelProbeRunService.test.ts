@@ -1936,6 +1936,30 @@ describe('modelProbeRunService', () => {
       expect(byStatus.items[0]?.modelName).toBe('claude-opus');
     });
 
+    /**
+     * `siteIds` exists for callers that own a multi-site run scope (the remote
+     * probe API). It must behave like the single-site filter, ignore junk ids
+     * the same way `listModelProbeKeyResultsForModels` does, and treat an
+     * all-invalid list as "no filter" rather than an empty `inArray` (a SQL
+     * syntax error on some dialects).
+     */
+    it('filters by a multi-site scope and ignores invalid ids', async () => {
+      const { alpha, beta } = await seedResults();
+
+      const scoped = await service.listActiveModelProbeResults({ siteIds: [alpha.site.id, beta.site.id] });
+      expect(scoped.total).toBe(3);
+
+      const onlyAlpha = await service.listActiveModelProbeResults({ siteIds: [alpha.site.id] });
+      expect(onlyAlpha.total).toBe(2);
+      expect(onlyAlpha.items.every((item) => item.siteId === alpha.site.id)).toBe(true);
+
+      // Junk ids are dropped; a list that is all junk degrades to no filter.
+      const junkDropped = await service.listActiveModelProbeResults({ siteIds: [alpha.site.id, -1, 0] });
+      expect(junkDropped.total).toBe(2);
+      const allJunk = await service.listActiveModelProbeResults({ siteIds: [0, -5] });
+      expect(allJunk.total).toBe(3);
+    });
+
     it('sorts by latency, balance and checkedAt in both directions', async () => {
       await seedResults();
 

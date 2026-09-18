@@ -1428,6 +1428,8 @@ export type ModelProbeResultsSortBy =
 export type ModelProbeResultsQuery = {
   model?: string;
   siteId?: number;
+  /** Multiple-site filter for callers that own a task scope (e.g. remote probe). */
+  siteIds?: number[];
   status?: string;
   sortBy?: ModelProbeResultsSortBy;
   order?: 'asc' | 'desc';
@@ -1598,6 +1600,13 @@ export async function listActiveModelProbeResults(query: ModelProbeResultsQuery)
   }
   if (Number.isInteger(query.siteId) && (query.siteId as number) > 0) {
     conditions.push(eq(schema.modelProbeKeyResults.siteId, query.siteId as number));
+  }
+  // Same normalization contract as `listModelProbeKeyResultsForModels`: drop
+  // non-positive/non-integer ids, dedupe, and skip the filter entirely when
+  // nothing valid remains (an empty `inArray` is a SQL syntax error).
+  const scopedSiteIds = [...new Set((query.siteIds ?? []).filter((id) => Number.isInteger(id) && id > 0))];
+  if (scopedSiteIds.length > 0) {
+    conditions.push(inArray(schema.modelProbeKeyResults.siteId, scopedSiteIds));
   }
   const status = String(query.status || '').trim();
   if (status) {

@@ -1,0 +1,592 @@
+{
+  "name": "MetAPI Probe Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "telegram-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        300
+      ],
+      "webhookId": "probe-bot-webhook",
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.message.from.id }}",
+              "value2": "493325033"
+            }
+          ]
+        }
+      },
+      "id": "auth-check",
+      "name": "权限检查",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.message.chat.id }}",
+        "text": "❌ 未授权访问\n\n此机器人仅供管理员使用。",
+        "additionalFields": {}
+      },
+      "id": "unauthorized-reply",
+      "name": "未授权回复",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        680,
+        420
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "command",
+              "value": "={{ $json.message.text.split(' ')[0] }}"
+            },
+            {
+              "name": "args",
+              "value": "={{ $json.message.text.split(' ').slice(1).join(' ') }}"
+            },
+            {
+              "name": "chatId",
+              "value": "={{ $json.message.chat.id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "extract-command",
+      "name": "提取命令",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        680,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "rules": [
+            {
+              "value1": "={{ $json.command }}",
+              "value2": "/probe"
+            },
+            {
+              "value1": "={{ $json.command }}",
+              "value2": "/targets"
+            },
+            {
+              "value1": "={{ $json.command }}",
+              "value2": "/status"
+            },
+            {
+              "value1": "={{ $json.command }}",
+              "value2": "/start"
+            },
+            {
+              "value1": "={{ $json.command }}",
+              "value2": "/help"
+            }
+          ]
+        },
+        "fallbackOutput": 3
+      },
+      "id": "command-router",
+      "name": "命令路由",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        900,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "⏳ 正在探测，请稍候...",
+        "additionalFields": {}
+      },
+      "id": "probe-start-msg",
+      "name": "探测开始提示",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        80
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://metapi-krj9.onrender.com/api/remote-probe/run",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "siteIds",
+              "value": "={{ $json.args || 'all' }}"
+            },
+            {
+              "name": "waitForCompletion",
+              "value": true
+            },
+            {
+              "name": "timeout",
+              "value": 300000
+            }
+          ]
+        },
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "probe-run",
+      "name": "调用探测API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1340,
+        80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (data.status === 'completed') {\n  const summary = data.summary;\n  const available = data.available || [];\n  \n  let message = `✅ 探测完成\\n\\n`;\n  message += `📊 统计：\\n`;\n  message += `- 总计：${summary.totalProbed} 个\\n`;\n  message += `- 可用：${summary.supported} 个\\n`;\n  message += `- 不可用：${summary.unsupported} 个\\n`;\n  message += `- 不确定：${summary.inconclusive} 个\\n`;\n  message += `- 耗时：${(summary.durationMs / 1000).toFixed(1)}秒\\n\\n`;\n  \n  if (available.length > 0) {\n    message += `🟢 可用模型（前10个）：\\n`;\n    available.slice(0, 10).forEach(item => {\n      const latency = item.latencyMs ? `${item.latencyMs}ms` : 'N/A';\n      const balance = item.balance ? `$${item.balance}` : '';\n      message += `• ${item.siteName} - ${item.modelName}\\n`;\n      message += `  延迟：${latency}  ${balance}\\n`;\n    });\n    \n    if (available.length > 10) {\n      message += `\\n还有 ${available.length - 10} 个可用模型未显示\\n`;\n    }\n  } else {\n    message += `⚠️ 没有找到可用的模型`;\n  }\n  \n  return { chatId, message, status: 'completed' };\n  \n} else if (data.status === 'running') {\n  return { \n    chatId, \n    message: `🔄 探测范围较大，已在后台执行\\n\\n任务ID：${data.taskId}\\n\\n使用以下命令查询进度：\\n/status ${data.taskId}`,\n    status: 'running',\n    taskId: data.taskId\n  };\n  \n} else {\n  return { \n    chatId, \n    message: `❌ 探测失败：${data.message || '未知错误'}`,\n    status: 'failed'\n  };\n}"
+      },
+      "id": "format-probe-result",
+      "name": "格式化探测结果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "id": "probe-result-reply",
+      "name": "发送探测结果",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        80
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://metapi-krj9.onrender.com/api/remote-probe/targets",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "summary",
+              "value": "false"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "get-targets",
+      "name": "获取站点列表",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1120,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (!data.sites || data.sites.length === 0) {\n  return { chatId, message: '⚠️ 没有可用的站点' };\n}\n\nlet message = `📋 可探测站点列表\\n\\n`;\nmessage += `总计：${data.summary.totalSites} 个站点，${data.summary.totalModels} 个模型\\n\\n`;\n\ndata.sites.forEach((site, index) => {\n  message += `${index + 1}. ${site.siteName} (ID: ${site.siteId})\\n`;\n  message += `   平台：${site.platform} | 状态：${site.status}\\n`;\n  message += `   模型数：${site.modelCount}\\n`;\n  \n  if (site.models && site.models.length > 0) {\n    const preview = site.models.slice(0, 3).join(', ');\n    message += `   示例：${preview}`;\n    if (site.models.length > 3) {\n      message += ` 等${site.models.length}个`;\n    }\n    message += `\\n`;\n  }\n  message += `\\n`;\n});\n\nmessage += `\\n💡 使用示例：\\n`;\nmessage += `/probe all - 探测全部站点\\n`;\nmessage += `/probe 1,2,3 - 探测指定站点`;\n\nreturn { chatId, message };"
+      },
+      "id": "format-targets",
+      "name": "格式化站点列表",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "id": "targets-reply",
+      "name": "发送站点列表",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1560,
+        200
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const args = $('提取命令').first().json.args;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (!args || args.trim() === '') {\n  return { chatId, message: '❌ 请提供任务ID\\n\\n用法：/status <taskId>' };\n}\n\nreturn { chatId, taskId: args.trim() };"
+      },
+      "id": "extract-taskid",
+      "name": "提取任务ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://metapi-krj9.onrender.com/api/remote-probe/status/{{ $json.taskId }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "get-status",
+      "name": "查询任务状态",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1340,
+        320
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (data.status === 'running') {\n  const progress = data.progress || {};\n  return { \n    chatId, \n    message: `🔄 任务执行中\\n\\n进度：${progress.current || 0}/${progress.total || '?'}`\n  };\n  \n} else if (data.status === 'completed') {\n  const summary = data.summary;\n  const available = data.available || [];\n  \n  let message = `✅ 任务已完成\\n\\n`;\n  message += `📊 统计：\\n`;\n  message += `- 总计：${summary.totalProbed} 个\\n`;\n  message += `- 可用：${summary.supported} 个\\n`;\n  message += `- 不可用：${summary.unsupported} 个\\n`;\n  message += `- 不确定：${summary.inconclusive} 个\\n\\n`;\n  \n  if (available.length > 0) {\n    message += `🟢 可用模型（前5个）：\\n`;\n    available.slice(0, 5).forEach(item => {\n      message += `• ${item.siteName} - ${item.modelName}\\n`;\n    });\n    if (available.length > 5) {\n      message += `\\n还有 ${available.length - 5} 个可用模型\\n`;\n    }\n  }\n  \n  return { chatId, message };\n  \n} else {\n  return { \n    chatId, \n    message: `❌ 任务失败或不存在`\n  };\n}"
+      },
+      "id": "format-status",
+      "name": "格式化状态",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1560,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {}
+      },
+      "id": "status-reply",
+      "name": "发送状态",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1780,
+        320
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "👋 欢迎使用 MetAPI 探测机器人\\n\\n🤖 可用命令：\\n\\n/probe all - 探测所有站点\\n/probe 1,2,3 - 探测指定站点（用逗号分隔ID）\\n/targets - 查看可探测的站点列表\\n/status <taskId> - 查询异步任务状态\\n/help - 显示此帮助信息\\n\\n💡 提示：\\n- 探测会消耗真实配额，请谨慎使用\\n- 小范围探测会自动等待完成\\n- 大范围探测会返回任务ID，需手动查询",
+        "additionalFields": {}
+      },
+      "id": "help-reply",
+      "name": "帮助信息",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        440
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "❓ 未知命令\\n\\n请使用 /help 查看可用命令",
+        "additionalFields": {}
+      },
+      "id": "unknown-reply",
+      "name": "未知命令回复",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1120,
+        560
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "权限检查",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "权限检查": {
+      "main": [
+        [
+          {
+            "node": "提取命令",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "未授权回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提取命令": {
+      "main": [
+        [
+          {
+            "node": "命令路由",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "命令路由": {
+      "main": [
+        [
+          {
+            "node": "探测开始提示",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "获取站点列表",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "提取任务ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "帮助信息",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "帮助信息",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "未知命令回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "探测开始提示": {
+      "main": [
+        [
+          {
+            "node": "调用探测API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "调用探测API": {
+      "main": [
+        [
+          {
+            "node": "格式化探测结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "格式化探测结果": {
+      "main": [
+        [
+          {
+            "node": "发送探测结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取站点列表": {
+      "main": [
+        [
+          {
+            "node": "格式化站点列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "格式化站点列表": {
+      "main": [
+        [
+          {
+            "node": "发送站点列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "提取任务ID": {
+      "main": [
+        [
+          {
+            "node": "查询任务状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询任务状态": {
+      "main": [
+        [
+          {
+            "node": "格式化状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "格式化状态": {
+      "main": [
+        [
+          {
+            "node": "发送状态",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "updatedAt": "2026-09-18T00:00:00.000Z",
+  "versionId": "1"
+}
