@@ -23,6 +23,7 @@ import { downstreamApiKeysRoutes } from './routes/api/downstreamApiKeys.js';
 import { oauthRoutes } from './routes/api/oauth.js';
 import { siteAnnouncementsRoutes } from './routes/api/siteAnnouncements.js';
 import { modelProbeRoutes } from './routes/api/modelProbe.js';
+import { remoteProbeRoutes } from './routes/api/remoteProbe.js';
 import { updateCenterRoutes } from './routes/api/updateCenter.js';
 import { proxyRoutes } from './routes/proxy/router.js';
 import { startScheduler } from './services/checkinScheduler.js';
@@ -231,6 +232,7 @@ await app.register(siteAnnouncementsRoutes);
 // Before the generic task routes: probe endpoints live under their own
 // `/api/model-probe` prefix and must not be shadowed by a later catch-all.
 await app.register(modelProbeRoutes);
+await app.register(remoteProbeRoutes);
 await app.register(updateCenterRoutes);
 await app.register(taskRoutes);
 await app.register(testRoutes);
