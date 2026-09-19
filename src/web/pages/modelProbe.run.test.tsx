@@ -750,15 +750,26 @@ describe('ModelProbe terminal state honesty', () => {
 });
 
 describe('ModelProbe run scope', () => {
+  it('starts with every selectable site ticked', async () => {
+    const root = await renderPage();
+    try {
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.checked).toBe(true);
+      expect(collectText(findByTestId(root.root, 'model-probe-scope-count'))).toContain('2');
+    } finally {
+      root.unmount();
+    }
+  });
+
   it('narrows preview and run to the selected sites, which is the only fix for a run cap', async () => {
     apiMock.runModelProbe.mockResolvedValue(queued());
     apiMock.getModelProbeTask.mockResolvedValue({ success: true, task: buildTask({ status: 'running' }) });
 
     const root = await renderPage();
     try {
-      const scopeToggle = findByTestId(root.root, 'model-probe-scope-site-9');
+      // Everything starts ticked, so narrowing means UNticking the rest.
       await act(async () => {
-        scopeToggle.props.onChange({ target: { checked: true } });
+        findByTestId(root.root, 'model-probe-scope-site-4').props.onChange({ target: { checked: false } });
       });
 
       await click(findByTestId(root.root, 'model-probe-preview-button'));
@@ -771,11 +782,62 @@ describe('ModelProbe run scope', () => {
     }
   });
 
-  it('sends no siteIds when no site is selected, meaning every eligible site', async () => {
+  /**
+   * The all-ticked state must collapse to `{}`, not to the id list. The two forms
+   * probe the same sites but carry different dedupe keys server-side, so sending
+   * ids here would make "select everything" start a second sweep instead of
+   * joining the identical one already running.
+   */
+  it('sends no siteIds when every site is ticked, which is the server all-scope', async () => {
     const root = await renderPage();
     try {
       await click(findByTestId(root.root, 'model-probe-preview-button'));
       expect(apiMock.previewModelProbe).toHaveBeenCalledWith({});
+    } finally {
+      root.unmount();
+    }
+  });
+
+  it('selects all, clears and inverts through the scope buttons', async () => {
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-scope-clear'));
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(false);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.checked).toBe(false);
+
+      await click(findByTestId(root.root, 'model-probe-scope-select-all'));
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.checked).toBe(true);
+
+      // Inverting the full set leaves nothing — the state the run buttons refuse.
+      await click(findByTestId(root.root, 'model-probe-scope-invert'));
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(false);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.checked).toBe(false);
+
+      await click(findByTestId(root.root, 'model-probe-scope-invert'));
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.checked).toBe(true);
+    } finally {
+      root.unmount();
+    }
+  });
+
+  /**
+   * An empty selection used to mean "every site" server-side — the opposite of
+   * what the checkboxes show, and one click away after 反选. Disabling the buttons
+   * makes that reading unreachable rather than merely surprising.
+   */
+  it('refuses to preview or run with nothing ticked', async () => {
+    const root = await renderPage();
+    try {
+      await click(findByTestId(root.root, 'model-probe-scope-clear'));
+
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-preview-button').props.disabled).toBe(true);
+      expect(collectText(findByTestId(root.root, 'model-probe-scope-empty-note'))).toContain('至少选择一个');
+
+      await click(findByTestId(root.root, 'model-probe-run-button'));
+      expect(apiMock.runModelProbe).not.toHaveBeenCalled();
     } finally {
       root.unmount();
     }
@@ -828,8 +890,10 @@ describe('ModelProbe run scope', () => {
 
     const root = await renderPage();
     try {
+      // Everything starts ticked; narrow to site 9 so the disable below is visible
+      // in the payload rather than hidden inside an all-scope.
       await act(async () => {
-        findByTestId(root.root, 'model-probe-scope-site-9').props.onChange({ target: { checked: true } });
+        findByTestId(root.root, 'model-probe-scope-site-4').props.onChange({ target: { checked: false } });
       });
       await click(findByTestId(root.root, 'model-probe-preview-button'));
       expect(apiMock.previewModelProbe).toHaveBeenLastCalledWith({ siteIds: [9] });
@@ -842,7 +906,22 @@ describe('ModelProbe run scope', () => {
       await click(findByTestId(root.root, 'model-probe-refresh-button'));
 
       // Kept, the scope would name a site the panel no longer shows, and the sweep
-      // would report a skip the operator cannot explain.
+      // would report a skip the operator cannot explain. Site 9's checkbox is gone
+      // outright (a disabled site is not offered as scope at all), and site 4 was
+      // unticked by hand before the refresh — so the selection is now empty, and an
+      // empty selection must NOT silently become "all".
+      expect(hasTestId(root.root, 'model-probe-scope-site-9')).toBe(false);
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(false);
+      expect(findByTestId(root.root, 'model-probe-run-button').props.disabled).toBe(true);
+      const callsBefore = apiMock.previewModelProbe.mock.calls.length;
+      await click(findByTestId(root.root, 'model-probe-preview-button'));
+      expect(apiMock.previewModelProbe.mock.calls.length).toBe(callsBefore);
+
+      // Re-ticking the surviving site makes it the entire selectable set, which
+      // collapses to the server's all-scope.
+      await act(async () => {
+        findByTestId(root.root, 'model-probe-scope-site-4').props.onChange({ target: { checked: true } });
+      });
       await click(findByTestId(root.root, 'model-probe-preview-button'));
       expect(apiMock.previewModelProbe).toHaveBeenLastCalledWith({});
     } finally {

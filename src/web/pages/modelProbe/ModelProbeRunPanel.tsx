@@ -42,6 +42,13 @@ const hintStyle: React.CSSProperties = {
   lineHeight: 1.7,
 };
 
+/** The 全选 / 清空 / 反选 trio: small, borderless, next to the section label. */
+const scopeActionStyle: React.CSSProperties = {
+  fontSize: 11,
+  padding: '1px 8px',
+  border: '1px solid var(--color-border)',
+};
+
 const badgeBase: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 600,
@@ -78,7 +85,6 @@ function formatLogTime(value: string): string {
 export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: ModelProbeRunPanelProps) {
   const toast = useToast();
   const [scopeSiteIds, setScopeSiteIds] = useState<number[]>([]);
-
   // 添加悬停样式
   useEffect(() => {
     const styleId = 'model-probe-site-hover-styles';
@@ -128,6 +134,38 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
       return next.length === prev.length ? prev : next;
     });
   }, [selectableSites]);
+
+  /**
+   * Every selectable site starts ticked, filled in once the site list arrives.
+   *
+   * The list is fetched asynchronously, so seeding the state initialiser would only
+   * ever see an empty array. This runs once — a ref, not a state flag, because a
+   * flag would have to be set inside the same effect and a re-render between the
+   * two could re-seed over a choice the operator already made.
+   */
+  const scopeSeededRef = useRef(false);
+  useEffect(() => {
+    if (scopeSeededRef.current || selectableSites.length === 0) return;
+    scopeSeededRef.current = true;
+    setScopeSiteIds(selectableSites.map((site) => site.id));
+  }, [selectableSites]);
+
+  const toggleScopeSite = (siteId: number, checked: boolean) => {
+    setScopeSiteIds((prev) => (
+      checked ? [...prev.filter((id) => id !== siteId), siteId] : prev.filter((id) => id !== siteId)
+    ));
+  };
+
+  /** 全选 / 清空 / 反选. All three write the same state, so they cannot disagree. */
+  const selectAllScopeSites = () => setScopeSiteIds(selectableSites.map((site) => site.id));
+  const clearScopeSites = () => setScopeSiteIds([]);
+  const invertScopeSites = () => setScopeSiteIds((prev) => {
+    const selected = new Set(prev);
+    return selectableSites.filter((site) => !selected.has(site.id)).map((site) => site.id);
+  });
+
+  const allSitesSelected = selectableSites.length > 0
+    && scopeSiteIds.length === selectableSites.length;
 
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState('');
@@ -181,18 +219,31 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
    */
   const cancelRequested = taskId !== null && cancelRequestedTaskId === taskId;
 
+  /**
+   * All-selected collapses to `{}` — the server's `kind: 'all'` scope.
+   *
+   * The two forms probe the same set but carry different dedupe keys, so sending
+   * the full id list here would make "select everything" start a *new* sweep
+   * rather than join the identical one already running. `all` also keeps meaning
+   * all: a site added later is covered without touching this panel.
+   *
+   * An empty selection sends `{}` too, but it can never reach the server — the run
+   * and preview buttons are disabled while nothing is ticked (see `nothingSelected`).
+   */
   const scopePayload = useMemo<ModelProbeRunPayload>(
-    () => (scopeSiteIds.length > 0 ? { siteIds: [...scopeSiteIds].sort((a, b) => a - b) } : {}),
-    [scopeSiteIds],
+    () => (allSitesSelected || scopeSiteIds.length === 0
+      ? {}
+      : { siteIds: [...scopeSiteIds].sort((a, b) => a - b) }),
+    [allSitesSelected, scopeSiteIds],
   );
 
-  const toggleScopeSite = (siteId: number, checked: boolean) => {
-    setScopeSiteIds((prev) => (
-      checked ? [...prev.filter((id) => id !== siteId), siteId] : prev.filter((id) => id !== siteId)
-    ));
-  };
+  /** Nothing ticked: the one state that must never reach 发起探测. */
+  const nothingSelected = selectableSites.length > 0 && scopeSiteIds.length === 0;
 
   const handlePreview = async () => {
+    // Same refusal as `startRun`: a preview of `{}` would describe every site,
+    // which is not the selection the checkboxes show.
+    if (nothingSelected) return;
     setPreviewing(true);
     setPreviewError('');
     try {
@@ -215,8 +266,9 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
    */
   const startRun = async (payload: ModelProbeRunPayload) => {
     // Guarded here and not only on `disabled`, so the refusal is a behaviour
-    // rather than a styling detail.
-    if (sweepInFlight) return;
+    // rather than a styling detail. `nothingSelected` is the one that matters
+    // most: its payload is `{}`, which the server reads as every site.
+    if (sweepInFlight || nothingSelected) return;
     operatorStartedRef.current = true;
     setStarting(true);
     setStartError('');
@@ -855,8 +907,46 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
       </div>
 
       <div style={{ marginBottom: 10 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)', marginBottom: 6 }}>
-          站点范围（不勾选表示全部符合条件的站点）
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6,
+        }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-text-secondary)' }}>
+            站点范围
+          </span>
+          {selectableSites.length > 0 && (
+            <>
+              <button
+                type="button"
+                data-testid="model-probe-scope-select-all"
+                className="btn btn-ghost"
+                style={scopeActionStyle}
+                onClick={selectAllScopeSites}
+              >
+                全选
+              </button>
+              <button
+                type="button"
+                data-testid="model-probe-scope-clear"
+                className="btn btn-ghost"
+                style={scopeActionStyle}
+                onClick={clearScopeSites}
+              >
+                清空
+              </button>
+              <button
+                type="button"
+                data-testid="model-probe-scope-invert"
+                className="btn btn-ghost"
+                style={scopeActionStyle}
+                onClick={invertScopeSites}
+              >
+                反选
+              </button>
+              <span style={{ ...hintStyle, marginLeft: 'auto' }} data-testid="model-probe-scope-count">
+                已选 {scopeSiteIds.length} / {selectableSites.length}
+              </span>
+            </>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           {selectableSites.length === 0 ? (
@@ -878,6 +968,17 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           ))}
         </div>
         {/*
+          An empty selection used to mean "every site" server-side. That reads as the
+          opposite of what the checkboxes show, and after 反选 the operator lands on
+          it by accident — one click away from spending quota on every site. The
+          buttons are disabled instead, so the state cannot be acted on.
+        */}
+        {nothingSelected && (
+          <div style={{ ...hintStyle, marginTop: 6 }} data-testid="model-probe-scope-empty-note">
+            没有勾选任何站点。请至少选择一个，或点「全选」。
+          </div>
+        )}
+        {/*
           Named rather than silently absent: a site vanishing from this list with no
           explanation reads as data loss, and the reason is one an operator can act on.
         */}
@@ -895,7 +996,7 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           className="btn btn-ghost"
           style={{ border: '1px solid var(--color-border)' }}
           onClick={() => handlePreview()}
-          disabled={busy}
+          disabled={busy || nothingSelected}
         >
           {previewing ? <><span className="spinner spinner-sm" /> 预览中...</> : '预览探测范围'}
         </button>
@@ -904,7 +1005,7 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           data-testid="model-probe-run-button"
           className="btn btn-primary"
           onClick={() => startRun(scopePayload)}
-          disabled={busy || sweepInFlight}
+          disabled={busy || sweepInFlight || nothingSelected}
         >
           {starting ? <><span className="spinner spinner-sm" /> 发起中...</> : '发起探测'}
         </button>
