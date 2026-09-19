@@ -20,6 +20,14 @@ Authorization: Bearer <AUTH_TOKEN>
 
 ## 接口列表
 
+| 接口 | 用途 |
+|------|------|
+| `GET /targets` | 可探测的站点/模型列表 |
+| `POST /run` | 发起探测（小范围同步等待，大范围转后台） |
+| `GET /status` | 最近一次任务 |
+| `GET /status/:taskId` | 指定任务 |
+| `GET /active` | 当前是否有探测在跑（只读，无副作用） |
+
 ### 1. GET `/api/remote-probe/targets` - 获取可探测目标
 
 获取可用的站点和模型列表，用于构建探测范围选择器。
@@ -207,7 +215,22 @@ curl -X POST \
 
 ---
 
-### 3. GET `/api/remote-probe/status/:taskId` - 查询任务状态
+### 3. GET `/api/remote-probe/status` - 查询最近一次任务
+
+不带任务 ID，返回**最近一次**探测任务的状态。Telegram 的 `/status`（不带参数）走这个。
+
+参数与响应结构同 `status/:taskId`，区别是 `taskId` 一律会返回——用户需要知道查的是哪一次。
+
+```bash
+curl -H "Authorization: Bearer your-token" \
+  "http://localhost:4000/api/remote-probe/status"
+```
+
+一次都没跑过时返回 `success: true` 且 `status: "none"`（不是 404）。
+
+---
+
+### 4. GET `/api/remote-probe/status/:taskId` - 查询指定任务状态
 
 查询异步探测任务的执行状态和结果。
 
@@ -294,6 +317,20 @@ curl -H "Authorization: Bearer your-token" \
   - `total`: 总目标数
 - `summary`: 探测统计（仅 completed 状态）
 - `available[]`: 可用模型列表（仅 completed 状态）
+
+`available` 按**站点名 → 模型名**排序，不是按响应速度。统计与列表都是**本次任务范围内**的完整结果，不受网页端分页限制。
+
+---
+
+### 5. GET `/api/remote-probe/active` - 是否有探测在跑
+
+只看 `pending` / `running`。
+
+```json
+{ "success": true, "running": false }
+```
+
+存在的意义：机器人要判断「现在能不能点开始探测」，用这个接口**不产生副作用**。如果去调 `/run` 来判断，那本身就是一次真实探测。
 
 ---
 

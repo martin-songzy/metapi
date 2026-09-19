@@ -12,6 +12,7 @@ metapi/
 ├── docker/               # Dockerfile、Compose 与部署模板
 ├── docs/                 # VitePress 文档、截图、Logo 与社区规范
 ├── drizzle/              # Drizzle SQL 迁移与 meta 快照
+├── integrations/         # 外部集成产物（n8n 工作流定义、模拟测试、部署脚本）
 ├── scripts/              # 开发脚本、桌面打包钩子、一次性 codemod
 ├── src/
 │   ├── desktop/          # Electron 主进程与桌面运行时
@@ -87,6 +88,14 @@ scripts/
 ```
 
 ```text
+integrations/
+├── telegram-bot-workflow.json            # n8n 工作流定义（可导入 n8n）
+├── telegram-bot-workflow.simulate.mjs    # Code 节点离线模拟测试
+├── telegram-bot-workflow.render.test.mjs # 渲染 / 缓存路径的回归测试
+└── deploy-telegram-bot-workflow.mjs      # 推送到 n8n 实例
+```
+
+```text
 docs/
 ├── .vitepress/           # 文档站导航与主题配置
 ├── community/            # 社区贡献规范
@@ -103,3 +112,4 @@ docs/
 - 运行时数据放 `data/`，临时排障文件放 `tmp/`，不要散落在仓库根目录。
 - 桌面打包脚本统一放 `scripts/desktop/`，不要把一次性签名或打包命令写进根目录批处理。
 - 文档站真正对外可访问的静态资源放 `docs/public/`；仍需继续编辑的素材保留在 `docs/logos/` 或 `docs/screenshots/`。
+- 外部集成的机器可读产物（工作流 JSON、部署脚本、模拟测试）放 `integrations/`，**不要放 `docs/`**——`docs/` 是给人看的文档站，机器产物放进去会被 VitePress 当成页面扫。

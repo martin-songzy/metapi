@@ -92,6 +92,8 @@ export default withMermaid(
             { text: 'K3s 更新中心（高级）', link: '/k3s-update-center' },
             { text: '客户端接入', link: '/client-integration' },
             { text: '管理 API', link: '/management-api' },
+            { text: '远程探测 API', link: '/remote-probe-api' },
+            { text: 'n8n Telegram 机器人', link: '/n8n-telegram-bot-setup' },
             { text: '运维手册', link: '/operations' },
             { text: '常见问题 FAQ', link: '/faq' },
           ],

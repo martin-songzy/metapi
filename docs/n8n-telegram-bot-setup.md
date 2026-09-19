@@ -1,218 +1,62 @@
-# n8n Telegram Bot 部署指南
+# n8n Telegram 探测机器人
 
-本指南介绍如何在 n8n 中部署 MetAPI 模型探测 Telegram Bot。
+在 Telegram 里选站点、跑模型探测、看结果。机器人本体是 n8n 工作流，探测逻辑全在 MetAPI 的[远程探测 API](./remote-probe-api.md) 里——n8n 只负责 Telegram 交互。
+
+- 工作流文件：[`integrations/telegram-bot-workflow.json`](../integrations/telegram-bot-workflow.json)
+- 本地模拟测试：`node integrations/telegram-bot-workflow.simulate.mjs`
+- 推送到 n8n：`node integrations/deploy-telegram-bot-workflow.mjs`
 
 ## 前置条件
 
-1. **n8n 实例**：https://n8n.freetcp.dpdns.org/
-2. **MetAPI 实例**：https://metapi-krj9.onrender.com/
-3. **Telegram Bot Token**：已创建的 Bot（MM_OClaw_bot）
-4. **MetAPI AUTH_TOKEN**：从 MetAPI 环境变量获取
+1. **n8n 实例**（本文以 `https://n8n.freetcp.dpdns.org/` 为例）
+2. **MetAPI 实例**（本文以 `https://metapi-krj9.onrender.com/` 为例）
+3. **Telegram Bot Token**（找 [@BotFather](https://t.me/BotFather) 创建）
+4. **MetAPI `AUTH_TOKEN`**：MetAPI 进程的环境变量
+5. **你的 Telegram User ID**：向 [@userinfobot](https://t.me/userinfobot) 发任意消息即可拿到
 
-## 配置步骤
+## 部署步骤
 
-### 1. 创建 Credentials
+### 1. 建两个 Credential
 
-#### 1.1 Telegram API Credential
-- 名称：`MM_OClaw_bot`
-- 类型：`Telegram API`
-- Bot Token：`<你的 Telegram Bot Token>`
+| 名称 | 类型 | 填什么 |
+|------|------|--------|
+| `MetAPI Auth` | Header Auth | Name = `Authorization`，Value = `Bearer <AUTH_TOKEN>` |
 
-#### 1.2 MetAPI Auth Credential
-- 名称：`MetAPI Auth`
-- 类型：`Header Auth`
-- Name：`Authorization`
-- Value：`Bearer <你的 MetAPI AUTH_TOKEN>`
+`MetAPI Auth` 被工作流里三个 HTTP Request 节点引用（拉站点列表、查 `/active`、发起探测）。
 
-### 2. 导入 Workflow
+> **Telegram 的 Token 不走 n8n 凭据**，见下方「为什么不用 n8n 的 Telegram 节点」。
 
-1. 打开 n8n：https://n8n.freetcp.dpdns.org/
-2. 点击左上角 **"+"** 创建新 workflow
-3. 点击右上角 **"..."** → **Import from File**
-4. 选择 `docs/telegram-bot-workflow.json`
-5. 导入后，检查所有节点的 credential 是否正确关联
+### 2. 导入工作流
 
-### 3. 配置权限检查
+n8n 里 **Workflows → ⋯ → Import from File**，选 `integrations/telegram-bot-workflow.json`。
 
-在 **"预处理"** 节点的 `ALLOWED_USERS` 数组里填你的 Telegram User ID。
+导入后检查三处：
 
-获取 User ID 方法：
-- 向 [@userinfobot](https://t.me/userinfobot) 发送任意消息
-- 它会返回你的 User ID
+1. 三个 HTTP Request 节点的 credential 是不是 `MetAPI Auth`
+2. `预处理` 节点顶部的 `ALLOWED_USERS` 数组填你的 User ID
+3. `预处理` 节点顶部的 `METAPI` 常量填你的 MetAPI 地址
 
-### 4. 激活 Workflow
+### 3. 设置 Bot Token
 
-1. 点击右上角 **"Active"** 开关，激活 workflow
-2. Telegram Trigger 会自动注册 webhook
+`预处理` 节点顶部：
+
+```js
+let BOT_TOKEN = '<字面量兜底>';
+try { if ($env.TELEGRAM_BOT_TOKEN) BOT_TOKEN = $env.TELEGRAM_BOT_TOKEN; } catch (e) { /* 环境变量被禁 */ }
+```
+
+**推荐**：在 n8n 的环境变量里设 `TELEGRAM_BOT_TOKEN`，然后把字面量那行改成 `let BOT_TOKEN = '';`。Token 写在节点里等于明文存在 n8n 数据库，任何能看工作流的人都能拿到。
+
+### 4. 激活
+
+打开右上角 **Active** 开关，Telegram Trigger 会自动注册 webhook。
 
 ### 5. 设置命令菜单
 
-见下方「页面按钮设置」一节——**必须手动设置一次**，否则 Telegram 里看不到命令提示。
-
-### 6. 测试命令
-
-在 Telegram 中向你的 Bot 发送以下命令测试：
-
-- `/help` - 查看帮助信息
-- `/targets` - 打开站点多选按钮面板
-- `/probe all` - 探测所有站点
-- `/probe 1,2,3` - 探测指定站点（用站点 ID）
-- `/status` - 查看最近一次探测结果
-- `/status <taskId>` - 查询指定任务
-
-## API 说明
-
-### GET /api/remote-probe/targets
-
-获取可探测的站点和模型列表。
-
-**Query Parameters:**
-- `siteIds`（可选）：逗号分隔的站点 ID，默认返回所有活动站点
-- `summary`（可选）：`true`（默认）仅返回统计数据，`false` 包含模型列表
-
-**Response:**
-```json
-{
-  "success": true,
-  "sites": [
-    {
-      "siteId": 1,
-      "siteName": "OpenAI Official",
-      "platform": "openai",
-      "status": "active",
-      "modelCount": 15,
-      "models": ["gpt-4", "gpt-4-turbo", ...]
-    }
-  ],
-  "summary": {
-    "totalSites": 5,
-    "totalModels": 42
-  }
-}
-```
-
-### POST /api/remote-probe/run
-
-启动模型探测任务。
-
-**Request Body:**
-```json
-{
-  "siteIds": "all",  // 或 [1, 2, 3]
-  "waitForCompletion": true,  // 小批量自动等待
-  "timeout": 300000  // 最大等待时间（毫秒）
-}
-```
-
-**Response（小批量完成）:**
-```json
-{
-  "success": true,
-  "status": "completed",
-  "taskId": "probe_xyz123",
-  "summary": {
-    "totalProbed": 10,
-    "supported": 8,
-    "unsupported": 1,
-    "inconclusive": 1,
-    "durationMs": 5000
-  },
-  "available": [
-    {
-      "siteId": 1,
-      "siteName": "OpenAI",
-      "modelName": "gpt-4",
-      "latencyMs": 200,
-      "balance": "5.00"
-    }
-  ]
-}
-```
-
-`available` 按**站点名 → 模型名**排序（不是按响应速度）。统计与列表都是**本次任务范围内**的完整结果，不受网页端分页限制。
-
-**Response（大批量异步）:**
-```json
-{
-  "success": true,
-  "status": "running",
-  "taskId": "probe_xyz123",
-  "message": "探测范围较大，已在后台执行"
-}
-```
-
-### GET /api/remote-probe/status/:taskId
-
-查询指定探测任务状态。
-
-### GET /api/remote-probe/status
-
-不传任务 ID，查询**最近一次**探测任务。Telegram 里的 `/status`（不带参数）走这个。
-
-**Response（运行中）:**
-```json
-{
-  "success": true,
-  "taskId": "probe_xyz123",
-  "status": "running",
-  "progress": { "current": 5, "total": 20 }
-}
-```
-
-**Response（已完成）:**
-同 `/run` 接口的完成响应，且 `taskId` 一定会返回（便于用户知道查的是哪一次）。
-
-### GET /api/remote-probe/active
-
-当前是否有探测在运行——只看 `pending` / `running`。
-
-```json
-{ "success": true, "running": false }
-```
-
-存在的意义：Telegram 机器人要判断"现在能不能点开始探测"，用这个接口不会产生副作用。如果去调 `/run` 来判断，那本身就是一次真实探测。
-
-## Workflow 架构
-
-```
-Telegram Trigger（监听 message + callback_query）
-    ↓
-预处理（权限检查 / 解析命令 / 解析按钮点击）
-    ↓
-动作路由（Switch）
-    ├─ render  → 拼装站点按钮（拉 /targets）→ 发送站点选择（inline keyboard）
-    ├─ probe   → 探测前置检查（/active）→ 调用MetAPI → 决定是否探测 → 是否发起探测
-    │                                                    ├─ 是 → 发起探测 → 格式化结果 → 发送回复
-    │                                                    └─ 否 → 格式化结果 →（忙碌提示）→ 发送回复
-    ├─ api     → 调用MetAPI（/status）→ 决定是否探测 → 是否发起探测 → 格式化结果 → 发送回复
-    └─ answer  → 准备按钮回应 → 回应按钮点击（answerCallbackQuery）
-```
-
-### /targets 的按钮交互
-
-`/targets` 发出的是一个 **inline keyboard**，每个站点一个按钮，底部是「🚀 开始探测 (n)」和「🧹 清空」。
-
-- 按钮文字用 `✅` / `▫️` 前缀表示选中状态——**Telegram 的按钮本身没有勾选框**，只能靠文字表示
-- 按钮上携带的 `callback_data`：`t:<站点ID>` 切换选中，`go` 开始探测，`clr` 清空
-- 选中状态存在 workflow 静态数据（`$getWorkflowStaticData('global')`），**按 chatId 分开记**；n8n 重启会清空，这是有意的
-- 每次点击都会**编辑原消息**（不是新发一条），所以按钮上的选中标记是实时变化的
-- 每行放 2 个站点，站点多的时候消息会很长但可滚动
-
-### 探测前的并发保护
-
-点「开始探测」时，workflow 先调 `/api/remote-probe/active`：
-
-- 已有探测在跑 → 回「⏳ 已有一次探测在进行中」，**不发起新的**
-- 没有在跑 → 调 `/run` 真正开始（`waitForCompletion: false`，立即返回 taskId）
-
-这一步很关键：探测花的是真实配额。后台任务虽然会用 dedupeKey 拒绝同范围的并发扫描，但**不同范围**的扫描是可以并存的，用户连点两下就会花两份钱。`/active` 是只读的，用它来判断不会产生任何副作用。
-
-## 页面按钮设置（Bot 菜单）
-
-Telegram 的命令菜单用 Bot API 设置（n8n 不管这个）：
+Telegram 的 `/` 菜单不走 n8n，要用 Bot API 设一次：
 
 ```powershell
-$token = '<你的 Bot Token>'
+$token = '<Bot Token>'
 $body = @{
   commands = @(
     @{ command = 'targets'; description = '选择要探测的站点' },
@@ -221,43 +65,143 @@ $body = @{
     @{ command = 'help';    description = '显示帮助信息' }
   )
 } | ConvertTo-Json -Depth 3
-Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/setMyCommands" -Method Post -ContentType 'application/json' -Body $body
+Invoke-RestMethod -Uri "https://api.telegram.org/bot$token/setMyCommands" `
+  -Method Post -ContentType 'application/json' -Body $body
 ```
 
-注意：命令名只能是 `a-z0-9_`，**不能带空格**，所以菜单里不能写 `/probe all`，用法只能写在描述里。
+命令名只能是 `a-z0-9_`，**不能带空格**——所以菜单里写不了 `/probe all`，用法只能塞进描述。
 
-## 注意事项
+### 6. 试一下
 
-1. **授权认证**：所有 `/api/remote-probe/*` 端点都需要 `Authorization: Bearer <AUTH_TOKEN>`
-2. **速率限制**：避免频繁调用探测 API，每次探测都会消耗真实配额
-3. **超时设置**：HTTP Request 节点的超时要与探测 API 的 `timeout` 参数匹配（默认 300 秒）
-4. **错误处理**：workflow 已包含基本错误处理，但可根据需要增强
-5. **日志监控**：在 n8n 的 Executions 页面可以查看每次执行的详细日志
+| 命令 | 作用 |
+|------|------|
+| `/targets` | 打开站点多选面板 |
+| `/probe all` | 探测所有站点 |
+| `/probe 180001,180002` | 探测指定站点 |
+| `/status` | 最近一次结果 |
+| `/status <taskId>` | 指定任务 |
+| `/help` | 帮助 |
+
+## 命令说明
+
+### `/targets` —— 站点多选面板
+
+发一条消息，里面是内联键盘：每行 3 个站点按钮，底部一行操作按钮。
+
+```
+📋 共 21 个站点
+
+已选 3 个：seekai、咕咕嘎嘎公益站、Tom&Jerry公益站
+
+[▫️KAPI[国…] [▫️魔方公益站] [▫️42api[国…]
+[▫️nhh站   ] [▫️烁公益   ] [▫️君の公益 ]
+...
+[🚀 直接探测] [🔄 刷新] [🧹 清空]
+```
+
+- 点站点名切换选中，`✅` / `▫️` 表示状态
+- 点「🚀 直接探测」探测选中的站点
+- 点「🔄 刷新」重拉站点列表
+- 点「🧹 清空」全部取消
+- **每次点击只回一个瞬时提示**（如 `➕ seekai · 已选 2 个`），不重绘键盘——重绘要等一次 `editMessageText` 往返，点起来很卡
+
+**站点列表是长期缓存的**，面板顶部标着缓存时间。站点集合变动很慢，按时间过期只会让你白等一次冷启动，所以只有点「🔄 刷新」才重拉。
+
+### `/probe` —— 探测
+
+`/probe all` 或 `/probe 180001,180002`。结果用 Telegram 的富消息表格呈现，超长自动分页。
+
+`/probe` 和 `/status` 的结果**按站点名 → 模型名排序**，不按响应速度——同一个站点的模型聚在一起才好读。
+
+## 工作流架构
+
+```
+Telegram Trigger（message + callback_query）
+    ↓
+预处理（鉴权 / 解析命令 / 从回传键盘还原选中状态）
+    ↓
+动作路由（Switch，按 action 分 7 路）
+    ├─ fetch  → 缓存判断 ─┬─ 命中 → 渲染键盘
+    │                     └─ 未命中 → 要调接口吗 → 获取站点列表 → 缓存站点列表 → 渲染键盘
+    ├─ render → 渲染键盘（零 IO，状态来自键盘本身）
+    ├─ probe  → 探测前置检查 → 查询是否在跑 → 决定是否探测 → 是否发起探测 ─┬─ 是 → 发起探测 ┐
+    │                                                                    └─ 否 ──────────┤
+    ├─ api    → 查询任务状态 ─────────────────────────────────────────────────────────────┤
+    │                                                                                    ↓
+    │                                                          格式化结果 → 发送富消息 → 准备兜底文本 → 发送兜底文本
+    ├─ answer → 准备按钮回应 → 调用Telegram（answerCallbackQuery）
+    └─ send   → 准备文本回复 → 调用Telegram（sendMessage）
+```
+
+## 三个关键设计决定
+
+这三处都是踩过坑之后改的，改动前都「看起来更简单」。
+
+### 1. 键盘本身就是状态（无状态设计）
+
+**勾选状态存在 Telegram 回传的键盘里**，服务端不存。
+
+`callback_query.message.reply_markup.inline_keyboard` 会把原消息的键盘一并带回来，所以点一下就知道当前选了什么。
+
+一开始用的是 n8n 静态数据（`$getWorkflowStaticData`），结果是**快速连点几个站点会丢状态**。原因在 n8n 源码里：静态数据在每次执行开始时读一次快照、执行结束时整对象 `UPDATE` 写回，**没有锁、没有字段级合并**。两个执行并发时，后结束的会把先结束的整个覆盖掉（lost update）。而 n8n 默认不串行化执行（`N8N_CONCURRENCY_PRODUCTION_LIMIT` 默认 `-1`）。
+
+键盘即状态则各画各的，不存在覆盖，n8n 重启也不丢。
+
+代价：按钮文字要截断（每行 3 个才放得下），完整站点名塞进 `callback_data`（`t:<id>:<完整名>`），正文和提示里用全名。
+
+### 2. 不用 n8n 的 Telegram 节点，直接调 Bot API
+
+n8n 的 Telegram 节点发不出**动态**内联键盘。
+
+它的 `inlineKeyboard` 是 `fixedCollection` 参数，路由层按 `node.parameters` 的**原始路径**逐层回读子字段（`getParameterValueByPath`）。一旦任何一层是表达式，那条路径在原始参数里就不存在，**整块键盘被静默丢掉**——不报错，就是没有键盘。实测整对象表达式、嵌套表达式都发不出。
+
+所以工作流里所有 Telegram 调用都走 HTTP Request 节点，把 `{url, body}` 当 item 往下传。`预处理` 负责拼 `tgBase`（`https://api.telegram.org/bot<token>`），后面的节点只补 `/sendMessage` 之类的后缀。
+
+### 3. HTTP Request 节点的输出会**替换**输入
+
+这个坑很隐蔽：`发送富消息` 跑完，`$json` 就变成了 Telegram 的响应（`{ok, result}`），**原来的字段全没了**。
+
+最初写成「发富消息 → IF `$json.kind === 'rich'` → 兜底」，结果 `kind` 早就没了，判断恒为假，**兜底每次都触发**——用户看到的就是「一条 HTML 表格 + 一条代码格式」，两条内容相似的消息。
+
+现在判断挪到了 HTTP **之前**：`准备兜底文本` 读自己的 `$input.first()`（也就是 `格式化结果` 的原始输出），再通过 `$('发送富消息')` 去看那次调用的结果，失败才发兜底。
+
+### 附带的一条：Code 节点不能联网
+
+n8n 的 Code 节点沙箱里 `fetch`、`$http`、`require('http')` 全都不可用。所有网络调用必须落在 HTTP Request 节点上，Code 节点只能做纯数据变换。
 
 ## 故障排查
 
-### 问题：收不到 Bot 消息
-- 检查 Telegram Trigger 是否激活
-- 检查 Bot Token 是否正确
-- 确认已向 Bot 发送过 `/start` 命令
+| 现象 | 原因 |
+|------|------|
+| 收不到消息 | Trigger 没激活；Bot Token 错；没先给 Bot 发过 `/start` |
+| `401 / 403 Invalid token` | `MetAPI Auth` 凭据里的 `AUTH_TOKEN` 不对 |
+| `404` | MetAPI 地址写错；Render 实例休眠了 |
+| `/targets` 说「没有可用的站点」 | MetAPI 挂了或鉴权失败。面板会带出失败原因，点「🔄 刷新」重试 |
+| 点站点没反应 | 消息太老，Telegram 不再回传键盘——重发 `/targets` |
+| 探测超时 | 缩小范围；或确认 `发起探测` 节点的 timeout 够大（当前 300s） |
 
-### 问题：API 调用失败（401 Unauthorized）
-- 检查 MetAPI Auth credential 的 Token 是否正确
-- 确认 Header 格式为 `Authorization: Bearer <token>`
+看日志：n8n 的 **Executions** 页面有每次执行的完整节点输入输出。
 
-### 问题：API 调用失败（404 Not Found）
-- 确认 MetAPI URL 正确：`https://metapi-krj9.onrender.com`
-- 检查 MetAPI 实例是否在线（Render 可能休眠）
+## 改这个工作流
 
-### 问题：探测超时
-- 增加 HTTP Request 节点的 timeout 设置
-- 减少探测范围（指定少量站点 ID）
-- 对大批量探测使用异步模式（不等待完成）
+改完必须做两件事，缺一不可：
 
-## 扩展建议
+```powershell
+# 1. 跑模拟测试（在仿造的 n8n 沙箱里执行每个 Code 节点）
+node integrations/telegram-bot-workflow.simulate.mjs
+node integrations/telegram-bot-workflow.render.test.mjs
 
-1. **添加结果筛选**：只返回可用的模型，隐藏不可用的
-2. **定时探测**：使用 n8n 的 Schedule Trigger 定期自动探测
-3. **告警通知**：当某个重要站点不可用时主动推送消息
-4. **多用户支持**：扩展权限检查节点，支持多个授权用户
-5. **结果持久化**：将探测结果存储到数据库或文件
+# 2. 推送到 n8n
+node integrations/deploy-telegram-bot-workflow.mjs
+```
+
+模拟测试直接 `new Function('$input', '$', '$getWorkflowStaticData', ...)` 跑 `jsCode`，覆盖：点击切换、全名还原、名字含冒号、旧键盘向后兼容、缓存命中/未命中/强制刷新、按钮布局与截断、缓存时间显示、兜底触发条件、渲染路径。
+
+> ⚠️ 在 n8n 编辑器里打开工作流并保存，会用编辑器里的版本覆盖线上版本。改之前先确认编辑器里没有未保存的改动。
+
+## 注意事项
+
+1. 所有 `/api/remote-probe/*` 都要 `Authorization: Bearer <AUTH_TOKEN>`
+2. **探测花的是真实配额**，别乱点
+3. `发起探测` 节点用 `waitForCompletion: false`，立刻拿 taskId 就返回；进度靠 `/status` 查
+4. 探测前会先查 `/active`：已有探测在跑就拒绝新的。不同范围的扫描是可以并存的，连点两下就是两份钱，所以这道闸门必须留

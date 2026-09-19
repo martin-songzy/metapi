@@ -1,0 +1,824 @@
+{
+  "name": "MetAPI Probe Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "metapi-probe",
+      "credentials": {
+        "telegramApi": {
+          "id": "huDHcNDuJpoSxnO1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// === 配置 ===\nconst ALLOWED_USERS = [493325033];\nconst METAPI = 'https://metapi-krj9.onrender.com';\n\n// Telegram Bot API 的 token 只能放在 URL 路径里，n8n 的 telegramApi 凭据\n// 没法被 HTTP Request 节点复用（那个凭据没有 authenticate 段）。\n// 所以这里读环境变量，读不到才用字面量兜底。\nlet BOT_TOKEN = '8680016700:AAE2DwDZQWiRl6nsr74YSD_n9PzDIc2FRGI';\ntry { if ($env.TELEGRAM_BOT_TOKEN) BOT_TOKEN = $env.TELEGRAM_BOT_TOKEN; } catch (e) { /* 环境变量被禁 */ }\nconst TG = 'https://api.telegram.org/bot' + BOT_TOKEN;\n\nconst out = (obj) => [{ json: { tgBase: TG, ...obj } }];\n\n// 站点按钮的文字形如 \"✅ seekai (8)\" / \"▫️ 咕咕嘎嘎公益站 (13)\"\n//\n// ▫️ 是两个码位：U+25AB + 变体选择符 U+FE0F。只吃掉 U+25AB 的话，残留的\n// U+FE0F 会粘在站点名前面（渲染上看不出来，但拼进 /probe 参数和复制出来的\n// 命令里都是脏字符）。\nconst PREFIX = /^(?:\\u2705|\\u25AB)\\uFE0F?\\s*/;\n\n/**\n * 从回传的键盘还原站点列表。\n *\n * 这是整个设计的关键：**键盘本身就是选中状态**。Telegram 在 callback_query\n * 里把原消息的 reply_markup 一并回传，所以点一下就能知道当前选了什么，\n * 不需要任何服务端存储。\n *\n * 为什么不用 $getWorkflowStaticData：n8n 的静态数据是「执行开始读一次快照、\n * 执行结束整对象 UPDATE 写回」，没有锁也没有字段级合并。快速连点几个站点时\n * 多个执行并发，后结束的会把先结束的整个覆盖掉（lost update），而且 n8n 重启\n * 就清空。键盘即状态则各画各的，不存在覆盖。\n *\n * 按钮文字是截断过的（每行 3 个，省屏幕高度），完整站点名在 callback_data 里。\n */\nfunction parseSites(kb) {\n  const sites = [];\n  for (const row of kb) {\n    for (const b of row || []) {\n      const raw = String(b.callback_data || '');\n      if (!raw.startsWith('t:')) continue;\n      const on = String(b.text || '').startsWith('\\u2705');\n      // 格式 t:<id>[:<完整名>]，名字里可能有冒号，所以只切前两段\n      const first = raw.indexOf(':');\n      const second = raw.indexOf(':', first + 1);\n      const id = Number(second === -1 ? raw.slice(2) : raw.slice(2, second));\n      if (!Number.isInteger(id) || id <= 0) continue;\n      const fullName = second === -1 ? '' : raw.slice(second + 1);\n      const label = String(b.text || '').replace(PREFIX, '');\n      sites.push({\n        siteId: id,\n        // 优先用 callback_data 里的全名；老键盘没有的话退回按钮文字\n        siteName: fullName || label,\n        label,\n        on,\n      });\n    }\n  }\n  return sites;\n}\n\nconst ev = $input.first().json;\nconst cb = ev.callback_query;\n\n// ==================== 分支 A：按钮点击 ====================\nif (cb) {\n  const chatId = cb.message?.chat?.id;\n  const userId = Number(cb.from?.id || 0);\n  const messageId = cb.message?.message_id;\n  const data = String(cb.data || '');\n  const kb = cb.message?.reply_markup?.inline_keyboard;\n\n  if (!ALLOWED_USERS.includes(userId)) {\n    return out({ action: 'answer', callbackQueryId: cb.id, text: '❌ 未授权', chatId });\n  }\n\n  // 刷新：强制重拉站点列表。勾选从键盘带过去，按 id 保留。\n  if (data === 'refresh') {\n    return out({\n      action: 'fetch',\n      force: true,\n      callbackQueryId: cb.id,\n      chatId,\n      messageId,\n      sites: Array.isArray(kb) ? parseSites(kb) : [],\n    });\n  }\n\n  if (data === 'noop') {\n    return out({ action: 'answer', callbackQueryId: cb.id, text: '↑ 点站点名来勾选', chatId });\n  }\n\n  // 键盘没了就无从得知当前选了什么。Telegram 文档里 message 是 Optional，\n  // 实践中一直在，但不能假设。用 alert 而不是 toast：这条提示需要被读到。\n  if (!Array.isArray(kb)) {\n    return out({\n      action: 'answer',\n      callbackQueryId: cb.id,\n      chatId,\n      text: '⚠️ 会话已过期，请重新发送 /targets',\n      showAlert: true,\n    });\n  }\n\n  const sites = parseSites(kb);\n  if (!sites.length) {\n    return out({\n      action: 'answer',\n      callbackQueryId: cb.id,\n      chatId,\n      text: '⚠️ 这条消息里没有站点，请重新发送 /targets',\n      showAlert: true,\n    });\n  }\n\n  const picked = sites.filter((s) => s.on);\n\n  if (data === 'clr') {\n    sites.forEach((s) => { s.on = false; });\n    return out({ action: 'render', chatId, messageId, callbackQueryId: cb.id, sites, ackText: '🧹 已清空' });\n  }\n\n  if (data === 'run') {\n    if (!picked.length) {\n      return out({ action: 'answer', callbackQueryId: cb.id, text: '⚠️ 先点几个站点', chatId });\n    }\n    return out({ action: 'probe', chatId, siteIds: picked.map((s) => s.siteId), callbackQueryId: cb.id });\n  }\n\n  if (data.startsWith('t:')) {\n    // callback_data 是 t:<id>[:<完整名>]。名字里可能有冒号，所以只切前两段——\n    // 不能整个 data.slice(2) 去 Number()，那会得到 NaN，每个站点都匹配不上。\n    const id = Number(data.slice(2).split(':')[0]);\n    const target = sites.find((s) => s.siteId === id);\n    if (!target) {\n      return out({ action: 'answer', callbackQueryId: cb.id, text: '无效站点', chatId });\n    }\n    target.on = !target.on;\n    const n = sites.filter((s) => s.on).length;\n    return out({\n      action: 'render',\n      chatId,\n      messageId,\n      callbackQueryId: cb.id,\n      sites,\n      toggledId: id,\n      ackText: (target.on ? '➕ ' : '➖ ') + target.siteName + ' · 已选 ' + n + ' 个',\n    });\n  }\n\n  return out({ action: 'answer', callbackQueryId: cb.id, text: '未知操作', chatId });\n}\n\n// ==================== 分支 B：文字命令 ====================\nconst msg = ev.message || {};\nconst chatId = msg.chat?.id;\nconst userId = Number(msg.from?.id || 0);\nconst text = (msg.text || '').trim();\nconst parts = text.split(/\\s+/);\nconst cmd = (parts[0] || '').replace(/^\\//, '').toLowerCase();\nconst args = parts.slice(1).join(' ');\n\n// action:'send' 由动作路由的 fallback 输出接走\nconst reply = (t) => out({ action: 'send', chatId, text: t });\n\nif (!ALLOWED_USERS.includes(userId)) {\n  return reply('❌ 未授权访问\\n\\n此机器人仅供管理员使用。\\n您的 User ID: ' + userId);\n}\n\nif (!cmd || cmd === 'help' || cmd === 'start') {\n  return reply('🤖 MetAPI 探测机器人\\n\\n/targets - 按钮勾选站点，直接探测\\n/probe all - 探测所有站点\\n/probe 180001,180002 - 探测指定站点\\n/status - 查看最近一次探测结果\\n/help - 显示帮助\\n\\n⚠️ 探测会消耗真实配额');\n}\n\n// /targets 走缓存（除非超过 10 分钟）：站点列表要实时探测所有站点，\n// 每次都快不了。要看最新的就点面板上的「🔄 刷新」。\nif (cmd === 'targets') {\n  return out({ action: 'fetch', chatId, sites: [], notice: '点站点名勾选，选好后点「🚀 直接探测」' });\n}\n\nif (cmd === 'probe') {\n  const raw = args.trim().toLowerCase();\n  const siteIds = raw === 'all' || raw === '' ? 'all' : raw.split(/[^0-9]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n > 0);\n  if (Array.isArray(siteIds) && siteIds.length === 0) {\n    return reply('❌ 站点ID格式不对\\n\\n用法: /probe all 或 /probe 180001,180002');\n  }\n  return out({ action: 'probe', chatId, siteIds });\n}\n\nif (cmd === 'status') {\n  // 不带参数 = 查最近一次；带参数 = 查指定任务\n  const url = args.trim() ? METAPI + '/api/remote-probe/status/' + encodeURIComponent(args.trim()) : METAPI + '/api/remote-probe/status';\n  return out({ action: 'api', chatId, method: 'GET', url });\n}\n\nreturn reply('❓ 未知命令: /' + cmd + '\\n\\n发送 /help 查看可用命令');"
+      },
+      "id": "preprocess",
+      "name": "预处理",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-fetch",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "fetch",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "fetch"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-render",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "render",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "render"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-probe",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "probe",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "probe"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-api",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "api",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "api"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "r-answer",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "answer",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "answer"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": 5
+        }
+      },
+      "id": "router",
+      "name": "动作路由",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 缓存判断。站点列表要实时探测所有站点（~1.3s 起，冷启动更久），\n// /targets 每次都拉太慢，所以缓存下来长期复用；只有点面板上的\n// 「🔄 刷新」才重拉。\n//\n// 为什么不设 TTL：站点集合变动很慢，按时间过期只会让用户白等一次冷启动，\n// 却几乎不会带来更新的数据。面板上标着缓存时间，用户自己决定何时刷新。\n//\n// 缓存在静态数据里，只影响「列表内容」，不影响勾选状态——勾选在键盘上，\n// 所以这里的并发覆盖风险只关乎列表新旧，不关乎用户操作，可以接受。\nconst ctx = $('预处理').first().json;\nconst store = $getWorkflowStaticData('global');\nif (!store.sites) store.sites = {};\nif (!store.cachedAt) store.cachedAt = {};\n\nconst key = String(ctx.chatId);\nconst cached = Array.isArray(store.sites[key]) && store.sites[key].length > 0;\n\nif (cached && !ctx.force) {\n  return [{ json: { ...ctx, action: 'render', cached: true, cachedAt: store.cachedAt[key], apiSites: store.sites[key] } }];\n}\n\nreturn [{ json: { ...ctx, action: 'need-api' } }];"
+      },
+      "id": "cache-check",
+      "name": "缓存判断",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "need-api",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "need-api",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-need-api",
+      "name": "要调接口吗",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://metapi-krj9.onrender.com/api/remote-probe/targets?summary=false",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "fetch-targets",
+      "name": "获取站点列表",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1100,
+        -80
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2nZAjtpyyj8dyBkH",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 把拉回来的列表写进缓存，再交给「渲染键盘」画出来\nconst ctx = $('缓存判断').first().json;\nconst data = $input.first().json || {};\nconst store = $getWorkflowStaticData('global');\n\nconst key = String(ctx.chatId);\n\nif (data.error || data.success === false || !Array.isArray(data.sites) || !data.sites.length) {\n  // 拉失败不动缓存：旧列表仍然可用，比一张空面板强\n  return [{ json: {\n    ...ctx,\n    action: 'render',\n    fetchFailed: data.error?.description || data.message || '没有可用站点',\n    apiSites: store.sites[key] || [],\n  } }];\n}\n\nstore.sites[key] = data.sites.map((s) => ({ siteId: s.siteId, siteName: s.siteName, modelCount: s.modelCount || 0 }));\nstore.cachedAt[key] = Date.now();\n\nreturn [{ json: { ...ctx, action: 'render', fetchFailed: null, apiSites: store.sites[key] } }];"
+      },
+      "id": "cache-sites",
+      "name": "缓存站点列表",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 画键盘。三条来源：\n//   render + cached  —— 站点列表来自缓存（/targets 的常见路径）\n//   render + apiSites —— 站点列表来自 API（首次、或点了刷新）\n//   render（无列表）  —— 点击路径，列表来自回传的键盘本身（零 IO）\n//\n// 为什么不用 n8n 的 Telegram 节点：它的 inlineKeyboard 是 fixedCollection，\n// 路由层按 node.parameters 的原始路径逐层回读子字段。一旦任何一层是表达式，\n// 那条路径在原始参数里就不存在，整块键盘被静默丢掉——实测整对象表达式、\n// 嵌套表达式都发不出键盘。动态站点列表只能走原生 API。\n// 读直接上游，不写死节点名。三条上游都会把 ctx 原样带下来：\n//   动作路由(点击) / 要调接口吗(缓存命中) / 缓存站点列表(刚拉完 API)\n// 站点列表就在 ctx 里。之前写死 $('预处理') 只对点击路径成立——\n// 走缓存或刷新时，预处理里根本没有 apiSites，于是每次都画成\n// 「没有可用的站点」，点刷新也一样（刷新只是绕过了缓存，数据照样丢）。\nconst ctx = $input.first().json;\n\nconst tg = ctx.tgBase;\nconst chatId = ctx.chatId;\nconst messageId = ctx.messageId || null;\n\nconst apiSites = Array.isArray(ctx.apiSites) ? ctx.apiSites : null;\n\nlet sites;\nlet fetchFailed = ctx.fetchFailed || null;\n\nif (apiSites) {\n  // 刷新前已经勾上的，按 id 保留\n  const wasOn = new Set((ctx.sites || []).filter((s) => s.on).map((s) => s.siteId));\n  sites = apiSites.map((s) => ({\n    siteId: s.siteId,\n    siteName: s.siteName,\n    on: wasOn.has(s.siteId),\n  }));\n} else {\n  sites = Array.isArray(ctx.sites) ? ctx.sites : [];\n}\n\n// 一次 API 都没成功过、键盘也空——没有可画的\nif (!sites.length) {\n  const rows = [[{ text: '🔄 刷新', callback_data: 'refresh' }]];\n  const text = (fetchFailed ? '⚠️ ' + fetchFailed + '\\n\\n' : '') + '没有可用的站点。';\n  const emptyBody = { chat_id: chatId, text, reply_markup: { inline_keyboard: rows } };\n  const emptyItems = [{ json: {\n    url: tg + (messageId ? '/editMessageText' : '/sendMessage'),\n    body: messageId ? { ...emptyBody, message_id: messageId } : emptyBody,\n  } }];\n  // 点「刷新」落到这条路径时同样要应答，否则按钮一直转圈\n  if (ctx.callbackQueryId) emptyItems.push(ackItem(tg, ctx));\n  return emptyItems;\n}\n\n// 每行 3 个：按钮行高是固定的，唯一能压高度的办法是减少行数。\n// 代价是名字要截断，完整名字塞进 callback_data（上限 64 字节）。\nconst PER_ROW = 3;\nconst MAX_LABEL = 7;\nconst truncate = (s) => (s.length > MAX_LABEL ? s.slice(0, MAX_LABEL - 1) + '…' : s);\n\nconst rows = [];\nfor (let i = 0; i < sites.length; i += PER_ROW) {\n  rows.push(sites.slice(i, i + PER_ROW).map((s) => ({\n    text: (s.on ? '✅' : '▫️') + truncate(s.siteName),\n    // t:<id>:<完整名>，供正文列出全名，也供下一轮解析\n    callback_data: 't:' + s.siteId + ':' + s.siteName,\n  })));\n}\n\nrows.push([\n  { text: '🚀 直接探测', callback_data: 'run' },\n  { text: '🔄 刷新', callback_data: 'refresh' },\n  { text: '🧹 清空', callback_data: 'clr' },\n]);\n\nconst picked = sites.filter((s) => s.on);\n\nlet text = '';\nif (ctx.notice) text += ctx.notice + '\\n\\n';\nif (fetchFailed) text += '⚠️ 站点列表刷新失败（' + fetchFailed + '）\\n\\n';\nif (ctx.cached) text += '（缓存于 ' + timeOf(ctx.cachedAt) + '，点「🔄 刷新」重拉）\\n\\n';\ntext += '📋 共 ' + sites.length + ' 个站点\\n\\n';\ntext += picked.length\n  ? '已选 ' + picked.length + ' 个：' + picked.map((s) => s.siteName).join('、') + '\\n'\n  : '还没有勾选站点\\n';\n\nconst msgBody = { chat_id: chatId, text, reply_markup: { inline_keyboard: rows } };\n\nconst items = [{ json: {\n  // 带 messageId = 点击路径，原地改；否则是新的一次 /targets，发新消息\n  url: tg + (messageId ? '/editMessageText' : '/sendMessage'),\n  body: messageId ? { ...msgBody, message_id: messageId } : msgBody,\n} }];\n\n// 点击路径必须回一次 answerCallbackQuery，否则按钮一直转圈\nif (ctx.callbackQueryId) items.push(ackItem(tg, ctx));\n\nreturn items;\n\nfunction ackItem(tg, ctx) {\n  return { json: {\n    url: tg + '/answerCallbackQuery',\n    body: { callback_query_id: ctx.callbackQueryId, text: String(ctx.ackText || '已更新').slice(0, 200) },\n  } };\n}\n\n// 缓存时间：当天只显示时分，跨天补上日期。缓存长期有效，一份列表可能放很久，\n// 只写「缓存于 09:31」会让人以为是今天早上。\n// n8n 容器时区可能是 UTC，但这里只是给个相对感，不值得引入时区处理。\nfunction timeOf(ms) {\n  if (!ms) return '未知时间';\n  const d = new Date(ms);\n  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');\n  const today = new Date();\n  const sameDay = d.getFullYear() === today.getFullYear()\n    && d.getMonth() === today.getMonth()\n    && d.getDate() === today.getDate();\n  if (sameDay) return hm;\n  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;\n}"
+      },
+      "id": "build-keyboard",
+      "name": "渲染键盘",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// answerCallbackQuery 只接受短文本（≤200），且必须尽快回应，否则按钮一直转圈\nconst ctx = $('预处理').first().json;\nreturn [{ json: {\n  url: ctx.tgBase + '/answerCallbackQuery',\n  body: {\n    callback_query_id: ctx.callbackQueryId,\n    text: String(ctx.text || '').slice(0, 200),\n    // alert 是弹窗而非顶部提示：会话过期这类消息需要被真的读到\n    ...(ctx.showAlert ? { show_alert: true } : {}),\n  },\n} }];"
+      },
+      "id": "answer-prep",
+      "name": "准备按钮回应",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 纯文本回复（帮助、未授权、参数格式错误）也走同一个 HTTP 节点，\n// 省掉一个 n8n Telegram 节点。\nconst ctx = $('预处理').first().json;\nreturn [{ json: {\n  url: ctx.tgBase + '/sendMessage',\n  body: { chat_id: ctx.chatId, text: ctx.text || '' },\n} }];"
+      },
+      "id": "prepare-text",
+      "name": "准备文本回复",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "call-telegram",
+      "name": "调用Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1320,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// /probe 或 点了「直接探测」：先看有没有在跑，避免重复计费\nconst ctx = $('预处理').first().json;\nconst siteIds = (ctx.siteIds === 'all' || ctx.siteIds == null) ? 'all' : ctx.siteIds;\nreturn [{ json: {\n  chatId: ctx.chatId,\n  callbackQueryId: ctx.callbackQueryId || null,\n  siteIds,\n} }];"
+      },
+      "id": "probe-init",
+      "name": "探测前置检查",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://metapi-krj9.onrender.com/api/remote-probe/active",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "check-active",
+      "name": "查询是否在跑",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        880,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2nZAjtpyyj8dyBkH",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 在跑就劝退，没跑就真的发起探测\n//\n// 只读 探测前置检查（同一条分支上的上游），不要读别的分支的节点：\n// n8n 里访问没执行过的节点会抛 \"hasn't been executed\"，整条执行直接失败。\nconst ctx = $('探测前置检查').first().json;\nconst data = $input.first().json || {};\n\nif (data.running) {\n  return [{ json: { ...ctx, stage: 'busy' } }];\n}\n\nreturn [{ json: { ...ctx, stage: 'run' } }];"
+      },
+      "id": "probe-decide",
+      "name": "决定是否探测",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-run",
+              "leftValue": "={{ $json.stage }}",
+              "rightValue": "run",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-run",
+      "name": "是否发起探测",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://metapi-krj9.onrender.com/api/remote-probe/run",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ siteIds: $json.siteIds, waitForCompletion: false, timeout: 300000 }) }}",
+        "options": {
+          "timeout": 300000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "run-probe",
+      "name": "发起探测",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1540,
+        220
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2nZAjtpyyj8dyBkH",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "query-status",
+      "name": "查询任务状态",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        660,
+        760
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "2nZAjtpyyj8dyBkH",
+          "name": "MetAPI Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 探测结果 / 状态查询 / 忙碌提示 → 一条 HTML 富消息\n//\n// 用 sendRichMessage 而不是 parse_mode=HTML：后者不支持 <table>，只有\n// rich_message 的 HTML 子集能渲染成真正的表格（实测 20 行表格可发）。\nconst start = $('预处理').first().json;\nconst chatId = start.chatId;\nconst tg = start.tgBase;\n\nlet payload = {};\nfor (const name of ['发起探测', '查询任务状态', '决定是否探测']) {\n  try {\n    const item = $(name).first();\n    if (item) { payload = item.json; break; }\n  } catch (e) { /* 该分支没走到 */ }\n}\n\nconst esc = (s) => String(s == null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst items = [];\nconst send = (html, fallback) => {\n  items.push({ json: {\n    kind: 'rich',\n    url: tg + '/sendRichMessage',\n    body: { chat_id: chatId, rich_message: { html } },\n    // 兜底文本：富消息接口较新，万一客户端或 API 不吃，降级成等宽文本重发。\n    // 探测花的是真钱，结果不能因为显示格式丢掉。\n    fallback,\n  } });\n};\n\nif (payload.stage === 'busy') {\n  send('<b>⏳ 已有探测在进行中</b>\\n用 /status 查看进度', '⏳ 已有探测在进行中\\n用 /status 查看进度');\n} else if (payload.status === 'running' || payload.status === 'pending') {\n  const id = esc(payload.taskId);\n  send('🚀 <b>探测已启动</b>\\n\\nTask ID: <code>' + id + '</code>\\n\\n/status — 最近一次结果\\n/status <code>' + id + '</code> — 指定任务',\n    '🚀 探测已启动\\n\\nTask ID: ' + payload.taskId + '\\n\\n/status — 最近一次结果\\n/status ' + payload.taskId + ' — 指定任务');\n} else if (payload.status === 'completed' || (payload.success === true && payload.summary)) {\n  buildResult(payload);\n} else if (payload.error || payload.success === false) {\n  const msg = payload.error?.description || payload.message || '未知错误';\n  send('❌ <b>失败</b>\\n' + esc(msg), '❌ 失败: ' + msg);\n} else {\n  const raw = JSON.stringify(payload).slice(0, 300);\n  send('❓ 没有拿到结果\\n<code>' + esc(raw) + '</code>', '❓ 没有拿到结果: ' + raw);\n}\n\n// 点了「直接探测」要回一次 callback，否则按钮一直转圈。\n// 放在最后：它不参与富消息的成败判断。\nif (start.callbackQueryId) {\n  items.push({ json: {\n    kind: 'ack',\n    url: tg + '/answerCallbackQuery',\n    body: { callback_query_id: start.callbackQueryId, text: '已开始' },\n  } });\n}\n\nreturn items;\n\nfunction buildResult(data) {\n  const sm = data.summary || {};\n  const av = data.available || [];\n  const head = '✅ <b>探测完成</b>'\n    + (data.taskId ? ' <code>' + esc(String(data.taskId).slice(0, 8)) + '</code>' : '')\n    + '\\n总计 ' + (sm.totalProbed ?? 0)\n    + '｜可用 ' + (sm.supported ?? 0)\n    + '｜不可用 ' + (sm.unsupported ?? 0)\n    + '｜不确定 ' + (sm.inconclusive ?? 0)\n    + (sm.durationMs ? '\\n耗时 ' + (sm.durationMs / 1000).toFixed(1) + 's' : '');\n\n  if (!av.length) {\n    send(head + '\\n\\n⚠️ 没有可用模型', stripTags(head) + '\\n\\n⚠️ 没有可用模型');\n    return;\n  }\n\n  // 表格：站点 / 模型 / 延迟 / 余额。服务端已按 站点→模型 排好，不再重排。\n  const rows = [['站点', '模型', '延迟', '余额']];\n  av.forEach((m) => {\n    rows.push([\n      m.siteName || '',\n      m.modelName || '',\n      m.latencyMs == null ? '—' : m.latencyMs + 'ms',\n      (m.balance === null || m.balance === undefined) ? '—' : '$' + m.balance,\n    ]);\n  });\n\n  const html = head + '\\n\\n🟢 <b>可用模型 ' + av.length + ' 个</b>\\n'\n    + '<table>' + rows.map((r) => '<tr>' + r.map((c) => '<td>' + esc(c) + '</td>').join('') + '</tr>').join('') + '</table>';\n\n  // 兜底：等宽文本表格，列宽按显示宽度取最大值（中日韩字符占两列）\n  const w = rows[0].map((_, i) => Math.max(...rows.map((r) => displayWidth(r[i]))));\n  const pad = (s, n) => s + ' '.repeat(Math.max(0, n - displayWidth(s)));\n  const pre = rows.map((r) => r.map((c, i) => pad(c, w[i])).join('  ').replace(/\\s+$/, '')).join('\\n');\n\n  send(html, stripTags(head) + '\\n\\n可用模型 ' + av.length + ' 个\\n<pre>' + pre + '</pre>');\n}\n\nfunction displayWidth(s) {\n  let n = 0;\n  for (const ch of String(s)) {\n    const c = ch.codePointAt(0);\n    n += (c >= 0x1100 && (c <= 0x115f || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3)\n      || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60)\n      || (c >= 0xffe0 && c <= 0xffe6))) ? 2 : 1;\n  }\n  return n;\n}\n\nfunction stripTags(s) {\n  return String(s).replace(/<[^>]+>/g, '');\n}"
+      },
+      "id": "format",
+      "name": "格式化结果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "send-rich",
+      "name": "发送富消息",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1980,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 富消息没发出去 → 用等宽文本兜底重发，结果不能丢。\n//\n// 判断放在这里、而不是在 HTTP 之后用 IF 节点：HTTP Request 的输出会**替换**\n// 输入，所以它之后 $json 里已经没有 kind 了，IF 判断恒为假、兜底每次都触发\n// ——这正是「直接探测返回两条内容相似的消息」的原因。\n//\n// $input.first() 是本节点收到的、来自「格式化结果」的 item（还没被 HTTP 覆盖）。\nconst rich = $input.first().json || {};\nif (rich.kind !== 'rich') return [];\n\nconst sent = $('发送富消息').first().json || {};\nif (sent.ok === true) return [];\n\nreturn [{ json: {\n  url: $('预处理').first().json.tgBase + '/sendMessage',\n  body: {\n    chat_id: $('预处理').first().json.chatId,\n    text: rich.fallback || '（没有可发送的内容）',\n    parse_mode: 'HTML',\n  },\n} }];"
+      },
+      "id": "prepare-fallback",
+      "name": "准备兜底文本",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.url }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "send-fallback",
+      "name": "发送兜底文本",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        2420,
+        520
+      ]
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "预处理",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "预处理": {
+      "main": [
+        [
+          {
+            "node": "动作路由",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "动作路由": {
+      "main": [
+        [
+          {
+            "node": "缓存判断",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "渲染键盘",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "探测前置检查",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "查询任务状态",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "准备按钮回应",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "准备文本回复",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "缓存判断": {
+      "main": [
+        [
+          {
+            "node": "要调接口吗",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "要调接口吗": {
+      "main": [
+        [
+          {
+            "node": "获取站点列表",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "渲染键盘",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "获取站点列表": {
+      "main": [
+        [
+          {
+            "node": "缓存站点列表",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "缓存站点列表": {
+      "main": [
+        [
+          {
+            "node": "渲染键盘",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "渲染键盘": {
+      "main": [
+        [
+          {
+            "node": "调用Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备按钮回应": {
+      "main": [
+        [
+          {
+            "node": "调用Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备文本回复": {
+      "main": [
+        [
+          {
+            "node": "调用Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "探测前置检查": {
+      "main": [
+        [
+          {
+            "node": "查询是否在跑",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询是否在跑": {
+      "main": [
+        [
+          {
+            "node": "决定是否探测",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "决定是否探测": {
+      "main": [
+        [
+          {
+            "node": "是否发起探测",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "是否发起探测": {
+      "main": [
+        [
+          {
+            "node": "发起探测",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "格式化结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "发起探测": {
+      "main": [
+        [
+          {
+            "node": "格式化结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "查询任务状态": {
+      "main": [
+        [
+          {
+            "node": "格式化结果",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "格式化结果": {
+      "main": [
+        [
+          {
+            "node": "发送富消息",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "发送富消息": {
+      "main": [
+        [
+          {
+            "node": "准备兜底文本",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "准备兜底文本": {
+      "main": [
+        [
+          {
+            "node": "发送兜底文本",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
