@@ -161,10 +161,13 @@ describe('modelProbeConfigService', () => {
     });
 
     it('clamps both concurrency axes and the timeout into their bounds', () => {
-      // Site axis: 1..10.
+      // Site axis: 1..50. The ceiling is high on purpose — a real account set
+      // wants every site in flight at once, and the axis is per-site, so the
+      // bound is a typo guard rather than a rate limit.
       expect(service.normalizeModelProbeConfig({ siteConcurrency: 0 }).siteConcurrency).toBe(1);
       expect(service.normalizeModelProbeConfig({ siteConcurrency: -5 }).siteConcurrency).toBe(1);
-      expect(service.normalizeModelProbeConfig({ siteConcurrency: 99 }).siteConcurrency).toBe(10);
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: 99 }).siteConcurrency).toBe(50);
+      expect(service.normalizeModelProbeConfig({ siteConcurrency: 30 }).siteConcurrency).toBe(30);
       expect(service.normalizeModelProbeConfig({ siteConcurrency: 3.7 }).siteConcurrency).toBe(3);
       expect(service.normalizeModelProbeConfig({ siteConcurrency: 'x' }).siteConcurrency).toBe(5);
 

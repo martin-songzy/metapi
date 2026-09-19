@@ -62,6 +62,26 @@ describe('parseModelProbeConfigPayload', () => {
     expect(result.success).toBe(true);
   });
 
+  /**
+   * The site ceiling must match the config service's clamp exactly. They are
+   * separate literals (see the maxTokens note above for why), and a mismatch is
+   * not a cosmetic bug: the route would accept a number the service then clamps
+   * back down, so the UI would show a value the operator never actually saved.
+   */
+  // 15s timeout: importing the config service transitively initializes the
+  // database layer, which under parallel-suite load can exceed the 5s default.
+  it('bounds site concurrency to the same range the config service clamps to', { timeout: 15_000 }, async () => {
+    expect(parseModelProbeConfigPayload({ siteConcurrency: 1 }).success).toBe(true);
+    expect(parseModelProbeConfigPayload({ siteConcurrency: 50 }).success).toBe(true);
+    for (const bad of [0, -5, 51, 12.5, '30']) {
+      expect(parseModelProbeConfigPayload({ siteConcurrency: bad }).success).toBe(false);
+    }
+
+    const configService = await import('../services/modelProbeConfigService.js');
+    expect(configService.MODEL_PROBE_MIN_SITE_CONCURRENCY).toBe(1);
+    expect(configService.MODEL_PROBE_MAX_SITE_CONCURRENCY).toBe(50);
+  });
+
   it('caps list sizes and per-entry lengths', () => {
     const tooManyPrompts = parseModelProbeConfigPayload({
       prompts: Array.from({ length: 51 }, (_unused, index) => `prompt ${index}`),

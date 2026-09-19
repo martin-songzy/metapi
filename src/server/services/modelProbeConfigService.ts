@@ -59,13 +59,17 @@ export const MODEL_PROBE_CONFIG_SETTING_KEY = 'model_probe_config_v1';
  * far better than a burst against their own channel pool for one group.
  *
  * Worst-case in-flight requests are `siteConcurrency × modelConcurrency`
- * (currently ≤ 10 × 8 = 80), and every one spends real quota — the UI hint says
+ * (currently ≤ 50 × 8 = 400), and every one spends real quota — the UI hint says
  * so. Legacy stored configs carry the old single `concurrency`; normalize maps it
  * to `modelConcurrency`, which never increases the old burst rate (old flat N ≥
  * new per-site N), while sites pick up the new default of 5.
+ *
+ * The site ceiling must stay ≥ the contract's (`probeSiteConcurrencySchema` in
+ * `contracts/modelProbePayloads.ts`): a UI value the route rejects is a setting
+ * the operator can type but never save. A test pins the two equal.
  */
 export const MODEL_PROBE_MIN_SITE_CONCURRENCY = 1;
-export const MODEL_PROBE_MAX_SITE_CONCURRENCY = 20;
+export const MODEL_PROBE_MAX_SITE_CONCURRENCY = 50;
 export const MODEL_PROBE_DEFAULT_SITE_CONCURRENCY = 5;
 export const MODEL_PROBE_MIN_MODEL_CONCURRENCY = 1;
 export const MODEL_PROBE_MAX_MODEL_CONCURRENCY = 8;

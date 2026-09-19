@@ -19,7 +19,11 @@ export const MAX_PROBE_USER_AGENT_LENGTH = 512;
 // Caps mirror the config-service constants; duplicated as literals because that
 // module imports the database and this one must stay importable without it. A
 // test pins the pairs equal.
-const probeSiteConcurrencySchema = z.number().int().min(1).max(10);
+// Site fan-out is bounded by the operator's own tolerance for parallel paid
+// requests, not by the transport: relays handle different-site traffic well, and
+// a real account set (this deployment has ~20 sites) wants them all in flight at
+// once. The ceiling exists only to catch a typo like 5000.
+const probeSiteConcurrencySchema = z.number().int().min(1).max(50);
 const probeModelConcurrencySchema = z.number().int().min(1).max(8);
 const probeTimeoutSchema = z.number().int().min(3000).max(60000);
 // Caps mirror `MODEL_PROBE_MIN/MAX_MAX_TOKENS` in the config service. Duplicated
