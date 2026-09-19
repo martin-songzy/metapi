@@ -1,5 +1,6 @@
-import { getBackgroundTask } from './backgroundTaskService.js';
+import { getBackgroundTask, listBackgroundTasks, type BackgroundTask } from './backgroundTaskService.js';
 import {
+  ACTIVE_MODEL_PROBE_TASK_TYPE as PROBE_TASK_TYPE,
   listActiveModelProbeResults,
   previewActiveModelProbe,
   queueActiveModelProbe,
@@ -80,6 +81,8 @@ export type RemoteProbeRunResult = {
 
 export type RemoteProbeStatusResult = {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  /** The task this describes — filled in even when the caller passed no id. */
+  taskId?: string;
   progress?: {
     current: number;
     total: number;
@@ -151,13 +154,18 @@ function getTaskScope(taskId: string): number[] | undefined {
 }
 
 /**
- * Fetch every result row for a scope, bypassing the page limit.
+ * Page through every result row for a scope, bypassing the page limit.
  *
  * `listActiveModelProbeResults` defaults to a 100-row page because it feeds a
  * paginated UI. The remote API reports on a WHOLE sweep, so the totals and the
  * available-model list would both be silently truncated for any real account
  * set. Paging through with `offset` is equivalent and keeps the shared query
  * function's contract (limit ≤ MAX_RESULTS_LIMIT) intact for its UI callers.
+ *
+ * The sort is fixed here (site, then model) rather than inherited from the UI's
+ * "fastest first" default: the remote API answers "what can I use", which reads
+ * as a directory, not a leaderboard. Callers must NOT re-sort by latency after
+ * this — doing so would only reorder within a page and interleave sites.
  */
 async function listAllResultsForScope(siteIds?: number[]): Promise<ModelProbeResultView[]> {
   const items: ModelProbeResultView[] = [];
@@ -166,8 +174,8 @@ async function listAllResultsForScope(siteIds?: number[]): Promise<ModelProbeRes
   while (true) {
     const page = await listActiveModelProbeResults({
       ...(siteIds && siteIds.length > 0 ? { siteIds } : {}),
-      sortBy: 'checkedAt',
-      order: 'desc',
+      sortBy: 'site',
+      order: 'asc',
       limit: pageSize,
       offset,
     });
@@ -176,6 +184,20 @@ async function listAllResultsForScope(siteIds?: number[]): Promise<ModelProbeRes
     offset += page.items.length;
   }
   return items;
+}
+
+/**
+ * Sort a scope's rows by site name, then model name.
+ *
+ * `sortBy: 'site'` already orders this way at the SQL level, but nothing in the
+ * query type promises model-name order within a site (the ORDER BY tail is the
+ * row id). Re-sorting in memory makes the contract explicit and survives a
+ * future change to the shared query's tiebreakers.
+ */
+function sortBySiteThenModel(items: ModelProbeResultView[]): ModelProbeResultView[] {
+  return [...items].sort((a, b) => (
+    a.siteName.localeCompare(b.siteName) || a.modelName.localeCompare(b.modelName)
+  ));
 }
 
 function buildScopeSummary(items: ModelProbeResultView[], durationMs?: number) {
@@ -239,7 +261,7 @@ export async function runRemoteProbe(input: RemoteProbeRunInput): Promise<Remote
         status: 'completed',
         taskId: task.id,
         summary: buildScopeSummary(items, durationMs),
-        available: filterAvailableResults(items).map(toRemoteProbeResult),
+        available: sortBySiteThenModel(filterAvailableResults(items)).map(toRemoteProbeResult),
       };
     }
 
@@ -259,32 +281,70 @@ export async function runRemoteProbe(input: RemoteProbeRunInput): Promise<Remote
 }
 
 /**
- * Get status of a running or completed probe task.
+ * Get status of a probe task.
+ *
+ * `taskId` is optional: with no id the most recently queued sweep is described.
+ * The Telegram bot uses that so `/status` on its own answers "how did my last
+ * probe go?" — recalling a uuid is not something a chat user should have to do.
+ * The lookup reuses the same scope registry, so a completed run reports the same
+ * counters the original `/run` did.
  */
-export async function getRemoteProbeStatus(taskId: string): Promise<RemoteProbeStatusResult> {
-  const task = getBackgroundTask(taskId);
+export async function getRemoteProbeStatus(taskId?: string): Promise<RemoteProbeStatusResult> {
+  const trimmed = String(taskId || '').trim();
+  const task = trimmed
+    ? getBackgroundTask(trimmed)
+    : findLatestProbeTask();
+
   if (!task) {
-    throw new Error('任务不存在或已过期');
+    throw new Error(trimmed ? '任务不存在或已过期' : '还没有执行过探测任务');
   }
 
   if (task.status === 'succeeded') {
-    const scopeSiteIds = getTaskScope(taskId);
+    const scopeSiteIds = getTaskScope(task.id);
     const items = await listAllResultsForScope(scopeSiteIds);
 
     return {
       status: 'completed',
+      taskId: task.id,
       summary: buildScopeSummary(items),
-      available: filterAvailableResults(items).map(toRemoteProbeResult),
+      available: sortBySiteThenModel(filterAvailableResults(items)).map(toRemoteProbeResult),
     };
   }
 
   return {
     status: task.status as any,
+    taskId: task.id,
     progress: {
       current: 0, // TODO: extract from task logs if needed
       total: 0,
     },
   };
+}
+
+/**
+ * Newest queued probe sweep, running or not.
+ *
+ * Filters on the task `type` rather than taking `listBackgroundTasks()[0]`
+ * blindly: that list is shared with the update center and other background work,
+ * so an unrelated task would otherwise be reported as "the last probe". Ties
+ * break on `createdAt`, which the shared lister already sorts newest-first.
+ */
+function findLatestProbeTask(): BackgroundTask | null {
+  const [latest] = listBackgroundTasks(200).filter((task) => task.type === PROBE_TASK_TYPE);
+  return latest ?? null;
+}
+
+/**
+ * The sweep in flight right now, if any.
+ *
+ * Only `pending` / `running` count: a `succeeded` task is history, and callers
+ * use this to decide whether a new sweep would join an existing run or start
+ * spending quota of its own.
+ */
+export function findActiveProbeTask(): BackgroundTask | null {
+  return listBackgroundTasks(200).find(
+    (task) => task.type === PROBE_TASK_TYPE && (task.status === 'pending' || task.status === 'running'),
+  ) ?? null;
 }
 
 function filterAvailableResults(items: ModelProbeResultView[]): ModelProbeResultView[] {

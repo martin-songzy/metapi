@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { db, schema } from '../../db/index.js';
 import {
+  findActiveProbeTask,
   getRemoteProbeStatus,
   getRemoteProbeTargets,
   runRemoteProbe,
@@ -16,7 +17,9 @@ import {
  * Thin REST adapter over `remoteProbeService`, providing:
  * - GET /api/remote-probe/targets - lightweight site/model list
  * - POST /api/remote-probe/run - trigger probe with auto wait for small sweeps
- * - GET /api/remote-probe/status/:taskId - poll running task
+ * - GET /api/remote-probe/status/:taskId - poll a task, or the latest sweep
+ * - GET /api/remote-probe/status - same, for the most recent sweep
+ * - GET /api/remote-probe/active - whether a sweep is running right now
  *
  * All endpoints require AUTH_TOKEN or PROXY_TOKEN authorization.
  * Rate limiting is applied to prevent abuse.
@@ -149,35 +152,68 @@ export async function remoteProbeRoutes(app: FastifyInstance) {
   /**
    * GET /api/remote-probe/status/:taskId
    *
-   * Polls the status of a running probe task.
+   * Polls the status of a probe task, or of the most recent sweep when no id is
+   * given (the Telegram bot's bare `/status`).
    *
    * Returns:
    * - status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+   * - taskId: echoed back, and resolved for the no-id form
    * - progress: current/total (if available)
    * - summary: probe statistics (when completed)
-   * - available: list of supported models (when completed)
+   * - available: list of supported models, sorted by site then model
    */
-  app.get<{ Params: { taskId: string } }>(
+  app.get<{ Params: { taskId?: string } }>(
     '/api/remote-probe/status/:taskId',
     async (request, reply) => {
-      const { taskId } = request.params;
-      if (!taskId || !taskId.trim()) {
-        return sendBadRequest(reply, 'Invalid task ID');
-      }
-
-      try {
-        const status = await getRemoteProbeStatus(taskId);
-        return {
-          success: true,
-          taskId,
-          ...status,
-        };
-      } catch (error) {
-        return reply.code(404).send({
-          success: false,
-          message: error instanceof Error ? error.message : '任务不存在',
-        });
-      }
+      return describeStatus(request.params.taskId, reply);
     },
   );
+
+  /**
+   * GET /api/remote-probe/status
+   *
+   * Same as above with no id: describes the most recent sweep. Registered as its
+   * own route because Fastify treats `/status` and `/status/:taskId` as distinct
+   * paths rather than one optional segment.
+   */
+  app.get('/api/remote-probe/status', async (request, reply) => {
+    return describeStatus(undefined, reply);
+  });
+
+  /**
+   * GET /api/remote-probe/active
+   *
+   * Whether a sweep is in flight right now, and its task id.
+   *
+   * Exists so the Telegram bot can answer a button press without discovering a
+   * running sweep by attempting a probe and reading the dedupe result — the run
+   * endpoint would otherwise queue a real sweep as a side effect of a status
+   * question, which costs money.
+   */
+  app.get('/api/remote-probe/active', async () => {
+    const active = findActiveProbeTask();
+    return {
+      success: true,
+      running: active !== null,
+      ...(active ? { taskId: active.id, title: active.title } : {}),
+    };
+  });
+}
+
+async function describeStatus(taskId: string | undefined, reply: FastifyReply) {
+  const trimmed = String(taskId || '').trim();
+
+  try {
+    const status = await getRemoteProbeStatus(trimmed || undefined);
+    return {
+      success: true,
+      taskId: status.taskId ?? trimmed,
+      ...status,
+    };
+  } catch (error) {
+    return reply.code(404).send({
+      success: false,
+      message: error instanceof Error ? error.message : '任务不存在',
+    });
+  }
 }

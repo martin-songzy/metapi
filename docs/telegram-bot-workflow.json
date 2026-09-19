@@ -3,590 +3,317 @@
   "nodes": [
     {
       "parameters": {
-        "updates": [
-          "message"
-        ],
+        "updates": ["message", "callback_query"],
         "additionalFields": {}
       },
-      "id": "telegram-trigger",
+      "id": "trigger",
       "name": "Telegram Trigger",
       "type": "n8n-nodes-base.telegramTrigger",
       "typeVersion": 1.2,
-      "position": [
-        240,
-        300
-      ],
-      "webhookId": "probe-bot-webhook",
+      "position": [0, 300],
+      "webhookId": "metapi-probe",
       "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
+        "telegramApi": { "id": "huDHcNDuJpoSxnO1", "name": "MM_OClaw_bot" }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// === 配置 ===\nconst ALLOWED_USERS = [493325033];\nconst METAPI = 'https://metapi-krj9.onrender.com';\n\n// 选中状态存这里（工作流级别，进程内存；重启后清空，这是有意的：\n// 一个聊天里残留的勾选比重新点一次更糟）\nconst store = $getWorkflowStaticData('global');\nif (!store.selection) store.selection = {};\n\nconst ev = $input.first().json;\nconst cb = ev.callback_query;\n\n// ==================== 分支 A：按钮点击 ====================\nif (cb) {\n  const chatId = cb.message?.chat?.id;\n  const userId = Number(cb.from?.id || 0);\n  const messageId = cb.message?.message_id;\n  const data = String(cb.data || '');\n\n  if (!ALLOWED_USERS.includes(userId)) {\n    return [{ json: { action: 'answer', callbackQueryId: cb.id, text: '❌ 未授权', chatId } }];\n  }\n\n  const key = String(chatId);\n  const selected = store.selection[key] || [];\n  let ids = selected.slice();\n\n  // t:<id> 切换选中；go 开始探测；clr 清空；noop 是只有标题的按钮，点它什么都不做\n  if (data === 'noop') {\n    return [{ json: { action: 'answer', callbackQueryId: cb.id, text: '↑ 点具体站点来勾选', chatId } }];\n  }\n\n  if (data === 'clr') {\n    ids = [];\n    store.selection[key] = ids;\n    return [{ json: { action: 'render', callbackQueryId: cb.id, chatId, messageId, selectedIds: ids, notice: '已清空选择' } }];\n  }\n\n  if (data === 'go') {\n    if (ids.length === 0) {\n      return [{ json: { action: 'answer', callbackQueryId: cb.id, text: '⚠️ 请先勾选至少一个站点', chatId } }];\n    }\n    return [{ json: { action: 'probe', callbackQueryId: cb.id, chatId, messageId, siteIds: ids, selectedIds: ids } }];\n  }\n\n  if (data.startsWith('t:')) {\n    const id = Number(data.slice(2));\n    if (!Number.isInteger(id) || id <= 0) {\n      return [{ json: { action: 'answer', callbackQueryId: cb.id, text: '无效站点', chatId } }];\n    }\n    ids = ids.includes(id) ? ids.filter((x) => x !== id) : ids.concat(id);\n    store.selection[key] = ids;\n    return [{ json: { action: 'render', callbackQueryId: cb.id, chatId, messageId, selectedIds: ids } }];\n  }\n\n  return [{ json: { action: 'answer', callbackQueryId: cb.id, text: '未知操作', chatId } }];\n}\n\n// ==================== 分支 B：文字命令 ====================\nconst msg = ev.message || {};\nconst chatId = msg.chat?.id;\nconst userId = Number(msg.from?.id || 0);\nconst text = (msg.text || '').trim();\nconst parts = text.split(/\\s+/);\nconst cmd = (parts[0] || '').replace(/^\\//, '').toLowerCase();\nconst args = parts.slice(1).join(' ');\n\nconst reply = (t) => [{ json: { action: 'send', chatId, text: t } }];\n\nif (!ALLOWED_USERS.includes(userId)) {\n  return reply('❌ 未授权访问\\n\\n此机器人仅供管理员使用。\\n您的 User ID: ' + userId);\n}\n\nif (!cmd || cmd === 'help' || cmd === 'start') {\n  return reply('🤖 MetAPI 探测机器人\\n\\n/targets - 选择要探测的站点（按钮勾选）\\n/probe all - 探测所有站点\\n/probe 180001,180002 - 探测指定站点\\n/status - 查看最近一次探测结果\\n/help - 显示帮助\\n\\n⚠️ 探测会消耗真实配额');\n}\n\nif (cmd === 'targets') {\n  const ids = store.selection[String(chatId)] || [];\n  return [{ json: { action: 'render', chatId, messageId: null, selectedIds: ids, notice: '点站点勾选/取消，然后点「开始探测」' } }];\n}\n\nif (cmd === 'probe') {\n  const raw = args.trim().toLowerCase();\n  const siteIds = raw === 'all' || raw === '' ? 'all' : raw.split(/[^0-9]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n > 0);\n  if (Array.isArray(siteIds) && siteIds.length === 0) {\n    return reply('❌ 站点ID格式不对\\n\\n用法: /probe all 或 /probe 180001,180002');\n  }\n  return [{ json: { action: 'probe', chatId, messageId: null, siteIds, selectedIds: null } }];\n}\n\nif (cmd === 'status') {\n  // 不带参数 = 查最近一次；带参数 = 查指定任务\n  const url = args.trim() ? METAPI + '/api/remote-probe/status/' + encodeURIComponent(args.trim()) : METAPI + '/api/remote-probe/status';\n  return [{ json: { action: 'api', chatId, cmd: 'status', method: 'GET', url, body: null } }];\n}\n\nreturn reply('❓ 未知命令: /' + cmd + '\\n\\n发送 /help 查看可用命令');"
+      },
+      "id": "preprocess",
+      "name": "预处理",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-render",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "render",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "render"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-probe",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "probe",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "probe"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-api",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "api",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "api"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [
+                  {
+                    "id": "r-answer",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "answer",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "answer"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": 4 }
+      },
+      "id": "router",
+      "name": "动作路由",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 拉站点列表 + 当前选中状态，拼成 inline keyboard\nconst ctx = $('预处理').first().json;\nconst data = $input.first().json || {};\n\nconst chatId = ctx.chatId;\nconst messageId = ctx.messageId || null;\nconst selected = (ctx.selectedIds || []).slice();\n\nif (data.error || data.success === false) {\n  return [{ json: { chatId, messageId, callbackQueryId: ctx.callbackQueryId || null, text: '❌ 获取站点失败: ' + (data.error?.description || data.message || '未知错误'), replyMarkup: null } }];\n}\n\nconst sites = data.sites || [];\nif (!sites.length) {\n  return [{ json: { chatId, messageId, callbackQueryId: ctx.callbackQueryId || null, text: '⚠️ 没有可用站点', replyMarkup: null } }];\n}\n\n// Telegram 按钮文字上限很宽，但一行两个更好点。\n// data 限 64 字节，所以站点ID用 t:<id>，标题按钮用 noop。\nconst buttons = [];\nfor (let i = 0; i < sites.length; i += 2) {\n  const row = [];\n  for (const s of sites.slice(i, i + 2)) {\n    const on = selected.includes(s.siteId);\n    // 勾选标记放在文字里，因为 Telegram 按钮不支持真正的勾选框\n    row.push({ text: (on ? '✅ ' : '▫️ ') + s.siteName + ' (' + s.modelCount + ')', callback_data: 't:' + s.siteId });\n  }\n  buttons.push(row);\n}\n\nconst totalModels = sites.reduce((sum, s) => sum + (s.modelCount || 0), 0);\nconst selectedModels = sites.filter((s) => selected.includes(s.siteId)).reduce((sum, s) => sum + (s.modelCount || 0), 0);\n\nlet text = (ctx.notice ? ctx.notice + '\\n\\n' : '') + '📋 共 ' + sites.length + ' 个站点 / ' + totalModels + ' 个模型\\n';\nif (selected.length) {\n  text += '已选 ' + selected.length + ' 个站点（约 ' + selectedModels + ' 个模型）\\n';\n}\n\nbuttons.push([\n  { text: '🚀 开始探测 (' + selected.length + ')', callback_data: 'go' },\n  { text: '🧹 清空', callback_data: 'clr' }\n]);\n\nreturn [{ json: { chatId, messageId, callbackQueryId: ctx.callbackQueryId || null, text, replyMarkup: { inline_keyboard: buttons } } }];"
+      },
+      "id": "build-keyboard",
+      "name": "拼装站点按钮",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "={{ $json.replyMarkup ? JSON.stringify($json.replyMarkup) : '' }}",
+        "additionalFields": { "appendAttribution": false }
+      },
+      "id": "send-keyboard",
+      "name": "发送站点选择",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [880, 100],
+      "credentials": {
+        "telegramApi": { "id": "huDHcNDuJpoSxnO1", "name": "MM_OClaw_bot" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// /probe 或 点了「开始探测」：先看有没有在跑，避免重复计费\nconst ctx = $('预处理').first().json;\n\nlet siteIds;\nif (ctx.siteIds === 'all') {\n  siteIds = 'all';\n} else if (Array.isArray(ctx.siteIds)) {\n  siteIds = ctx.siteIds;\n} else {\n  siteIds = 'all';\n}\n\nreturn [{ json: { chatId: ctx.chatId, messageId: ctx.messageId || null, callbackQueryId: ctx.callbackQueryId || null, siteIds, method: 'GET', url: 'https://metapi-krj9.onrender.com/api/remote-probe/active', body: null, stage: 'check' } }];"
+      },
+      "id": "probe-init",
+      "name": "探测前置检查",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "method": "={{ $json.method }}",
+        "url": "={{ $json.url }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body || {}) }}",
+        "options": {
+          "timeout": 300000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "call-api",
+      "name": "调用MetAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [880, 300],
+      "credentials": {
+        "httpHeaderAuth": { "id": "2nZAjtpyyj8dyBkH", "name": "MetAPI Auth" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 检查 /active 的返回：在跑就劝退，没跑就真的发起探测\nconst ctx = $('探测前置检查').first().json;\nconst data = $input.first().json || {};\n\nif (data.error || data.success === false) {\n  return [{ json: { chatId: ctx.chatId, messageId: ctx.messageId, callbackQueryId: ctx.callbackQueryId, method: 'POST', url: 'https://metapi-krj9.onrender.com/api/remote-probe/run', body: { siteIds: ctx.siteIds, waitForCompletion: false, timeout: 300000 }, stage: 'run' } }];\n}\n\nif (data.running) {\n  // 已经有一次扫描在跑。后台任务会拒绝并发（同一范围复用旧任务），\n  // 所以这里直接返回运行中，不要让用户以为新的一次开始了。\n  return [{ json: { chatId: ctx.chatId, messageId: ctx.messageId, callbackQueryId: ctx.callbackQueryId, stage: 'busy', text: '⏳ 已有一次探测在进行中\\n\\n用 /status 查看进度' } }];\n}\n\nreturn [{ json: { chatId: ctx.chatId, messageId: ctx.messageId, callbackQueryId: ctx.callbackQueryId, method: 'POST', url: 'https://metapi-krj9.onrender.com/api/remote-probe/run', body: { siteIds: ctx.siteIds, waitForCompletion: false, timeout: 300000 }, stage: 'run' } }];"
+      },
+      "id": "probe-decide",
+      "name": "决定是否探测",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 300]
     },
     {
       "parameters": {
         "conditions": {
-          "string": [
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+          "conditions": [
             {
-              "value1": "={{ $json.message.from.id }}",
-              "value2": "493325033"
+              "id": "is-run",
+              "leftValue": "={{ $json.stage }}",
+              "rightValue": "run",
+              "operator": { "type": "string", "operation": "equals" }
             }
-          ]
-        }
-      },
-      "id": "auth-check",
-      "name": "权限检查",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 1,
-      "position": [
-        460,
-        300
-      ]
-    },
-    {
-      "parameters": {
-        "chatId": "={{ $json.message.chat.id }}",
-        "text": "❌ 未授权访问\n\n此机器人仅供管理员使用。",
-        "additionalFields": {}
-      },
-      "id": "unauthorized-reply",
-      "name": "未授权回复",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        680,
-        420
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "values": {
-          "string": [
-            {
-              "name": "command",
-              "value": "={{ $json.message.text.split(' ')[0] }}"
-            },
-            {
-              "name": "args",
-              "value": "={{ $json.message.text.split(' ').slice(1).join(' ') }}"
-            },
-            {
-              "name": "chatId",
-              "value": "={{ $json.message.chat.id }}"
-            }
-          ]
+          ],
+          "combinator": "and"
         },
         "options": {}
       },
-      "id": "extract-command",
-      "name": "提取命令",
-      "type": "n8n-nodes-base.set",
+      "id": "if-run",
+      "name": "是否发起探测",
+      "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [
-        680,
-        180
-      ]
+      "position": [1320, 300]
     },
     {
       "parameters": {
-        "mode": "rules",
-        "rules": {
-          "rules": [
-            {
-              "value1": "={{ $json.command }}",
-              "value2": "/probe"
-            },
-            {
-              "value1": "={{ $json.command }}",
-              "value2": "/targets"
-            },
-            {
-              "value1": "={{ $json.command }}",
-              "value2": "/status"
-            },
-            {
-              "value1": "={{ $json.command }}",
-              "value2": "/start"
-            },
-            {
-              "value1": "={{ $json.command }}",
-              "value2": "/help"
-            }
-          ]
-        },
-        "fallbackOutput": 3
-      },
-      "id": "command-router",
-      "name": "命令路由",
-      "type": "n8n-nodes-base.switch",
-      "typeVersion": 1,
-      "position": [
-        900,
-        180
-      ]
-    },
-    {
-      "parameters": {
-        "chatId": "={{ $json.chatId }}",
-        "text": "⏳ 正在探测，请稍候...",
-        "additionalFields": {}
-      },
-      "id": "probe-start-msg",
-      "name": "探测开始提示",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        1120,
-        80
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
-      }
-    },
-    {
-      "parameters": {
+        "method": "POST",
         "url": "https://metapi-krj9.onrender.com/api/remote-probe/run",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
         "sendBody": true,
-        "bodyParameters": {
-          "parameters": [
-            {
-              "name": "siteIds",
-              "value": "={{ $json.args || 'all' }}"
-            },
-            {
-              "name": "waitForCompletion",
-              "value": true
-            },
-            {
-              "name": "timeout",
-              "value": 300000
-            }
-          ]
-        },
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
         "options": {
-          "timeout": 300000
+          "timeout": 300000,
+          "response": { "response": { "neverError": true } }
         }
       },
-      "id": "probe-run",
-      "name": "调用探测API",
+      "id": "run-probe",
+      "name": "发起探测",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
-      "position": [
-        1340,
-        80
-      ],
+      "position": [1540, 200],
       "credentials": {
-        "httpHeaderAuth": {
-          "id": "2",
-          "name": "MetAPI Auth"
-        }
+        "httpHeaderAuth": { "id": "2nZAjtpyyj8dyBkH", "name": "MetAPI Auth" }
       }
     },
     {
       "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (data.status === 'completed') {\n  const summary = data.summary;\n  const available = data.available || [];\n  \n  let message = `✅ 探测完成\\n\\n`;\n  message += `📊 统计：\\n`;\n  message += `- 总计：${summary.totalProbed} 个\\n`;\n  message += `- 可用：${summary.supported} 个\\n`;\n  message += `- 不可用：${summary.unsupported} 个\\n`;\n  message += `- 不确定：${summary.inconclusive} 个\\n`;\n  message += `- 耗时：${(summary.durationMs / 1000).toFixed(1)}秒\\n\\n`;\n  \n  if (available.length > 0) {\n    message += `🟢 可用模型（前10个）：\\n`;\n    available.slice(0, 10).forEach(item => {\n      const latency = item.latencyMs ? `${item.latencyMs}ms` : 'N/A';\n      const balance = item.balance ? `$${item.balance}` : '';\n      message += `• ${item.siteName} - ${item.modelName}\\n`;\n      message += `  延迟：${latency}  ${balance}\\n`;\n    });\n    \n    if (available.length > 10) {\n      message += `\\n还有 ${available.length - 10} 个可用模型未显示\\n`;\n    }\n  } else {\n    message += `⚠️ 没有找到可用的模型`;\n  }\n  \n  return { chatId, message, status: 'completed' };\n  \n} else if (data.status === 'running') {\n  return { \n    chatId, \n    message: `🔄 探测范围较大，已在后台执行\\n\\n任务ID：${data.taskId}\\n\\n使用以下命令查询进度：\\n/status ${data.taskId}`,\n    status: 'running',\n    taskId: data.taskId\n  };\n  \n} else {\n  return { \n    chatId, \n    message: `❌ 探测失败：${data.message || '未知错误'}`,\n    status: 'failed'\n  };\n}"
+        "jsCode": "// 统一收尾：探测结果 / 状态查询 / 忙碌提示都在这里成文\nconst start = $('预处理').first().json;\nconst chatId = start.chatId;\nconst messageId = start.messageId || null;\nconst callbackQueryId = start.callbackQueryId || null;\n\n// 上游节点可能是 探测前置检查/决定是否探测/发起探测 之一，逐个找\nlet payload = null;\nfor (const name of ['发起探测', '决定是否探测', '探测前置检查']) {\n  try {\n    const item = $(name).first();\n    if (item) { payload = item.json; break; }\n  } catch (e) { /* 该分支没走到 */ }\n}\npayload = payload || {};\n\nconst TELEGRAM_LIMIT = 3800;\nconst out = (text) => {\n  const chunks = [];\n  let rest = text;\n  while (rest.length > TELEGRAM_LIMIT) {\n    let cut = rest.lastIndexOf('\\n', TELEGRAM_LIMIT);\n    if (cut < TELEGRAM_LIMIT / 2) cut = TELEGRAM_LIMIT;\n    chunks.push(rest.slice(0, cut));\n    rest = rest.slice(cut);\n  }\n  chunks.push(rest);\n  return chunks.map((chunk) => ({ json: { chatId, messageId, callbackQueryId, text: chunk, replyMarkup: null } }));\n};\n\n// 忙碌分支\nif (payload.stage === 'busy') {\n  return out(payload.text || '⏳ 已有探测在进行中');\n}\n\n// 探测刚发起\nif (payload.status === 'running' || payload.status === 'pending') {\n  return out('🚀 探测已启动\\n\\nTask ID: ' + payload.taskId + '\\n\\n有两种看法：\\n• /status — 最近一次结果\\n• /status ' + payload.taskId + ' — 指定任务');\n}\n\nif (payload.status === 'completed') {\n  return out(formatCompleted(payload));\n}\n\n// 状态查询返回\nif (payload.success === true && payload.summary) {\n  return out(formatCompleted(payload));\n}\n\nif (payload.error || payload.success === false) {\n  return out('❌ 失败: ' + (payload.error?.description || payload.message || '未知错误'));\n}\n\nreturn out('❓ 没有拿到结果: ' + JSON.stringify(payload).slice(0, 300));\n\nfunction formatCompleted(data) {\n  const sm = data.summary || {};\n  let text = '✅ 探测完成' + (data.taskId ? '（' + String(data.taskId).slice(0, 8) + '）' : '') + '\\n\\n';\n  text += '总计 ' + (sm.totalProbed ?? 0) + '｜可用 ' + (sm.supported ?? 0) + '｜不可用 ' + (sm.unsupported ?? 0) + '｜不确定 ' + (sm.inconclusive ?? 0) + '\\n';\n  if (sm.durationMs) text += '耗时 ' + (sm.durationMs / 1000).toFixed(1) + 's\\n';\n  const av = data.available || [];\n  if (!av.length) return text + '\\n⚠️ 没有可用模型';\n  text += '\\n🟢 可用模型 ' + av.length + ' 个（按站点排序）:\\n';\n  // 服务端已按 站点→模型 排好，这里不再重排，只按站点分组换行\n  let lastSite = null;\n  av.forEach((m) => {\n    if (m.siteName !== lastSite) {\n      text += '\\n【' + m.siteName + '】\\n';\n      lastSite = m.siteName;\n    }\n    text += '  ' + m.modelName + (m.latencyMs ? ' · ' + m.latencyMs + 'ms' : '') + (m.balance !== null && m.balance !== undefined ? ' · $' + m.balance : '') + '\\n';\n  });\n  return text;\n}"
       },
-      "id": "format-probe-result",
-      "name": "格式化探测结果",
+      "id": "format",
+      "name": "格式化结果",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        1560,
-        80
-      ]
+      "position": [1760, 400]
     },
     {
       "parameters": {
-        "chatId": "={{ $json.chatId }}",
-        "text": "={{ $json.message }}",
-        "additionalFields": {}
+        "resource": "callback",
+        "operation": "answerQuery",
+        "queryId": "={{ $json.callbackQueryId }}",
+        "additionalFields": { "text": "={{ $json.answerText || '' }}" }
       },
-      "id": "probe-result-reply",
-      "name": "发送探测结果",
+      "id": "answer-callback",
+      "name": "回应按钮点击",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [
-        1780,
-        80
-      ],
+      "position": [660, 500],
       "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
+        "telegramApi": { "id": "huDHcNDuJpoSxnO1", "name": "MM_OClaw_bot" }
       }
     },
     {
       "parameters": {
-        "url": "https://metapi-krj9.onrender.com/api/remote-probe/targets",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "httpHeaderAuth",
-        "sendQuery": true,
-        "queryParameters": {
-          "parameters": [
-            {
-              "name": "summary",
-              "value": "false"
-            }
-          ]
-        },
-        "options": {}
+        "jsCode": "// 把 answer 分支的文案准备好（Telegram 的 answerCallbackQuery 只接受短文本）\nconst ctx = $('预处理').first().json;\nreturn [{ json: { callbackQueryId: ctx.callbackQueryId || '', answerText: ctx.text || '' } }];"
       },
-      "id": "get-targets",
-      "name": "获取站点列表",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
-      "position": [
-        1120,
-        200
-      ],
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "2",
-          "name": "MetAPI Auth"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (!data.sites || data.sites.length === 0) {\n  return { chatId, message: '⚠️ 没有可用的站点' };\n}\n\nlet message = `📋 可探测站点列表\\n\\n`;\nmessage += `总计：${data.summary.totalSites} 个站点，${data.summary.totalModels} 个模型\\n\\n`;\n\ndata.sites.forEach((site, index) => {\n  message += `${index + 1}. ${site.siteName} (ID: ${site.siteId})\\n`;\n  message += `   平台：${site.platform} | 状态：${site.status}\\n`;\n  message += `   模型数：${site.modelCount}\\n`;\n  \n  if (site.models && site.models.length > 0) {\n    const preview = site.models.slice(0, 3).join(', ');\n    message += `   示例：${preview}`;\n    if (site.models.length > 3) {\n      message += ` 等${site.models.length}个`;\n    }\n    message += `\\n`;\n  }\n  message += `\\n`;\n});\n\nmessage += `\\n💡 使用示例：\\n`;\nmessage += `/probe all - 探测全部站点\\n`;\nmessage += `/probe 1,2,3 - 探测指定站点`;\n\nreturn { chatId, message };"
-      },
-      "id": "format-targets",
-      "name": "格式化站点列表",
+      "id": "answer-prep",
+      "name": "准备按钮回应",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [
-        1340,
-        200
-      ]
+      "position": [660, 620]
     },
     {
       "parameters": {
         "chatId": "={{ $json.chatId }}",
-        "text": "={{ $json.message }}",
-        "additionalFields": {}
+        "text": "={{ $json.text }}",
+        "additionalFields": { "appendAttribution": false }
       },
-      "id": "targets-reply",
-      "name": "发送站点列表",
+      "id": "reply",
+      "name": "发送回复",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [
-        1560,
-        200
-      ],
+      "position": [1980, 400],
       "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "const args = $('提取命令').first().json.args;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (!args || args.trim() === '') {\n  return { chatId, message: '❌ 请提供任务ID\\n\\n用法：/status <taskId>' };\n}\n\nreturn { chatId, taskId: args.trim() };"
-      },
-      "id": "extract-taskid",
-      "name": "提取任务ID",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1120,
-        320
-      ]
-    },
-    {
-      "parameters": {
-        "url": "=https://metapi-krj9.onrender.com/api/remote-probe/status/{{ $json.taskId }}",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "httpHeaderAuth",
-        "options": {}
-      },
-      "id": "get-status",
-      "name": "查询任务状态",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
-      "position": [
-        1340,
-        320
-      ],
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "2",
-          "name": "MetAPI Auth"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "jsCode": "const data = $input.first().json;\nconst chatId = $('提取命令').first().json.chatId;\n\nif (data.status === 'running') {\n  const progress = data.progress || {};\n  return { \n    chatId, \n    message: `🔄 任务执行中\\n\\n进度：${progress.current || 0}/${progress.total || '?'}`\n  };\n  \n} else if (data.status === 'completed') {\n  const summary = data.summary;\n  const available = data.available || [];\n  \n  let message = `✅ 任务已完成\\n\\n`;\n  message += `📊 统计：\\n`;\n  message += `- 总计：${summary.totalProbed} 个\\n`;\n  message += `- 可用：${summary.supported} 个\\n`;\n  message += `- 不可用：${summary.unsupported} 个\\n`;\n  message += `- 不确定：${summary.inconclusive} 个\\n\\n`;\n  \n  if (available.length > 0) {\n    message += `🟢 可用模型（前5个）：\\n`;\n    available.slice(0, 5).forEach(item => {\n      message += `• ${item.siteName} - ${item.modelName}\\n`;\n    });\n    if (available.length > 5) {\n      message += `\\n还有 ${available.length - 5} 个可用模型\\n`;\n    }\n  }\n  \n  return { chatId, message };\n  \n} else {\n  return { \n    chatId, \n    message: `❌ 任务失败或不存在`\n  };\n}"
-      },
-      "id": "format-status",
-      "name": "格式化状态",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        1560,
-        320
-      ]
-    },
-    {
-      "parameters": {
-        "chatId": "={{ $json.chatId }}",
-        "text": "={{ $json.message }}",
-        "additionalFields": {}
-      },
-      "id": "status-reply",
-      "name": "发送状态",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        1780,
-        320
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "chatId": "={{ $json.chatId }}",
-        "text": "👋 欢迎使用 MetAPI 探测机器人\\n\\n🤖 可用命令：\\n\\n/probe all - 探测所有站点\\n/probe 1,2,3 - 探测指定站点（用逗号分隔ID）\\n/targets - 查看可探测的站点列表\\n/status <taskId> - 查询异步任务状态\\n/help - 显示此帮助信息\\n\\n💡 提示：\\n- 探测会消耗真实配额，请谨慎使用\\n- 小范围探测会自动等待完成\\n- 大范围探测会返回任务ID，需手动查询",
-        "additionalFields": {}
-      },
-      "id": "help-reply",
-      "name": "帮助信息",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        1120,
-        440
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "chatId": "={{ $json.chatId }}",
-        "text": "❓ 未知命令\\n\\n请使用 /help 查看可用命令",
-        "additionalFields": {}
-      },
-      "id": "unknown-reply",
-      "name": "未知命令回复",
-      "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1.2,
-      "position": [
-        1120,
-        560
-      ],
-      "credentials": {
-        "telegramApi": {
-          "id": "1",
-          "name": "MM_OClaw_bot"
-        }
+        "telegramApi": { "id": "huDHcNDuJpoSxnO1", "name": "MM_OClaw_bot" }
       }
     }
   ],
   "connections": {
     "Telegram Trigger": {
+      "main": [[{ "node": "预处理", "type": "main", "index": 0 }]]
+    },
+    "预处理": {
+      "main": [[{ "node": "动作路由", "type": "main", "index": 0 }]]
+    },
+    "动作路由": {
       "main": [
-        [
-          {
-            "node": "权限检查",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "拼装站点按钮", "type": "main", "index": 0 }],
+        [{ "node": "探测前置检查", "type": "main", "index": 0 }],
+        [{ "node": "调用MetAPI", "type": "main", "index": 0 }],
+        [{ "node": "准备按钮回应", "type": "main", "index": 0 }]
       ]
     },
-    "权限检查": {
+    "拼装站点按钮": {
+      "main": [[{ "node": "发送站点选择", "type": "main", "index": 0 }]]
+    },
+    "探测前置检查": {
+      "main": [[{ "node": "调用MetAPI", "type": "main", "index": 0 }]]
+    },
+    "调用MetAPI": {
+      "main": [[{ "node": "决定是否探测", "type": "main", "index": 0 }]]
+    },
+    "决定是否探测": {
+      "main": [[{ "node": "是否发起探测", "type": "main", "index": 0 }]]
+    },
+    "是否发起探测": {
       "main": [
-        [
-          {
-            "node": "提取命令",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "未授权回复",
-            "type": "main",
-            "index": 0
-          }
-        ]
+        [{ "node": "发起探测", "type": "main", "index": 0 }],
+        [{ "node": "格式化结果", "type": "main", "index": 0 }]
       ]
     },
-    "提取命令": {
-      "main": [
-        [
-          {
-            "node": "命令路由",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "发起探测": {
+      "main": [[{ "node": "格式化结果", "type": "main", "index": 0 }]]
     },
-    "命令路由": {
-      "main": [
-        [
-          {
-            "node": "探测开始提示",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "获取站点列表",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "提取任务ID",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "帮助信息",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "帮助信息",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "未知命令回复",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "格式化结果": {
+      "main": [[{ "node": "发送回复", "type": "main", "index": 0 }]]
     },
-    "探测开始提示": {
-      "main": [
-        [
-          {
-            "node": "调用探测API",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "调用探测API": {
-      "main": [
-        [
-          {
-            "node": "格式化探测结果",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "格式化探测结果": {
-      "main": [
-        [
-          {
-            "node": "发送探测结果",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "获取站点列表": {
-      "main": [
-        [
-          {
-            "node": "格式化站点列表",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "格式化站点列表": {
-      "main": [
-        [
-          {
-            "node": "发送站点列表",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "提取任务ID": {
-      "main": [
-        [
-          {
-            "node": "查询任务状态",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "查询任务状态": {
-      "main": [
-        [
-          {
-            "node": "格式化状态",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "格式化状态": {
-      "main": [
-        [
-          {
-            "node": "发送状态",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
+    "准备按钮回应": {
+      "main": [[{ "node": "回应按钮点击", "type": "main", "index": 0 }]]
     }
   },
   "settings": {
     "executionOrder": "v1"
-  },
-  "staticData": null,
-  "tags": [],
-  "triggerCount": 1,
-  "updatedAt": "2026-09-18T00:00:00.000Z",
-  "versionId": "1"
+  }
 }
