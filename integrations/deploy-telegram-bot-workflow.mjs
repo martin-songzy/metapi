@@ -8,7 +8,15 @@ const list = await (await fetch(cfg.url + '/api/v1/workflows?limit=100', { heade
 const target = list.data.find((w) => w.name === 'MetAPI Probe Bot');
 if (!target) throw new Error('workflow not found');
 
-const body = { name: wf.name, nodes: wf.nodes, connections: wf.connections, settings: wf.settings || {} };
+// n8n 的 settings 里多数字段是只读的，PUT 回去会被 schema 拒。
+// 只挑可写的传，其余由 n8n 自己保留。
+const WRITABLE_SETTINGS = new Set(['executionOrder', 'errorWorkflow', 'timezone', 'saveManualExecutions', 'saveExecutionProgress', 'saveDataErrorExecution', 'saveDataSuccessExecution', 'executionTimeout']);
+const settings = {};
+for (const [k, v] of Object.entries(wf.settings || {})) {
+  if (WRITABLE_SETTINGS.has(k)) settings[k] = v;
+}
+
+const body = { name: wf.name, nodes: wf.nodes, connections: wf.connections, settings };
 const res = await fetch(cfg.url + '/api/v1/workflows/' + target.id, {
   method: 'PUT', headers: H, body: JSON.stringify(body),
 });

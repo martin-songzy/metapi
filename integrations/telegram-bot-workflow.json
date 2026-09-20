@@ -15,7 +15,7 @@
       "typeVersion": 1.2,
       "position": [
         0,
-        300
+        464
       ],
       "webhookId": "metapi-probe",
       "credentials": {
@@ -27,15 +27,15 @@
     },
     {
       "parameters": {
-        "jsCode": "// === 配置 ===\nconst ALLOWED_USERS = [493325033];\nconst METAPI = 'https://metapi-krj9.onrender.com';\n\n// Telegram Bot API 的 token 只能放在 URL 路径里，n8n 的 telegramApi 凭据\n// 没法被 HTTP Request 节点复用（那个凭据没有 authenticate 段）。\n// 所以这里读环境变量，读不到才用字面量兜底。\nlet BOT_TOKEN = '8680016700:AAE2DwDZQWiRl6nsr74YSD_n9PzDIc2FRGI';\ntry { if ($env.TELEGRAM_BOT_TOKEN) BOT_TOKEN = $env.TELEGRAM_BOT_TOKEN; } catch (e) { /* 环境变量被禁 */ }\nconst TG = 'https://api.telegram.org/bot' + BOT_TOKEN;\n\nconst out = (obj) => [{ json: { tgBase: TG, ...obj } }];\n\n// 站点按钮的文字形如 \"✅ seekai (8)\" / \"▫️ 咕咕嘎嘎公益站 (13)\"\n//\n// ▫️ 是两个码位：U+25AB + 变体选择符 U+FE0F。只吃掉 U+25AB 的话，残留的\n// U+FE0F 会粘在站点名前面（渲染上看不出来，但拼进 /probe 参数和复制出来的\n// 命令里都是脏字符）。\nconst PREFIX = /^(?:\\u2705|\\u25AB)\\uFE0F?\\s*/;\n\n/**\n * 从回传的键盘还原站点列表。\n *\n * 这是整个设计的关键：**键盘本身就是选中状态**。Telegram 在 callback_query\n * 里把原消息的 reply_markup 一并回传，所以点一下就能知道当前选了什么，\n * 不需要任何服务端存储。\n *\n * 为什么不用 $getWorkflowStaticData：n8n 的静态数据是「执行开始读一次快照、\n * 执行结束整对象 UPDATE 写回」，没有锁也没有字段级合并。快速连点几个站点时\n * 多个执行并发，后结束的会把先结束的整个覆盖掉（lost update），而且 n8n 重启\n * 就清空。键盘即状态则各画各的，不存在覆盖。\n *\n * 按钮文字是截断过的（每行 3 个，省屏幕高度），完整站点名在 callback_data 里。\n */\nfunction parseSites(kb) {\n  const sites = [];\n  for (const row of kb) {\n    for (const b of row || []) {\n      const raw = String(b.callback_data || '');\n      if (!raw.startsWith('t:')) continue;\n      const on = String(b.text || '').startsWith('\\u2705');\n      // 格式 t:<id>[:<完整名>]，名字里可能有冒号，所以只切前两段\n      const first = raw.indexOf(':');\n      const second = raw.indexOf(':', first + 1);\n      const id = Number(second === -1 ? raw.slice(2) : raw.slice(2, second));\n      if (!Number.isInteger(id) || id <= 0) continue;\n      const fullName = second === -1 ? '' : raw.slice(second + 1);\n      const label = String(b.text || '').replace(PREFIX, '');\n      sites.push({\n        siteId: id,\n        // 优先用 callback_data 里的全名；老键盘没有的话退回按钮文字\n        siteName: fullName || label,\n        label,\n        on,\n      });\n    }\n  }\n  return sites;\n}\n\nconst ev = $input.first().json;\nconst cb = ev.callback_query;\n\n// ==================== 分支 A：按钮点击 ====================\nif (cb) {\n  const chatId = cb.message?.chat?.id;\n  const userId = Number(cb.from?.id || 0);\n  const messageId = cb.message?.message_id;\n  const data = String(cb.data || '');\n  const kb = cb.message?.reply_markup?.inline_keyboard;\n\n  if (!ALLOWED_USERS.includes(userId)) {\n    return out({ action: 'answer', callbackQueryId: cb.id, text: '❌ 未授权', chatId });\n  }\n\n  // 刷新：强制重拉站点列表。勾选从键盘带过去，按 id 保留。\n  if (data === 'refresh') {\n    return out({\n      action: 'fetch',\n      force: true,\n      callbackQueryId: cb.id,\n      chatId,\n      messageId,\n      sites: Array.isArray(kb) ? parseSites(kb) : [],\n    });\n  }\n\n  if (data === 'noop') {\n    return out({ action: 'answer', callbackQueryId: cb.id, text: '↑ 点站点名来勾选', chatId });\n  }\n\n  // 键盘没了就无从得知当前选了什么。Telegram 文档里 message 是 Optional，\n  // 实践中一直在，但不能假设。用 alert 而不是 toast：这条提示需要被读到。\n  if (!Array.isArray(kb)) {\n    return out({\n      action: 'answer',\n      callbackQueryId: cb.id,\n      chatId,\n      text: '⚠️ 会话已过期，请重新发送 /targets',\n      showAlert: true,\n    });\n  }\n\n  const sites = parseSites(kb);\n  if (!sites.length) {\n    return out({\n      action: 'answer',\n      callbackQueryId: cb.id,\n      chatId,\n      text: '⚠️ 这条消息里没有站点，请重新发送 /targets',\n      showAlert: true,\n    });\n  }\n\n  const picked = sites.filter((s) => s.on);\n\n  if (data === 'clr') {\n    sites.forEach((s) => { s.on = false; });\n    return out({ action: 'render', chatId, messageId, callbackQueryId: cb.id, sites, ackText: '🧹 已清空' });\n  }\n\n  if (data === 'run') {\n    if (!picked.length) {\n      return out({ action: 'answer', callbackQueryId: cb.id, text: '⚠️ 先点几个站点', chatId });\n    }\n    return out({ action: 'probe', chatId, siteIds: picked.map((s) => s.siteId), callbackQueryId: cb.id });\n  }\n\n  if (data.startsWith('t:')) {\n    // callback_data 是 t:<id>[:<完整名>]。名字里可能有冒号，所以只切前两段——\n    // 不能整个 data.slice(2) 去 Number()，那会得到 NaN，每个站点都匹配不上。\n    const id = Number(data.slice(2).split(':')[0]);\n    const target = sites.find((s) => s.siteId === id);\n    if (!target) {\n      return out({ action: 'answer', callbackQueryId: cb.id, text: '无效站点', chatId });\n    }\n    target.on = !target.on;\n    const n = sites.filter((s) => s.on).length;\n    return out({\n      action: 'render',\n      chatId,\n      messageId,\n      callbackQueryId: cb.id,\n      sites,\n      toggledId: id,\n      ackText: (target.on ? '➕ ' : '➖ ') + target.siteName + ' · 已选 ' + n + ' 个',\n    });\n  }\n\n  return out({ action: 'answer', callbackQueryId: cb.id, text: '未知操作', chatId });\n}\n\n// ==================== 分支 B：文字命令 ====================\nconst msg = ev.message || {};\nconst chatId = msg.chat?.id;\nconst userId = Number(msg.from?.id || 0);\nconst text = (msg.text || '').trim();\nconst parts = text.split(/\\s+/);\nconst cmd = (parts[0] || '').replace(/^\\//, '').toLowerCase();\nconst args = parts.slice(1).join(' ');\n\n// action:'send' 由动作路由的 fallback 输出接走\nconst reply = (t) => out({ action: 'send', chatId, text: t });\n\nif (!ALLOWED_USERS.includes(userId)) {\n  return reply('❌ 未授权访问\\n\\n此机器人仅供管理员使用。\\n您的 User ID: ' + userId);\n}\n\nif (!cmd || cmd === 'help' || cmd === 'start') {\n  return reply('🤖 MetAPI 探测机器人\\n\\n/targets - 按钮勾选站点，直接探测\\n/probe all - 探测所有站点\\n/probe 180001,180002 - 探测指定站点\\n/status - 查看最近一次探测结果\\n/help - 显示帮助\\n\\n⚠️ 探测会消耗真实配额');\n}\n\n// /targets 走缓存（除非超过 10 分钟）：站点列表要实时探测所有站点，\n// 每次都快不了。要看最新的就点面板上的「🔄 刷新」。\nif (cmd === 'targets') {\n  return out({ action: 'fetch', chatId, sites: [], notice: '点站点名勾选，选好后点「🚀 直接探测」' });\n}\n\nif (cmd === 'probe') {\n  const raw = args.trim().toLowerCase();\n  const siteIds = raw === 'all' || raw === '' ? 'all' : raw.split(/[^0-9]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n > 0);\n  if (Array.isArray(siteIds) && siteIds.length === 0) {\n    return reply('❌ 站点ID格式不对\\n\\n用法: /probe all 或 /probe 180001,180002');\n  }\n  return out({ action: 'probe', chatId, siteIds });\n}\n\nif (cmd === 'status') {\n  // 不带参数 = 查最近一次；带参数 = 查指定任务\n  const url = args.trim() ? METAPI + '/api/remote-probe/status/' + encodeURIComponent(args.trim()) : METAPI + '/api/remote-probe/status';\n  return out({ action: 'api', chatId, method: 'GET', url });\n}\n\nreturn reply('❓ 未知命令: /' + cmd + '\\n\\n发送 /help 查看可用命令');"
+        "jsCode": "// === 配置 ===\nconst ALLOWED_USERS = [493325033];\nconst METAPI = 'https://metapi-krj9.onrender.com';\n\n// 所有 Telegram 调用都走原生 Telegram 节点，token 存在 n8n 凭据库里\n// （MM_OClaw_bot），这里不再需要拼 URL，也不该出现任何 token。\nconst out = (obj) => [{ json: obj }];\n\n// 站点按钮的文字形如 \"✅ seekai (8)\" / \"▫️ 咕咕嘎嘎公益站 (13)\"\n//\n// ▫️ 是两个码位：U+25AB + 变体选择符 U+FE0F。只吃掉 U+25AB 的话，残留的\n// U+FE0F 会粘在站点名前面（渲染上看不出来，但拼进 /probe 参数和复制出来的\n// 命令里都是脏字符）。\nconst PREFIX = /^(?:\\u2705|\\u25AB)\\uFE0F?\\s*/;\n\n/**\n * 从回传的键盘还原站点列表。\n *\n * 这是整个设计的关键：**键盘本身就是选中状态**。Telegram 在 callback_query\n * 里把原消息的 reply_markup 一并回传，所以点一下就能知道当前选了什么，\n * 不需要任何服务端存储。\n *\n * 为什么不用 $getWorkflowStaticData：n8n 的静态数据是「执行开始读一次快照、\n * 执行结束整对象 UPDATE 写回」，没有锁也没有字段级合并。快速连点几个站点时\n * 多个执行并发，后结束的会把先结束的整个覆盖掉（lost update），而且 n8n 重启\n * 就清空。键盘即状态则各画各的，不存在覆盖。\n *\n * 按钮文字是截断过的（每行 3 个，省屏幕高度），完整站点名在 callback_data 里。\n */\nfunction parseSites(kb) {\n  const sites = [];\n  for (const row of kb) {\n    for (const b of row || []) {\n      const raw = String(b.callback_data || '');\n      if (!raw.startsWith('t:')) continue;\n      const on = String(b.text || '').startsWith('\\u2705');\n      // 格式 t:<id>[:<完整名>]，名字里可能有冒号，所以只切前两段\n      const first = raw.indexOf(':');\n      const second = raw.indexOf(':', first + 1);\n      const id = Number(second === -1 ? raw.slice(2) : raw.slice(2, second));\n      if (!Number.isInteger(id) || id <= 0) continue;\n      const fullName = second === -1 ? '' : raw.slice(second + 1);\n      const label = String(b.text || '').replace(PREFIX, '');\n      sites.push({\n        siteId: id,\n        // 优先用 callback_data 里的全名；老键盘没有的话退回按钮文字\n        siteName: fullName || label,\n        label,\n        on,\n      });\n    }\n  }\n  return sites;\n}\n\nconst ev = $input.first().json;\nconst cb = ev.callback_query;\n\n// ==================== 分支 A：按钮点击 ====================\nif (cb) {\n  const chatId = cb.message?.chat?.id;\n  const userId = Number(cb.from?.id || 0);\n  const messageId = cb.message?.message_id;\n  const data = String(cb.data || '');\n  const kb = cb.message?.reply_markup?.inline_keyboard;\n\n  if (!ALLOWED_USERS.includes(userId)) {\n    return out({ action: 'answer', callbackQueryId: cb.id, text: '❌ 未授权', chatId });\n  }\n\n  // 刷新：强制重拉站点列表。勾选从键盘带过去，按 id 保留。\n  if (data === 'refresh') {\n    return out({\n      action: 'fetch',\n      force: true,\n      callbackQueryId: cb.id,\n      chatId,\n      messageId,\n      sites: Array.isArray(kb) ? parseSites(kb) : [],\n    });\n  }\n\n  if (data === 'noop') {\n    return out({ action: 'answer', callbackQueryId: cb.id, text: '↑ 点站点名来勾选', chatId });\n  }\n\n  // 键盘没了就无从得知当前选了什么。Telegram 文档里 message 是 Optional，\n  // 实践中一直在，但不能假设。用 alert 而不是 toast：这条提示需要被读到。\n  if (!Array.isArray(kb)) {\n    return out({\n      action: 'answer',\n      callbackQueryId: cb.id,\n      chatId,\n      text: '⚠️ 会话已过期，请重新发送 /targets',\n      showAlert: true,\n    });\n  }\n\n  const sites = parseSites(kb);\n  if (!sites.length) {\n    return out({\n      action: 'answer',\n      callbackQueryId: cb.id,\n      chatId,\n      text: '⚠️ 这条消息里没有站点，请重新发送 /targets',\n      showAlert: true,\n    });\n  }\n\n  const picked = sites.filter((s) => s.on);\n\n  if (data === 'clr') {\n    sites.forEach((s) => { s.on = false; });\n    return out({ action: 'render', chatId, messageId, callbackQueryId: cb.id, sites, ackText: '🧹 已清空' });\n  }\n\n  if (data === 'run') {\n    if (!picked.length) {\n      return out({ action: 'answer', callbackQueryId: cb.id, text: '⚠️ 先点几个站点', chatId });\n    }\n    return out({ action: 'probe', chatId, siteIds: picked.map((s) => s.siteId), callbackQueryId: cb.id });\n  }\n\n  if (data.startsWith('t:')) {\n    // callback_data 是 t:<id>[:<完整名>]。名字里可能有冒号，所以只切前两段——\n    // 不能整个 data.slice(2) 去 Number()，那会得到 NaN，每个站点都匹配不上。\n    const id = Number(data.slice(2).split(':')[0]);\n    const target = sites.find((s) => s.siteId === id);\n    if (!target) {\n      return out({ action: 'answer', callbackQueryId: cb.id, text: '无效站点', chatId });\n    }\n    target.on = !target.on;\n    const n = sites.filter((s) => s.on).length;\n    return out({\n      action: 'render',\n      chatId,\n      messageId,\n      callbackQueryId: cb.id,\n      sites,\n      toggledId: id,\n      ackText: (target.on ? '➕ ' : '➖ ') + target.siteName + ' · 已选 ' + n + ' 个',\n    });\n  }\n\n  return out({ action: 'answer', callbackQueryId: cb.id, text: '未知操作', chatId });\n}\n\n// ==================== 分支 B：文字命令 ====================\nconst msg = ev.message || {};\nconst chatId = msg.chat?.id;\nconst userId = Number(msg.from?.id || 0);\nconst text = (msg.text || '').trim();\nconst parts = text.split(/\\s+/);\nconst cmd = (parts[0] || '').replace(/^\\//, '').toLowerCase();\nconst args = parts.slice(1).join(' ');\n\n// action:'send' 由动作路由的 fallback 输出接走\nconst reply = (t) => out({ action: 'send', chatId, text: t });\n\nif (!ALLOWED_USERS.includes(userId)) {\n  return reply('❌ 未授权访问\\n\\n此机器人仅供管理员使用。\\n您的 User ID: ' + userId);\n}\n\nif (!cmd || cmd === 'help' || cmd === 'start') {\n  return reply('🤖 MetAPI 探测机器人\\n\\n/targets - 按钮勾选站点，直接探测\\n/probe all - 探测所有站点\\n/probe 180001,180002 - 探测指定站点\\n/status - 查看最近一次探测结果\\n/help - 显示帮助\\n\\n⚠️ 探测会消耗真实配额');\n}\n\n// /targets 走缓存（除非超过 10 分钟）：站点列表要实时探测所有站点，\n// 每次都快不了。要看最新的就点面板上的「🔄 刷新」。\nif (cmd === 'targets') {\n  return out({ action: 'fetch', chatId, sites: [], notice: '点站点名勾选，选好后点「🚀 直接探测」' });\n}\n\nif (cmd === 'probe') {\n  const raw = args.trim().toLowerCase();\n  const siteIds = raw === 'all' || raw === '' ? 'all' : raw.split(/[^0-9]+/).filter(Boolean).map(Number).filter((n) => Number.isInteger(n) && n > 0);\n  if (Array.isArray(siteIds) && siteIds.length === 0) {\n    return reply('❌ 站点ID格式不对\\n\\n用法: /probe all 或 /probe 180001,180002');\n  }\n  return out({ action: 'probe', chatId, siteIds });\n}\n\nif (cmd === 'status') {\n  // 不带参数 = 查最近一次；带参数 = 查指定任务\n  const url = args.trim() ? METAPI + '/api/remote-probe/status/' + encodeURIComponent(args.trim()) : METAPI + '/api/remote-probe/status';\n  return out({ action: 'api', chatId, method: 'GET', url });\n}\n\nreturn reply('❓ 未知命令: /' + cmd + '\\n\\n发送 /help 查看可用命令');"
       },
       "id": "preprocess",
       "name": "预处理",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        220,
-        300
+        224,
+        464
       ]
     },
     {
@@ -173,8 +173,8 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
-        440,
-        300
+        448,
+        416
       ]
     },
     {
@@ -186,8 +186,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        660,
-        0
+        672,
+        -144
       ]
     },
     {
@@ -219,8 +219,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        880,
-        0
+        896,
+        -144
       ]
     },
     {
@@ -229,12 +229,12 @@
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
         "options": {
-          "timeout": 60000,
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 60000
         }
       },
       "id": "fetch-targets",
@@ -242,8 +242,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
       "position": [
-        1100,
-        -80
+        1120,
+        -208
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -261,72 +261,47 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1320,
-        -80
+        1344,
+        -208
       ]
     },
     {
       "parameters": {
-        "jsCode": "// 画键盘。三条来源：\n//   render + cached  —— 站点列表来自缓存（/targets 的常见路径）\n//   render + apiSites —— 站点列表来自 API（首次、或点了刷新）\n//   render（无列表）  —— 点击路径，列表来自回传的键盘本身（零 IO）\n//\n// 为什么不用 n8n 的 Telegram 节点：它的 inlineKeyboard 是 fixedCollection，\n// 路由层按 node.parameters 的原始路径逐层回读子字段。一旦任何一层是表达式，\n// 那条路径在原始参数里就不存在，整块键盘被静默丢掉——实测整对象表达式、\n// 嵌套表达式都发不出键盘。动态站点列表只能走原生 API。\n// 读直接上游，不写死节点名。三条上游都会把 ctx 原样带下来：\n//   动作路由(点击) / 要调接口吗(缓存命中) / 缓存站点列表(刚拉完 API)\n// 站点列表就在 ctx 里。之前写死 $('预处理') 只对点击路径成立——\n// 走缓存或刷新时，预处理里根本没有 apiSites，于是每次都画成\n// 「没有可用的站点」，点刷新也一样（刷新只是绕过了缓存，数据照样丢）。\nconst ctx = $input.first().json;\n\nconst tg = ctx.tgBase;\nconst chatId = ctx.chatId;\nconst messageId = ctx.messageId || null;\n\nconst apiSites = Array.isArray(ctx.apiSites) ? ctx.apiSites : null;\n\nlet sites;\nlet fetchFailed = ctx.fetchFailed || null;\n\nif (apiSites) {\n  // 刷新前已经勾上的，按 id 保留\n  const wasOn = new Set((ctx.sites || []).filter((s) => s.on).map((s) => s.siteId));\n  sites = apiSites.map((s) => ({\n    siteId: s.siteId,\n    siteName: s.siteName,\n    on: wasOn.has(s.siteId),\n  }));\n} else {\n  sites = Array.isArray(ctx.sites) ? ctx.sites : [];\n}\n\n// 一次 API 都没成功过、键盘也空——没有可画的\nif (!sites.length) {\n  const rows = [[{ text: '🔄 刷新', callback_data: 'refresh' }]];\n  const text = (fetchFailed ? '⚠️ ' + fetchFailed + '\\n\\n' : '') + '没有可用的站点。';\n  const emptyBody = { chat_id: chatId, text, reply_markup: { inline_keyboard: rows } };\n  const emptyItems = [{ json: {\n    url: tg + (messageId ? '/editMessageText' : '/sendMessage'),\n    body: messageId ? { ...emptyBody, message_id: messageId } : emptyBody,\n  } }];\n  // 点「刷新」落到这条路径时同样要应答，否则按钮一直转圈\n  if (ctx.callbackQueryId) emptyItems.push(ackItem(tg, ctx));\n  return emptyItems;\n}\n\n// 每行 3 个：按钮行高是固定的，唯一能压高度的办法是减少行数。\n// 代价是名字要截断，完整名字塞进 callback_data（上限 64 字节）。\nconst PER_ROW = 3;\nconst MAX_LABEL = 7;\nconst truncate = (s) => (s.length > MAX_LABEL ? s.slice(0, MAX_LABEL - 1) + '…' : s);\n\nconst rows = [];\nfor (let i = 0; i < sites.length; i += PER_ROW) {\n  rows.push(sites.slice(i, i + PER_ROW).map((s) => ({\n    text: (s.on ? '✅' : '▫️') + truncate(s.siteName),\n    // t:<id>:<完整名>，供正文列出全名，也供下一轮解析\n    callback_data: 't:' + s.siteId + ':' + s.siteName,\n  })));\n}\n\nrows.push([\n  { text: '🚀 直接探测', callback_data: 'run' },\n  { text: '🔄 刷新', callback_data: 'refresh' },\n  { text: '🧹 清空', callback_data: 'clr' },\n]);\n\nconst picked = sites.filter((s) => s.on);\n\nlet text = '';\nif (ctx.notice) text += ctx.notice + '\\n\\n';\nif (fetchFailed) text += '⚠️ 站点列表刷新失败（' + fetchFailed + '）\\n\\n';\nif (ctx.cached) text += '（缓存于 ' + timeOf(ctx.cachedAt) + '，点「🔄 刷新」重拉）\\n\\n';\ntext += '📋 共 ' + sites.length + ' 个站点\\n\\n';\ntext += picked.length\n  ? '已选 ' + picked.length + ' 个：' + picked.map((s) => s.siteName).join('、') + '\\n'\n  : '还没有勾选站点\\n';\n\nconst msgBody = { chat_id: chatId, text, reply_markup: { inline_keyboard: rows } };\n\nconst items = [{ json: {\n  // 带 messageId = 点击路径，原地改；否则是新的一次 /targets，发新消息\n  url: tg + (messageId ? '/editMessageText' : '/sendMessage'),\n  body: messageId ? { ...msgBody, message_id: messageId } : msgBody,\n} }];\n\n// 点击路径必须回一次 answerCallbackQuery，否则按钮一直转圈\nif (ctx.callbackQueryId) items.push(ackItem(tg, ctx));\n\nreturn items;\n\nfunction ackItem(tg, ctx) {\n  return { json: {\n    url: tg + '/answerCallbackQuery',\n    body: { callback_query_id: ctx.callbackQueryId, text: String(ctx.ackText || '已更新').slice(0, 200) },\n  } };\n}\n\n// 缓存时间：当天只显示时分，跨天补上日期。缓存长期有效，一份列表可能放很久，\n// 只写「缓存于 09:31」会让人以为是今天早上。\n// n8n 容器时区可能是 UTC，但这里只是给个相对感，不值得引入时区处理。\nfunction timeOf(ms) {\n  if (!ms) return '未知时间';\n  const d = new Date(ms);\n  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');\n  const today = new Date();\n  const sameDay = d.getFullYear() === today.getFullYear()\n    && d.getMonth() === today.getMonth()\n    && d.getDate() === today.getDate();\n  if (sameDay) return hm;\n  return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;\n}"
+        "jsCode": "// 画站点面板。\n//\n// 为什么是「写死槽位 + 运行时填空」：Telegram 节点的 inlineKeyboard 是\n// fixedCollection，行数和按钮数在编写期就固定，没法从运行时数组展开。\n// 但实测发现两条关键性质，合起来就能做出动态面板：\n//   1. 按钮的 text / callback_data 可以用表达式 —— 内容可以是动态的\n//   2. 空行（buttons: []）和空文字按钮会被 Telegram 自动丢掉\n// 所以：声明 10 行站点槽位（30 个）+ 1 行操作位，按实际站点数填充，\n// 用不到的槽位填空字符串，Telegram 会把它们连同整行一起丢掉。\n//\n// 三条上游都会把 ctx 原样带下来：动作路由(点击) / 要调接口吗(缓存命中)\n// / 缓存站点列表(刚拉完 API)，所以读直接上游即可，不要写死节点名。\nconst ctx = $input.first().json;\nconst chatId = ctx.chatId;\nconst messageId = ctx.messageId || null;\n\nconst apiSites = Array.isArray(ctx.apiSites) ? ctx.apiSites : null;\nlet sites;\nconst fetchFailed = ctx.fetchFailed || null;\n\nif (apiSites) {\n  // 刷新前已经勾上的，按 id 保留\n  const wasOn = new Set((ctx.sites || []).filter((s) => s.on).map((s) => s.siteId));\n  sites = apiSites.map((s) => ({ siteId: s.siteId, siteName: s.siteName, on: wasOn.has(s.siteId) }));\n} else {\n  sites = Array.isArray(ctx.sites) ? ctx.sites : [];\n}\n\n// 槽位布局：0-29 是站点（10 行 × 3 个），30-32 是操作按钮（第 11 行）。\n// 操作按钮固定在最后一行的位置，靠空槽位把前面的行补齐——这样站点数是\n// 4 这种非 3 的倍数时，操作按钮也不会跟站点挤在同一行。\nconst MAX_SITES = 30;\nconst PER_ROW = 3;\nconst MAX_LABEL = 7;\nconst truncate = (s) => (s.length > MAX_LABEL ? s.slice(0, MAX_LABEL - 1) + '…' : s);\n\nconst shown = sites.slice(0, MAX_SITES);\nconst hidden = sites.length - shown.length;\n\nconst slots = shown.map((s) => ({\n  // t:<id>:<完整名> —— 按钮文字截断了，完整名塞进 callback_data 供正文和提示用\n  text: (s.on ? '✅' : '▫️') + truncate(s.siteName),\n  data: 't:' + s.siteId + ':' + s.siteName,\n}));\nwhile (slots.length < MAX_SITES) slots.push({ text: '', data: 'noop' });\nslots.push({ text: '🚀 直接探测', data: 'run' });\nslots.push({ text: '🔄 刷新', data: 'refresh' });\nslots.push({ text: '🧹 清空', data: 'clr' });\n\nconst picked = sites.filter((s) => s.on);\n\nlet text = '';\nif (ctx.notice) text += ctx.notice + '\\n\\n';\nif (fetchFailed) text += '⚠️ 站点列表刷新失败（' + fetchFailed + '）\\n\\n';\nif (ctx.cached) text += '（缓存于 ' + timeOf(ctx.cachedAt) + '，点「🔄 刷新」重拉）\\n\\n';\ntext += '📋 共 ' + sites.length + ' 个站点';\nif (hidden > 0) text += '（面板只放得下前 ' + MAX_SITES + ' 个，还有 ' + hidden + ' 个未显示，可用 /probe <id> 直接指定）';\ntext += '\\n\\n';\ntext += picked.length\n  ? '已选 ' + picked.length + ' 个：' + picked.map((s) => s.siteName).join('、')\n  : '还没有勾选站点';\n\n// 输出扁平的 slot<N>text / slot<N>data 字段，供 Telegram 节点的按钮表达式读取。\n// n8n 的 fixedCollection 读不了数组，只能一个槽位一个字段。\nconst out = {\n  chatId,\n  messageId,\n  text,\n  queryId: ctx.callbackQueryId || '',\n  ackText: ctx.ackText || '已更新',\n};\nslots.forEach((s, i) => {\n  out['slot' + i + 'text'] = s.text;\n  out['slot' + i + 'data'] = s.data;\n});\n\nreturn [{ json: out }];\n\n// 缓存时间：当天只显示时分，跨天补上日期。缓存长期有效，一份列表可能放很久，\n// 只写「缓存于 09:31」会让人以为是今天早上。\n// n8n 容器时区可能是 UTC，但这里只是给个相对感，不值得引入时区处理。\nfunction timeOf(ms) {\n  if (!ms) return '未知时间';\n  const d = new Date(ms);\n  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');\n  const today = new Date();\n  const sameDay = d.getFullYear() === today.getFullYear()\n    && d.getMonth() === today.getMonth()\n    && d.getDate() === today.getDate();\n  return sameDay ? hm : (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm;\n}"
       },
       "id": "build-keyboard",
-      "name": "渲染键盘",
+      "name": "准备面板",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1100,
-        120
+        1568,
+        -16
       ]
     },
     {
       "parameters": {
-        "jsCode": "// answerCallbackQuery 只接受短文本（≤200），且必须尽快回应，否则按钮一直转圈\nconst ctx = $('预处理').first().json;\nreturn [{ json: {\n  url: ctx.tgBase + '/answerCallbackQuery',\n  body: {\n    callback_query_id: ctx.callbackQueryId,\n    text: String(ctx.text || '').slice(0, 200),\n    // alert 是弹窗而非顶部提示：会话过期这类消息需要被真的读到\n    ...(ctx.showAlert ? { show_alert: true } : {}),\n  },\n} }];"
+        "jsCode": "// answerCallbackQuery 必须尽快回应，否则按钮一直转圈。\n// 字段名与「准备面板」「格式化结果」对齐，三个来源共用一个应答节点。\nconst ctx = $('预处理').first().json;\nreturn [{ json: {\n  queryId: ctx.callbackQueryId || '',\n  ackText: String(ctx.text || '已更新').slice(0, 200),\n  // alert 是弹窗而非顶部提示：会话过期这类消息需要被真的读到\n  showAlert: !!ctx.showAlert,\n} }];"
       },
       "id": "answer-prep",
       "name": "准备按钮回应",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        660,
-        460
+        2016,
+        608
       ]
     },
     {
       "parameters": {
-        "jsCode": "// 纯文本回复（帮助、未授权、参数格式错误）也走同一个 HTTP 节点，\n// 省掉一个 n8n Telegram 节点。\nconst ctx = $('预处理').first().json;\nreturn [{ json: {\n  url: ctx.tgBase + '/sendMessage',\n  body: { chat_id: ctx.chatId, text: ctx.text || '' },\n} }];"
+        "jsCode": "// 纯文本回复（帮助、未授权、参数格式错误）\nconst ctx = $('预处理').first().json;\nreturn [{ json: { chatId: ctx.chatId, text: ctx.text || '' } }];"
       },
       "id": "prepare-text",
       "name": "准备文本回复",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        660,
-        620
-      ]
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "={{ $json.url }}",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.body) }}",
-        "options": {
-          "timeout": 30000,
-          "response": {
-            "response": {
-              "neverError": true
-            }
-          }
-        }
-      },
-      "id": "call-telegram",
-      "name": "调用Telegram",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
-      "position": [
-        1320,
-        120
+        672,
+        752
       ]
     },
     {
@@ -338,23 +313,22 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        660,
-        300
+        672,
+        416
       ]
     },
     {
       "parameters": {
-        "method": "GET",
         "url": "https://metapi-krj9.onrender.com/api/remote-probe/active",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
         "options": {
-          "timeout": 60000,
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 60000
         }
       },
       "id": "check-active",
@@ -362,8 +336,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
       "position": [
-        880,
-        300
+        896,
+        416
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -381,8 +355,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1100,
-        300
+        1120,
+        416
       ]
     },
     {
@@ -414,8 +388,8 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
       "position": [
-        1320,
-        300
+        1344,
+        416
       ]
     },
     {
@@ -428,12 +402,12 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ siteIds: $json.siteIds, waitForCompletion: false, timeout: 300000 }) }}",
         "options": {
-          "timeout": 300000,
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 300000
         }
       },
       "id": "run-probe",
@@ -441,8 +415,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
       "position": [
-        1540,
-        220
+        1568,
+        288
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -453,17 +427,16 @@
     },
     {
       "parameters": {
-        "method": "GET",
         "url": "={{ $json.url }}",
         "authentication": "predefinedCredentialType",
         "nodeCredentialType": "httpHeaderAuth",
         "options": {
-          "timeout": 60000,
           "response": {
             "response": {
               "neverError": true
             }
-          }
+          },
+          "timeout": 60000
         }
       },
       "id": "query-status",
@@ -471,8 +444,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
       "position": [
-        660,
-        760
+        1568,
+        896
       ],
       "credentials": {
         "httpHeaderAuth": {
@@ -483,79 +456,743 @@
     },
     {
       "parameters": {
-        "jsCode": "// 探测结果 / 状态查询 / 忙碌提示 → 一条 HTML 富消息\n//\n// 用 sendRichMessage 而不是 parse_mode=HTML：后者不支持 <table>，只有\n// rich_message 的 HTML 子集能渲染成真正的表格（实测 20 行表格可发）。\nconst start = $('预处理').first().json;\nconst chatId = start.chatId;\nconst tg = start.tgBase;\n\nlet payload = {};\nfor (const name of ['发起探测', '查询任务状态', '决定是否探测']) {\n  try {\n    const item = $(name).first();\n    if (item) { payload = item.json; break; }\n  } catch (e) { /* 该分支没走到 */ }\n}\n\nconst esc = (s) => String(s == null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\nconst items = [];\nconst send = (html, fallback) => {\n  items.push({ json: {\n    kind: 'rich',\n    url: tg + '/sendRichMessage',\n    body: { chat_id: chatId, rich_message: { html } },\n    // 兜底文本：富消息接口较新，万一客户端或 API 不吃，降级成等宽文本重发。\n    // 探测花的是真钱，结果不能因为显示格式丢掉。\n    fallback,\n  } });\n};\n\nif (payload.stage === 'busy') {\n  send('<b>⏳ 已有探测在进行中</b>\\n用 /status 查看进度', '⏳ 已有探测在进行中\\n用 /status 查看进度');\n} else if (payload.status === 'running' || payload.status === 'pending') {\n  const id = esc(payload.taskId);\n  send('🚀 <b>探测已启动</b>\\n\\nTask ID: <code>' + id + '</code>\\n\\n/status — 最近一次结果\\n/status <code>' + id + '</code> — 指定任务',\n    '🚀 探测已启动\\n\\nTask ID: ' + payload.taskId + '\\n\\n/status — 最近一次结果\\n/status ' + payload.taskId + ' — 指定任务');\n} else if (payload.status === 'completed' || (payload.success === true && payload.summary)) {\n  buildResult(payload);\n} else if (payload.error || payload.success === false) {\n  const msg = payload.error?.description || payload.message || '未知错误';\n  send('❌ <b>失败</b>\\n' + esc(msg), '❌ 失败: ' + msg);\n} else {\n  const raw = JSON.stringify(payload).slice(0, 300);\n  send('❓ 没有拿到结果\\n<code>' + esc(raw) + '</code>', '❓ 没有拿到结果: ' + raw);\n}\n\n// 点了「直接探测」要回一次 callback，否则按钮一直转圈。\n// 放在最后：它不参与富消息的成败判断。\nif (start.callbackQueryId) {\n  items.push({ json: {\n    kind: 'ack',\n    url: tg + '/answerCallbackQuery',\n    body: { callback_query_id: start.callbackQueryId, text: '已开始' },\n  } });\n}\n\nreturn items;\n\nfunction buildResult(data) {\n  const sm = data.summary || {};\n  const av = data.available || [];\n  const head = '✅ <b>探测完成</b>'\n    + (data.taskId ? ' <code>' + esc(String(data.taskId).slice(0, 8)) + '</code>' : '')\n    + '\\n总计 ' + (sm.totalProbed ?? 0)\n    + '｜可用 ' + (sm.supported ?? 0)\n    + '｜不可用 ' + (sm.unsupported ?? 0)\n    + '｜不确定 ' + (sm.inconclusive ?? 0)\n    + (sm.durationMs ? '\\n耗时 ' + (sm.durationMs / 1000).toFixed(1) + 's' : '');\n\n  if (!av.length) {\n    send(head + '\\n\\n⚠️ 没有可用模型', stripTags(head) + '\\n\\n⚠️ 没有可用模型');\n    return;\n  }\n\n  // 表格：站点 / 模型 / 延迟 / 余额。服务端已按 站点→模型 排好，不再重排。\n  const rows = [['站点', '模型', '延迟', '余额']];\n  av.forEach((m) => {\n    rows.push([\n      m.siteName || '',\n      m.modelName || '',\n      m.latencyMs == null ? '—' : m.latencyMs + 'ms',\n      (m.balance === null || m.balance === undefined) ? '—' : '$' + m.balance,\n    ]);\n  });\n\n  const html = head + '\\n\\n🟢 <b>可用模型 ' + av.length + ' 个</b>\\n'\n    + '<table>' + rows.map((r) => '<tr>' + r.map((c) => '<td>' + esc(c) + '</td>').join('') + '</tr>').join('') + '</table>';\n\n  // 兜底：等宽文本表格，列宽按显示宽度取最大值（中日韩字符占两列）\n  const w = rows[0].map((_, i) => Math.max(...rows.map((r) => displayWidth(r[i]))));\n  const pad = (s, n) => s + ' '.repeat(Math.max(0, n - displayWidth(s)));\n  const pre = rows.map((r) => r.map((c, i) => pad(c, w[i])).join('  ').replace(/\\s+$/, '')).join('\\n');\n\n  send(html, stripTags(head) + '\\n\\n可用模型 ' + av.length + ' 个\\n<pre>' + pre + '</pre>');\n}\n\nfunction displayWidth(s) {\n  let n = 0;\n  for (const ch of String(s)) {\n    const c = ch.codePointAt(0);\n    n += (c >= 0x1100 && (c <= 0x115f || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3)\n      || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60)\n      || (c >= 0xffe0 && c <= 0xffe6))) ? 2 : 1;\n  }\n  return n;\n}\n\nfunction stripTags(s) {\n  return String(s).replace(/<[^>]+>/g, '');\n}"
+        "jsCode": "// 探测结果 / 状态查询 / 忙碌提示 → 一条或多条富消息\n//\n// 显示格式的演进（都实测过）：\n//   sendRichMessage <table> —— 真表格；实例升级后 Telegram 节点支持了，回归此方案\n//   <pre> 补空格对齐        —— 桌面端能对齐，手机端 CJK 字体回退 + 折行必歪\n//   流式列表 + blockquote    —— 不歪了但太素，且引用块方案是表格缺席时的替补\n//\n// 余额是站点属性（同站各 key 共享），放在站点分组标题行，模型行只有延迟。\nconst start = $('预处理').first().json;\nconst chatId = start.chatId;\n\nlet payload = {};\nfor (const name of ['发起探测', '查询任务状态', '决定是否探测']) {\n  try {\n    const item = $(name).first();\n    if (item) { payload = item.json; break; }\n  } catch (e) { /* 该分支没走到 */ }\n}\n\nconst esc = (s) => String(s == null ? '' : s)\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\n\n// 点了「直接探测」要回一次 callback，否则按钮一直转圈。\n// 挂在第一个分片上，其余留空——「要应答吗」开了 executeOnce，只看第一个。\nconst ackText = (payload.stage === 'busy' || payload.status === 'running' || payload.status === 'pending')\n  ? '已开始' : '已更新';\nconst queryId = start.callbackQueryId || '';\nconst parts = [];\n\nconst send = (html) => parts.push(html);\n\nif (payload.stage === 'busy') {\n  send('<b>⏳ 已有探测在进行中</b><p>用 /status 查看进度</p>');\n} else if (payload.status === 'running' || payload.status === 'pending') {\n  send('<b>🚀 探测已启动</b><p>Task ID: <code>' + esc(payload.taskId) + '</code></p><p>/status — 最近一次结果<br>/status <code>' + esc(payload.taskId) + '</code> — 指定任务</p>');\n} else if (payload.status === 'completed' || (payload.success === true && payload.summary)) {\n  buildResult(payload);\n} else if (payload.error || payload.success === false) {\n  send('<b>❌ 失败</b><p>' + esc(payload.error?.description || payload.message || '未知错误') + '</p>');\n} else {\n  send('<b>❓ 没有拿到结果</b><p><code>' + esc(JSON.stringify(payload).slice(0, 300)) + '</code></p>');\n}\n\nreturn parts.map((html, i) => ({ json: {\n  chatId,\n  html,\n  queryId: i === 0 ? queryId : '',\n  ackText,\n} }));\n\nfunction buildResult(data) {\n  const sm = data.summary || {};\n  const av = data.available || [];\n  const head = '<b>✅ 探测完成</b> <code>' + esc(String(data.taskId || '').slice(0, 8)) + '</code>'\n    + '<p>总计 ' + (sm.totalProbed ?? 0)\n    + '｜可用 ' + (sm.supported ?? 0)\n    + '｜不可用 ' + (sm.unsupported ?? 0)\n    + '｜不确定 ' + (sm.inconclusive ?? 0)\n    + (sm.durationMs ? '｜耗时 ' + (sm.durationMs / 1000).toFixed(1) + 's' : '') + '</p>';\n\n  if (!av.length) {\n    send(head + '<p>⚠️ 没有可用模型</p>');\n    return;\n  }\n\n  const fmtBal = (b) => {\n    if (b === null || b === undefined || b === '') return '—';\n    const n = Number(b);\n    return Number.isFinite(n) ? '$' + n.toFixed(2) : '$' + b;\n  };\n\n  // 表格：站点行（加粗，含余额）+ 该站每个模型一行（延迟）。\n  // 模型名放「站点」列——rich_message 表格列宽是均分的，内容拆到第 3 列\n  // 会在手机上被挤到半屏右侧看不全；全部内容放第一列才能用满屏宽。\n  // 模型行用 • 开头区分于站点行。\n  const rows = [['站点', '余额', '延迟']];\n  bySite(av).forEach((models, site) => {\n    rows.push(['<b>' + esc(site) + '</b>', fmtBal(models[0]?.balance), '']);\n    models.forEach((m) => {\n      rows.push(['• ' + esc(m.modelName || ''), '', m.latencyMs == null ? '—' : m.latencyMs + 'ms']);\n    });\n  });\n\n  const table = '<table><tr>'\n    + rows[0].map((c) => '<th>' + c + '</th>').join('') + '</tr>'\n    + rows.slice(1).map((r) => '<tr>' + r.map((c) => '<td>' + c + '</td>').join('') + '</tr>').join('')\n    + '</table>';\n\n  // 拆片：按表格行累加，超 LIMIT 先封住当前表格再开新表。分组标题行\n  // （models 为空的那行）不能落单在片尾——标题行的下一行是它的模型，\n  // 拆开就不知道那组模型属于谁。len 只算「模型+延迟」两列的内容\n  // （站点/余额两列在模型行是空的），所以这里用整行 HTML 的长度。\n  const LIMIT = 3400;\n  const intro = head + '<p><b>🟢 可用模型 ' + av.length + ' 个</b></p>';\n  let body = [];\n  let len = 0;\n  let first = true;\n  const flush = () => {\n    send((first ? intro : '<p><b>（续）</b></p>') + '<table><tr><th>站点</th><th>余额</th><th>延迟</th></tr>' + body.join('') + '</table>');\n    first = false;\n    body = [];\n    len = 0;\n  };\n  // 把 rows 切成「站点组」（标题行 + 它的模型行），整组结算：\n  // 一组装得下就追加进当前片，装不下就先封片再开新片。这样 flush 时机\n  // 永远落在组边界，不会把某站的模型拆到两个片里，也不会超限——\n  // 单组本身超过 LIMIT 的极端情况（一个站几百个模型）只能整组放行，\n  // 由 LIMIT 的余量兜底（3800 余量 vs 一组 ~2600，实际不会发生）。\n  const groups = [];\n  for (let i = 1; i < rows.length; i++) {\n    const cells = rows[i];\n    // 3 列布局：站点行 [<b>site</b>, bal, '']，模型行 ['• model', '', lat]。\n    // 站点行以 <b> 开头，用它识别分组起点。\n    const isGroupRow = String(cells[0]).startsWith('<b>');\n    const rowHtml = '<tr>' + cells.map((x) => '<td>' + x + '</td>').join('') + '</tr>';\n    if (isGroupRow) {\n      groups.push([rowHtml]);\n    } else if (groups.length) {\n      groups[groups.length - 1].push(rowHtml);\n    }\n  }\n  for (const g of groups) {\n    const size = g.join('').length;\n    if (body.length && len + size > LIMIT) flush();\n    body.push(...g);\n    len += size;\n  }\n  if (body.length) flush();\n\n  function bySite(list) {\n    const m = new Map();\n    list.forEach((x) => {\n      const key = x.siteName || '(未知站点)';\n      if (!m.has(key)) m.set(key, []);\n      m.get(key).push(x);\n    });\n    return m;\n  }\n}\n"
       },
       "id": "format",
       "name": "格式化结果",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1760,
-        420
+        1792,
+        416
       ]
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $json.url }}",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.body) }}",
-        "options": {
-          "timeout": 60000,
-          "response": {
-            "response": {
-              "neverError": true
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "is-edit",
+              "leftValue": "={{ $json.messageId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
             }
-          }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "面板路由",
+      "name": "面板路由",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1792,
+        -96
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "editMessageText",
+        "chatId": "={{ $json.chatId }}",
+        "messageId": "={{ $json.messageId }}",
+        "replyMarkup": "inlineKeyboard",
+        "text": "={{ $json.text }}",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot0text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot0data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot1text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot1data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot2text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot2data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot3text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot3data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot4text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot4data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot5text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot5data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot6text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot6data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot7text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot7data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot8text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot8data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot9text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot9data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot10text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot10data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot11text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot11data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot12text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot12data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot13text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot13data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot14text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot14data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot15text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot15data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot16text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot16data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot17text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot17data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot18text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot18data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot19text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot19data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot20text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot20data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot21text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot21data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot22text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot22data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot23text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot23data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot24text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot24data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot25text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot25data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot26text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot26data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot27text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot27data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot28text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot28data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot29text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot29data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot30text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot30data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot31text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot31data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot32text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot32data }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {}
+      },
+      "id": "编辑面板",
+      "name": "编辑面板",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2016,
+        -240
+      ],
+      "webhookId": "a9dead07-b82d-491f-a932-7fc4734ebcce",
+      "credentials": {
+        "telegramApi": {
+          "id": "huDHcNDuJpoSxnO1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot0text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot0data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot1text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot1data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot2text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot2data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot3text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot3data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot4text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot4data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot5text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot5data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot6text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot6data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot7text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot7data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot8text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot8data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot9text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot9data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot10text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot10data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot11text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot11data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot12text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot12data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot13text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot13data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot14text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot14data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot15text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot15data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot16text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot16data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot17text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot17data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot18text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot18data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot19text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot19data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot20text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot20data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot21text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot21data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot22text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot22data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot23text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot23data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot24text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot24data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot25text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot25data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot26text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot26data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot27text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot27data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot28text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot28data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot29text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot29data }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "={{ $json.slot30text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot30data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot31text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot31data }}"
+                    }
+                  },
+                  {
+                    "text": "={{ $json.slot32text }}",
+                    "additionalFields": {
+                      "callback_data": "={{ $json.slot32data }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "additionalFields": {
+          "appendAttribution": false
         }
       },
-      "id": "send-rich",
-      "name": "发送富消息",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "id": "发送面板",
+      "name": "发送面板",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
       "position": [
-        1980,
-        420
-      ]
+        2016,
+        -48
+      ],
+      "webhookId": "ff6dd9a6-25b9-4f46-8a19-4815c5115703",
+      "credentials": {
+        "telegramApi": {
+          "id": "huDHcNDuJpoSxnO1",
+          "name": "MM_OClaw_bot"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// 富消息没发出去 → 用等宽文本兜底重发，结果不能丢。\n//\n// 判断放在这里、而不是在 HTTP 之后用 IF 节点：HTTP Request 的输出会**替换**\n// 输入，所以它之后 $json 里已经没有 kind 了，IF 判断恒为假、兜底每次都触发\n// ——这正是「直接探测返回两条内容相似的消息」的原因。\n//\n// $input.first() 是本节点收到的、来自「格式化结果」的 item（还没被 HTTP 覆盖）。\nconst rich = $input.first().json || {};\nif (rich.kind !== 'rich') return [];\n\nconst sent = $('发送富消息').first().json || {};\nif (sent.ok === true) return [];\n\nreturn [{ json: {\n  url: $('预处理').first().json.tgBase + '/sendMessage',\n  body: {\n    chat_id: $('预处理').first().json.chatId,\n    text: rich.fallback || '（没有可发送的内容）',\n    parse_mode: 'HTML',\n  },\n} }];"
+        "resource": "message",
+        "operation": "sendRichMessage",
+        "chatId": "={{ $json.chatId }}",
+        "richFormat": "html",
+        "richMessageText": "={{ $json.html }}"
       },
-      "id": "prepare-fallback",
-      "name": "准备兜底文本",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "发送结果",
+      "name": "发送结果",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
       "position": [
-        2200,
-        520
-      ]
+        2016,
+        416
+      ],
+      "webhookId": "9205d280-f1db-4e78-9cde-0fd1ad335d1b",
+      "credentials": {
+        "telegramApi": {
+          "id": "huDHcNDuJpoSxnO1",
+          "name": "MM_OClaw_bot"
+        }
+      }
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $json.url }}",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json.body) }}",
-        "options": {
-          "timeout": 60000,
-          "response": {
-            "response": {
-              "neverError": true
-            }
-          }
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {
+          "appendAttribution": false
         }
       },
-      "id": "send-fallback",
-      "name": "发送兜底文本",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.1,
+      "id": "发送文本",
+      "name": "发送文本",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
       "position": [
-        2420,
-        520
-      ]
+        896,
+        752
+      ],
+      "webhookId": "84b09a30-bb1d-4a24-8331-8f24ecd41d0b",
+      "credentials": {
+        "telegramApi": {
+          "id": "huDHcNDuJpoSxnO1",
+          "name": "MM_OClaw_bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-q",
+              "leftValue": "={{ $json.queryId }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "要应答吗",
+      "name": "要应答吗",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2016,
+        176
+      ],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "resource": "callback",
+        "queryId": "={{ $json.queryId }}",
+        "additionalFields": {
+          "show_alert": "={{ $json.showAlert || false }}",
+          "text": "={{ $json.ackText || '已更新' }}"
+        }
+      },
+      "id": "应答按钮",
+      "name": "应答按钮",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2240,
+        464
+      ],
+      "executeOnce": true,
+      "webhookId": "bf96ce7b-77ce-4e56-acbd-1752ba0b38c1",
+      "credentials": {
+        "telegramApi": {
+          "id": "huDHcNDuJpoSxnO1",
+          "name": "MM_OClaw_bot"
+        }
+      }
     }
   ],
   "connections": {
@@ -592,7 +1229,7 @@
         ],
         [
           {
-            "node": "渲染键盘",
+            "node": "准备面板",
             "type": "main",
             "index": 0
           }
@@ -649,7 +1286,7 @@
         ],
         [
           {
-            "node": "渲染键盘",
+            "node": "准备面板",
             "type": "main",
             "index": 0
           }
@@ -671,18 +1308,7 @@
       "main": [
         [
           {
-            "node": "渲染键盘",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "渲染键盘": {
-      "main": [
-        [
-          {
-            "node": "调用Telegram",
+            "node": "准备面板",
             "type": "main",
             "index": 0
           }
@@ -693,7 +1319,7 @@
       "main": [
         [
           {
-            "node": "调用Telegram",
+            "node": "应答按钮",
             "type": "main",
             "index": 0
           }
@@ -704,7 +1330,7 @@
       "main": [
         [
           {
-            "node": "调用Telegram",
+            "node": "发送文本",
             "type": "main",
             "index": 0
           }
@@ -788,29 +1414,57 @@
       "main": [
         [
           {
-            "node": "发送富消息",
+            "node": "发送结果",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "要应答吗",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "发送富消息": {
+    "准备面板": {
       "main": [
         [
           {
-            "node": "准备兜底文本",
+            "node": "面板路由",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "要应答吗",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "准备兜底文本": {
+    "面板路由": {
       "main": [
         [
           {
-            "node": "发送兜底文本",
+            "node": "编辑面板",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "发送面板",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "要应答吗": {
+      "main": [
+        [
+          {
+            "node": "应答按钮",
             "type": "main",
             "index": 0
           }
@@ -819,6 +1473,7 @@
     }
   },
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all"
   }
 }
