@@ -485,23 +485,61 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
     }
   };
 
+  /**
+   * Three states, not two. `credentialVerified` describes the PRIMARY key only, so
+   * a site whose primary fell back to cache while a secondary key fetched a live
+   * catalog used to render as a flat failure — operators then checked the
+   * connection page, where the same site refreshed fine. `partial` is that case.
+   */
+  const credentialStateOf = (site: ModelProbePreviewSite): 'verified' | 'partial' | 'cached' => {
+    if (site.credentialVerified) return 'verified';
+    return site.liveKeyCount > 0 ? 'partial' : 'cached';
+  };
+
+  // Only the genuinely cache-only sites belong in the warning banner: a site with a
+  // live secondary key has a proven credential, just not the primary one.
   const unverifiedSites = useMemo(
-    () => (preview?.sites ?? []).filter((site) => !site.credentialVerified),
+    () => (preview?.sites ?? []).filter((site) => credentialStateOf(site) === 'cached'),
     [preview],
   );
 
-  const renderCredentialBadge = (site: ModelProbePreviewSite) => (
-    <span
-      data-testid={`model-probe-preview-credential-${site.siteId}`}
-      style={{
-        ...badgeBase,
-        background: site.credentialVerified ? 'var(--color-success-bg)' : 'var(--color-warning-bg)',
-        color: site.credentialVerified ? 'var(--color-success)' : 'var(--color-warning)',
-      }}
-    >
-      {site.credentialVerified ? '已验证凭据 · 实时' : '未验证凭据 · 缓存'}
-    </span>
+  const partialSites = useMemo(
+    () => (preview?.sites ?? []).filter((site) => credentialStateOf(site) === 'partial'),
+    [preview],
   );
+
+  const renderCredentialBadge = (site: ModelProbePreviewSite) => {
+    const state = credentialStateOf(site);
+    // `-soft` is what index.css actually defines. The `-bg` names this chip used
+    // before are declared nowhere, so the background silently resolved to nothing.
+    const palette = {
+      verified: { bg: 'var(--color-success-soft)', fg: 'var(--color-success)', label: '已验证凭据 · 实时' },
+      partial: {
+        bg: 'var(--color-info-soft)',
+        fg: 'var(--color-info)',
+        label: `主 key 未验证 · ${site.liveKeyCount}/${site.probableKeyCount} 个 key 实时`,
+      },
+      cached: { bg: 'var(--color-warning-soft)', fg: 'var(--color-warning)', label: '未验证凭据 · 缓存' },
+    }[state];
+
+    return (
+      <span
+        data-testid={`model-probe-preview-credential-${site.siteId}`}
+        data-credential-state={state}
+        title={state === 'partial'
+          ? '主 key 这次没能实时取到模型列表，但这个站点下另有 key 取到了。站点级判定（写入探测结果、同步路由）只认主 key，所以这里仍算未验证；但站点本身是通的，模型列表是各 key 的并集。'
+          : undefined}
+        style={{
+          ...badgeBase,
+          background: palette.bg,
+          color: palette.fg,
+          ...(state === 'partial' ? { cursor: 'help' } : null),
+        }}
+      >
+        {palette.label}
+      </span>
+    );
+  };
 
   const renderPreviewSite = (site: ModelProbePreviewSite) => {
     const hasDetails = site.liveFailure || site.notes.length > 0;
@@ -607,6 +645,17 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
             title={`${unverifiedSites.map((site) => site.siteName).join('、')}：实时获取模型列表没有成功，这里显示的是缓存内容。多数上游适配器在拿不到模型列表时只返回空数组，所以密钥被吊销看起来和「暂时取不到」一模一样。把这些站点当作可用之前，请先确认它们的 API Key 仍然有效。`}
           >
             {unverifiedSites.length} 个站点用缓存列表（凭据未验证）— 鼠标悬停查看详情
+          </div>
+        )}
+
+        {partialSites.length > 0 && (
+          <div
+            className="alert alert-info"
+            data-testid="model-probe-preview-partial-warning"
+            style={{ cursor: 'help', position: 'relative' }}
+            title={`${partialSites.map((site) => site.siteName).join('、')}：主 key 这次没能实时取到模型列表，但站点下另有 key 取到了，所以站点本身是通的。站点级判定（写入结果、同步路由）只认主 key，这些站点仍标为「主 key 未验证」。如果只是想确认站点可用，可以忽略；如果希望主 key 也走实时，请到连接管理页检查它的 API Key。`}
+          >
+            {partialSites.length} 个站点主 key 未验证、但有其它 key 实时可用 — 鼠标悬停查看详情
           </div>
         )}
 

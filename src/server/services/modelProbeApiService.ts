@@ -195,6 +195,9 @@ export type ModelProbePreviewSiteResponse = {
   siteName: string;
   source: 'live' | 'cached';
   credentialVerified: boolean;
+  /** Probable keys that fetched their own live catalog; see the run-service type. */
+  liveKeyCount: number;
+  probableKeyCount: number;
   discoveredCount: number;
   models: string[];
   /** Probe requests this site contributes: the (key × model) product, not `models.length`. */
@@ -241,6 +244,8 @@ export function toModelProbePreviewResponse(preview: ModelProbePreview): ModelPr
       siteName: site.siteName,
       source: site.source,
       credentialVerified: site.credentialVerified,
+      liveKeyCount: site.liveKeyCount,
+      probableKeyCount: site.probableKeyCount,
       discoveredCount: site.discoveredCount,
       models: [...site.models],
       targetCount: site.targetCount,

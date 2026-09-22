@@ -40,6 +40,7 @@ type DbModule = typeof import('../../db/index.js');
 type RunServiceModule = typeof import('../../services/modelProbeRunService.js');
 type BackgroundTaskModule = typeof import('../../services/backgroundTaskService.js');
 type ApiServiceModule = typeof import('../../services/modelProbeApiService.js');
+type ConfigServiceModule = typeof import('../../services/modelProbeConfigService.js');
 
 const CREDENTIAL = 'sk-live-secret-credential-value-0001';
 
@@ -62,6 +63,7 @@ describe('model probe API routes', () => {
   let runService: RunServiceModule;
   let tasks: BackgroundTaskModule;
   let apiService: ApiServiceModule;
+  let configService: ConfigServiceModule;
   let updateCenterRoutes: (app: FastifyInstance) => Promise<void>;
   let dataDir = '';
   let siteId = 0;
@@ -81,6 +83,7 @@ describe('model probe API routes', () => {
     runService = await import('../../services/modelProbeRunService.js');
     tasks = await import('../../services/backgroundTaskService.js');
     apiService = await import('../../services/modelProbeApiService.js');
+    configService = await import('../../services/modelProbeConfigService.js');
 
     db = dbModule.db;
     schema = dbModule.schema;
@@ -155,12 +158,15 @@ describe('model probe API routes', () => {
       expect(body.config.siteConcurrency).toBe(5);
       expect(body.config.modelConcurrency).toBe(1);
       expect(body.config.syncToRouting).toBe(false);
-      expect(body.limits.minSiteConcurrency).toBe(1);
-      expect(body.limits.maxSiteConcurrency).toBe(10);
-      expect(body.limits.minModelConcurrency).toBe(1);
-      expect(body.limits.maxModelConcurrency).toBe(8);
+      expect(body.limits.minSiteConcurrency).toBe(configService.MODEL_PROBE_MIN_SITE_CONCURRENCY);
+      expect(body.limits.maxSiteConcurrency).toBe(configService.MODEL_PROBE_MAX_SITE_CONCURRENCY);
+      expect(body.limits.minModelConcurrency).toBe(configService.MODEL_PROBE_MIN_MODEL_CONCURRENCY);
+      expect(body.limits.maxModelConcurrency).toBe(configService.MODEL_PROBE_MAX_MODEL_CONCURRENCY);
       expect(body.limits.maxRunTargets).toBe(runService.MAX_ACTIVE_PROBE_RUN_TARGETS);
-      expect(body.limits.confirmTargetThreshold).toBeGreaterThan(0);
+      // The confirmation gate is deliberately disabled: the threshold is Infinity,
+      // which `JSON.stringify` emits as null. The only surviving pre-run gate is the
+      // hard `maxRunTargets` cap above.
+      expect(body.limits.confirmTargetThreshold).toBeNull();
     });
   });
 
@@ -466,29 +472,30 @@ describe('model probe API routes', () => {
       expect(response.json()).toMatchObject({ taskId: 'task-existing', reused: true });
     });
 
-    it('refuses a sweep over the confirmation threshold until the operator echoes the count', async () => {
+    /**
+     * The confirmation gate is disabled (threshold = Infinity). A sweep that used
+     * to trip the dialog now queues straight through — only the hard 300-target cap
+     * can still refuse a run. If the gate is ever re-enabled with a finite
+     * threshold, this test flips back to expecting a 409 `confirmation_required`.
+     */
+    it('queues a large sweep without a confirmation dialog while the gate is disabled', async () => {
       previewActiveModelProbeMock.mockResolvedValue(emptyPreview({ totalModels: 51 }));
+      queueActiveModelProbeMock.mockReturnValue(queued('task-no-gate'));
 
       const response = await app.inject({ method: 'POST', url: '/api/model-probe/run', payload: {} });
 
-      expect(response.statusCode).toBe(409);
-      const body = response.json() as {
-        success: boolean;
-        code: string;
-        targetCount: number;
-        confirmTargetThreshold: number;
-        preview: { totalModels: number };
-      };
-      expect(body.success).toBe(false);
-      expect(body.code).toBe('confirmation_required');
-      expect(body.targetCount).toBe(51);
-      expect(body.confirmTargetThreshold).toBe(50);
-      expect(body.preview.totalModels).toBe(51);
-      expect(queueActiveModelProbeMock).not.toHaveBeenCalled();
+      expect(response.statusCode).toBe(202);
+      expect(queueActiveModelProbeMock).toHaveBeenCalledWith({ authorizedTargetCount: 51 });
     });
 
-    it('refuses when the echoed count no longer matches the freshly computed one', async () => {
+    /**
+     * With the gate off, an echoed count is not required and a stale one does not
+     * refuse the run: the runner is always authorized with the FRESHLY computed
+     * count, not the echoed one, so a drifted echo is simply ignored here.
+     */
+    it('ignores a mismatched echoed count and authorizes the fresh one while the gate is disabled', async () => {
       previewActiveModelProbeMock.mockResolvedValue(emptyPreview({ totalModels: 80 }));
+      queueActiveModelProbeMock.mockReturnValue(queued('task-fresh-count'));
 
       const response = await app.inject({
         method: 'POST',
@@ -496,9 +503,8 @@ describe('model probe API routes', () => {
         payload: { confirmedTargetCount: 51 },
       });
 
-      expect(response.statusCode).toBe(409);
-      expect(response.json()).toMatchObject({ code: 'confirmation_required', targetCount: 80 });
-      expect(queueActiveModelProbeMock).not.toHaveBeenCalled();
+      expect(response.statusCode).toBe(202);
+      expect(queueActiveModelProbeMock).toHaveBeenCalledWith({ authorizedTargetCount: 80 });
     });
 
     it('queues once the echoed count matches', async () => {
@@ -1035,10 +1041,14 @@ describe('model probe API routes', () => {
           credential: CREDENTIAL,
         }],
       }));
-      const conflict = await app.inject({ method: 'POST', url: '/api/model-probe/run', payload: {} });
-      expect(conflict.statusCode).toBe(409);
-      expect(conflict.payload).not.toContain(CREDENTIAL);
-      expect(conflict.payload).not.toContain('"credential"');
+      // The gate is disabled, so a 90-target run queues rather than returning a 409
+      // dialog. The 202 body still echoes the preview, so the same redaction
+      // guarantee has to hold on this path too.
+      queueActiveModelProbeMock.mockReturnValue({ task: { id: 'task-redaction', status: 'pending' }, reused: false });
+      const queuedRun = await app.inject({ method: 'POST', url: '/api/model-probe/run', payload: {} });
+      expect(queuedRun.statusCode).toBe(202);
+      expect(queuedRun.payload).not.toContain(CREDENTIAL);
+      expect(queuedRun.payload).not.toContain('"credential"');
     });
 
     /**

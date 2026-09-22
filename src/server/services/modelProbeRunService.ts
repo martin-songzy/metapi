@@ -242,6 +242,20 @@ export type ModelProbePreviewSite = {
   source: ModelProbeDiscoverySource;
   /** False whenever models came from cache: the credential was never proven. */
   credentialVerified: boolean;
+  /**
+   * How many of this site's probable keys fetched a live catalog of their own.
+   *
+   * Needed because every other site-scoped field here describes the PRIMARY key
+   * only (see the `DiscoveryOutcome` doc comment for why that asymmetry is
+   * deliberate). When the primary falls back to cache but a secondary key is live,
+   * `credentialVerified` is false and `liveFailure` is set, yet the site is not
+   * actually unreachable and `models` is a real union — reporting that as a flat
+   * failure sent operators to the connection page, where the same site refreshed
+   * fine. The badge uses this to say "primary failed, another key is live" instead.
+   */
+  liveKeyCount: number;
+  /** Probable keys for this site, i.e. the denominator of `liveKeyCount`. */
+  probableKeyCount: number;
   discoveredCount: number;
   models: string[];
   /**
@@ -707,6 +721,20 @@ function isProbableDiscoveryKey(key: DiscoveryKeyOutcome): boolean {
   return key.skipReason === null && !!key.credential;
 }
 
+/**
+ * Probable keys that fetched a live catalog of their own.
+ *
+ * `source === 'live'` is per-key, so this stays true even when the primary key fell
+ * back to cache — which is exactly the case the site badge needs to tell apart from
+ * "this site is unreachable". A key with no models is not counted as live even if
+ * the fetch nominally succeeded: an empty live catalog proves nothing usable.
+ */
+function countSiteLiveKeys(outcome: DiscoveryOutcome): number {
+  return outcome.keys.filter(
+    (key) => isProbableDiscoveryKey(key) && key.source === 'live' && key.discovered.length > 0,
+  ).length;
+}
+
 /** Probe requests one site's discovery would issue: the (key × model) product. */
 function countSiteProbeTargets(outcome: DiscoveryOutcome): number {
   return outcome.keys.reduce(
@@ -734,6 +762,8 @@ export async function previewActiveModelProbe(input?: { siteIds?: number[] }): P
     siteName: outcome.site.name,
     source: outcome.source,
     credentialVerified: outcome.source === 'live',
+    liveKeyCount: countSiteLiveKeys(outcome),
+    probableKeyCount: outcome.keys.filter(isProbableDiscoveryKey).length,
     discoveredCount: outcome.discovered.length,
     models: outcome.models,
     targetCount: countSiteProbeTargets(outcome),
@@ -992,10 +1022,34 @@ async function runActiveModelProbe(
     else targetsBySite.set(siteId, [target]);
   }
 
+  // Concurrency visibility. The operator sets site concurrency to N but the log is a
+  // single seq-ordered stream, so N parallel sites flatten into one interleaved
+  // column and the parallelism is invisible — the reported symptom. Rather than one
+  // "start" line per site (which floods the log with ~N lines at once, explicitly
+  // rejected), a throttled progress line reports how many sites are ACTUALLY in
+  // flight at that moment, which is the number that proves the setting took effect.
+  //
+  // `sitesInFlight` is safe to mutate without a lock: the pool interleaves workers
+  // only at `await` points on this single thread, so the ++/-- pair around the inner
+  // loop is never torn. `peakSitesInFlight` is the honest headline — it is what the
+  // final summary quotes, because the instantaneous count at any single probe can be
+  // lower than the true peak once buckets start draining.
+  let sitesInFlight = 0;
+  let peakSitesInFlight = 0;
+  let completed = 0;
+  // ~10 progress lines over the whole sweep regardless of size, so the log stays
+  // well under TASK_LOG_LIMIT even alongside the per-model lines.
+  const progressStep = Math.max(1, Math.ceil(targets.length / 10));
+  let nextProgressAt = progressStep;
+
   await mapWithConcurrency(
     [...targetsBySite.values()],
     probeConfig.siteConcurrency,
-    async (siteTargets) => mapWithConcurrency(siteTargets, probeConfig.modelConcurrency, async (target) => {
+    async (siteTargets) => {
+    sitesInFlight += 1;
+    if (sitesInFlight > peakSitesInFlight) peakSitesInFlight = sitesInFlight;
+    try {
+      await mapWithConcurrency(siteTargets, probeConfig.modelConcurrency, async (target) => {
     // Checked per target rather than once, so a cancel lands within one probe
     // instead of at the end of the sweep. Every target after the flag is set
     // costs nothing, which is the whole point.
@@ -1118,7 +1172,20 @@ async function runActiveModelProbe(
       + (httpStatus != null ? ` HTTP ${httpStatus}` : '')
       + (failureKind ? ` (${failureKind})` : ''),
     );
-      }),
+
+    // Read after the counter bump so the snapshot includes this probe. Suppressed on
+    // the final target: the end-of-run summary already reports the totals, and a
+    // "进度 N/N" line right before it is noise.
+    completed += 1;
+    if (completed >= nextProgressAt && completed < targets.length) {
+      nextProgressAt += progressStep;
+      log(`进度 ${completed}/${targets.length} · 当前 ${sitesInFlight} 个站点并行探测（峰值 ${peakSitesInFlight}）`);
+    }
+      });
+    } finally {
+      sitesInFlight -= 1;
+    }
+    },
   );
 
   const counts = {
@@ -1174,6 +1241,7 @@ async function runActiveModelProbe(
     + (cancelled && !abandonedWork ? '，取消到达时全部目标都已探测完，没有漏掉任何模型' : '')
     + `，supported ${counts.supported}、unsupported ${counts.unsupported}、`
     + `inconclusive ${counts.inconclusive}、skipped ${counts.skipped}；`
+    + `站点并行峰值 ${peakSitesInFlight}；`
     + `禁用 ${sync.disabled} 个，路由${sync.routingSynced ? '已' : '未'}重建`,
   );
 

@@ -885,6 +885,17 @@ export type ModelProbePreviewSite = {
   source: "live" | "cached";
   /** False whenever the model list came from cache: the credential was never proven. */
   credentialVerified: boolean;
+  /**
+   * Probable keys that fetched a live catalog of their own.
+   *
+   * Every other site-scoped field describes the PRIMARY key only, so a site whose
+   * primary key fell back to cache while a secondary key answered live still has
+   * `credentialVerified: false` and a `liveFailure`. This count is what lets the
+   * badge say "primary failed, another key is live" instead of a flat failure.
+   */
+  liveKeyCount: number;
+  /** Probable keys for this site, i.e. the denominator of `liveKeyCount`. */
+  probableKeyCount: number;
   discoveredCount: number;
   models: string[];
   /** Probe requests this site contributes: the (key × model) product, not `models.length`. */
