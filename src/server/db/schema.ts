@@ -47,6 +47,9 @@ export const sites = sqliteTable('sites', {
   // Empty string means "no per-site override"; resolveModelProbeUserAgent then
   // falls back to the global preset.
   probeUserAgent: text('probe_user_agent').notNull().default(''),
+  // Whether this site participates in active and scheduled model availability probes.
+  // Existing sites default to true so adding the opt-out preserves current behavior.
+  modelProbeEnabled: integer('model_probe_enabled', { mode: 'boolean' }).notNull().default(true),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),
 }, (table) => ({

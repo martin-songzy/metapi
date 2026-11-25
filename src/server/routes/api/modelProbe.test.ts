@@ -260,7 +260,13 @@ describe('model probe API routes', () => {
       expect(response.statusCode).toBe(200);
       const body = response.json() as {
         success: boolean;
-        sites: Array<{ id: number; name: string; probeEndpointType: string; probeUserAgent: string }>;
+        sites: Array<{
+        id: number;
+        name: string;
+        probeEndpointType: string;
+        probeUserAgent: string;
+        modelProbeEnabled: boolean;
+      }>;
       };
       expect(body.success).toBe(true);
       expect(body.sites).toHaveLength(1);
@@ -269,6 +275,7 @@ describe('model probe API routes', () => {
         name: '主站',
         probeEndpointType: 'auto',
         probeUserAgent: '',
+        modelProbeEnabled: true,
       });
       expect(response.payload).not.toContain('site-api-key-should-never-be-served');
       expect(Object.keys(body.sites[0] ?? {})).not.toContain('apiKey');
@@ -278,20 +285,27 @@ describe('model probe API routes', () => {
       const response = await app.inject({
         method: 'PUT',
         url: `/api/model-probe/sites/${siteId}`,
-        payload: { probeEndpointType: 'messages', probeUserAgent: '  claude-cli/2.1.63  ' },
+        payload: {
+          probeEndpointType: 'messages',
+          probeUserAgent: '  claude-cli/2.1.63  ',
+          modelProbeEnabled: false,
+        },
       });
 
       expect(response.statusCode).toBe(200);
-      const body = response.json() as { site: { probeEndpointType: string; probeUserAgent: string } };
+      const body = response.json() as { site: { probeEndpointType: string; probeUserAgent: string; modelProbeEnabled: boolean } };
       expect(body.site.probeEndpointType).toBe('messages');
       expect(body.site.probeUserAgent).toBe('claude-cli/2.1.63');
+      expect(body.site.modelProbeEnabled).toBe(false);
 
       const stored = await db.select({
         probeEndpointType: schema.sites.probeEndpointType,
         probeUserAgent: schema.sites.probeUserAgent,
+        modelProbeEnabled: schema.sites.modelProbeEnabled,
       }).from(schema.sites).get();
       expect(stored?.probeEndpointType).toBe('messages');
       expect(stored?.probeUserAgent).toBe('claude-cli/2.1.63');
+      expect(stored?.modelProbeEnabled).toBe(false);
     });
 
     it('leaves the sibling field untouched when only one is supplied', async () => {

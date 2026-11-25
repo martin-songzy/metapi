@@ -512,6 +512,26 @@ describe('modelProbeRunService', () => {
       ]);
     });
 
+    it('excludes sites opted out of model availability from previews, even when selected explicitly', async () => {
+      const enabled = await seedSite({ name: 'enabled-site' });
+      const excluded = await seedSite({ name: 'excluded-site', modelProbeEnabled: false });
+      await setInterest(['gpt']);
+      primeDiscovery([
+        { site: enabled.site, account: enabled.account, models: ['gpt-4o'] },
+        { site: excluded.site, account: excluded.account, models: ['gpt-4o'] },
+      ]);
+
+      const allSitesPreview = await service.previewActiveModelProbe();
+      expect(allSitesPreview.sites.map((entry) => entry.siteId)).toEqual([enabled.site.id]);
+      expect(allSitesPreview.skipped).toEqual([
+        expect.objectContaining({ siteId: excluded.site.id, code: 'site_probe_disabled' }),
+      ]);
+
+      const explicitPreview = await service.previewActiveModelProbe({ siteIds: [excluded.site.id] });
+      expect(explicitPreview.sites).toEqual([]);
+      expect(explicitPreview.skipped[0]?.code).toBe('site_probe_disabled');
+    });
+
     it('still skips a disabled site that was named explicitly', async () => {
       const disabled = await seedSite({ status: 'disabled' });
       await setInterest(['gpt']);

@@ -856,6 +856,7 @@ export type ModelProbeSite = {
   status: string;
   probeEndpointType: ModelProbeEndpointTypeOption;
   probeUserAgent: string;
+  modelProbeEnabled: boolean;
 };
 
 export type ModelProbeSitesResponse = {
@@ -866,6 +867,7 @@ export type ModelProbeSitesResponse = {
 export type ModelProbeSiteConfigPayload = {
   probeEndpointType?: ModelProbeEndpointTypeOption;
   probeUserAgent?: string;
+  modelProbeEnabled?: boolean;
 };
 
 export type ModelProbeSiteConfigResponse = {

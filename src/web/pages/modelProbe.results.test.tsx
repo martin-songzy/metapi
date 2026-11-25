@@ -63,6 +63,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'auto' as const,
     probeUserAgent: '',
+    modelProbeEnabled: true,
   },
   {
     id: 9,
@@ -72,6 +73,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'chat' as const,
     probeUserAgent: '',
+    modelProbeEnabled: true,
   },
 ];
 

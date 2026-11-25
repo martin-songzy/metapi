@@ -66,7 +66,7 @@ function buildDrafts(
 export function siteHasProbeOverride(site: ModelProbeSite): boolean {
   const endpointOverridden = normalizeModelProbeEndpointType(site.probeEndpointType) !== 'auto';
   const userAgentOverridden = String(site.probeUserAgent ?? '').trim().length > 0;
-  return endpointOverridden || userAgentOverridden;
+  return site.modelProbeEnabled === false || endpointOverridden || userAgentOverridden;
 }
 
 export default function ModelProbeSitesPanel({
@@ -137,7 +137,9 @@ export default function ModelProbeSitesPanel({
     value: String(site.id),
     // The marker rides on the label because `ModernSelect` renders options as
     // plain text; there is no per-option slot for a badge.
-    label: siteHasProbeOverride(site) ? `${site.name} ● 已自定义` : site.name,
+    label: site.modelProbeEnabled === false
+      ? `${site.name} ● 不参与检测`
+      : siteHasProbeOverride(site) ? `${site.name} ● 已自定义` : site.name,
   })), [filteredSites]);
 
   const selectedSite = filteredSites.find((site) => site.id === selectedSiteId) ?? null;
@@ -196,6 +198,18 @@ export default function ModelProbeSitesPanel({
       </span>
     );
   };
+
+  const renderParticipationControl = (site: ModelProbeSite, draft: ModelProbeSiteDraft) => (
+    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+      <input
+        type="checkbox"
+        data-testid={`model-probe-site-participation-${site.id}`}
+        checked={draft.modelProbeEnabled}
+        onChange={(event) => updateDraft(site.id, { modelProbeEnabled: event.target.checked })}
+      />
+      参与模型可用性检测
+    </label>
+  );
 
   const renderEndpointSelect = (site: ModelProbeSite, draft: ModelProbeSiteDraft) => (
     <ModernSelect
@@ -264,7 +278,7 @@ export default function ModelProbeSitesPanel({
       <div style={{ marginBottom: 12 }}>
         <div style={{ fontSize: 15, fontWeight: 600 }}>站点探测设置</div>
         <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 6, lineHeight: 1.6 }}>
-          每个站点可单独指定探测使用的接口类型与 User-Agent。接口类型选「自动」时按站点平台能力推导；User-Agent 选「继承全局」时使用上方的默认预设。
+          每个站点可单独决定是否参与模型可用性检测，并指定探测使用的接口类型与 User-Agent。关闭参与开关后，该站点会从网页和 Telegram 的探测中排除，发起探测时显示为灰色且不可选。接口类型选「自动」时按站点平台能力推导；User-Agent 选「继承全局」时使用上方的默认预设。
           <br />
           站点这一列只有「继承全局」和「发送某个具体 UA」两种状态：留空即继承，无法只让单个站点不发送 UA。
           确实需要完全不发送时，请把上方的「默认 User-Agent」设为「自定义 / 不发送」，并让这些站点保持继承全局。
@@ -300,6 +314,7 @@ export default function ModelProbeSitesPanel({
                 footerActions={renderSaveButton(site, draft)}
               >
                 <MobileField label="平台" value={<span className="badge badge-muted">{site.platform}</span>} />
+                <MobileField label="检测范围" stacked value={renderParticipationControl(site, draft)} />
                 <MobileField label="接口类型" stacked value={renderEndpointSelect(site, draft)} />
                 <MobileField label="User-Agent" stacked value={renderUserAgentControl(site, draft)} />
               </MobileCard>
@@ -352,6 +367,10 @@ export default function ModelProbeSitesPanel({
                 </div>
 
                 <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 200px', minWidth: 180 }}>
+                    <div style={labelStyle}>检测范围</div>
+                    {renderParticipationControl(site, draft)}
+                  </div>
                   <div style={{ flex: '1 1 200px', minWidth: 180 }}>
                     <div style={labelStyle}>接口类型</div>
                     {renderEndpointSelect(site, draft)}

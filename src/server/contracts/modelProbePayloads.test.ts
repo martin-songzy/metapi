@@ -207,6 +207,13 @@ describe('parseModelProbeSiteConfigPayload', () => {
     }
   });
 
+  it('accepts a boolean participation setting and rejects other values', () => {
+    expect(parseModelProbeSiteConfigPayload({ modelProbeEnabled: false }).success).toBe(true);
+    const invalid = parseModelProbeSiteConfigPayload({ modelProbeEnabled: 'false' });
+    expect(invalid.success).toBe(false);
+    if (!invalid.success) expect(invalid.error).toContain('modelProbeEnabled');
+  });
+
   it('trims the user agent and rejects one longer than 512 characters', () => {
     const trimmed = parseModelProbeSiteConfigPayload({ probeUserAgent: '  codex_cli_rs/0.20.0  ' });
     expect(trimmed.success).toBe(true);

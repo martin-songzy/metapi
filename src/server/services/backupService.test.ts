@@ -72,6 +72,7 @@ describe('backupService', () => {
       apiKey: 'site-api-key',
       probeEndpointType: 'messages',
       probeUserAgent: 'claude-cli/2.1.63 (external, cli)',
+      modelProbeEnabled: false,
       createdAt: now,
       updatedAt: now,
     }).returning().get();
@@ -289,6 +290,7 @@ describe('backupService', () => {
     // passing while each restore quietly reverts the site to auto / no override.
     expect(restoredSite?.probeEndpointType).toBe('messages');
     expect(restoredSite?.probeUserAgent).toBe('claude-cli/2.1.63 (external, cli)');
+    expect(restoredSite?.modelProbeEnabled).toBe(false);
 
     expect(restoredAccount?.isPinned).toBe(true);
     expect(restoredAccount?.sortOrder).toBe(7);

@@ -87,6 +87,7 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   const [scopeSiteIds, setScopeSiteIds] = useState<number[]>([]);
   // 添加悬停样式
   useEffect(() => {
+    if (typeof document === 'undefined') return;
     const styleId = 'model-probe-site-hover-styles';
     if (document.getElementById(styleId)) return;
 
@@ -108,19 +109,17 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
   const [previewing, setPreviewing] = useState(false);
   const [previewError, setPreviewError] = useState('');
 
-  /**
-   * Only sites a sweep can actually probe are offered as scope.
-   *
-   * A disabled site is skipped by the runner whatever the operator ticks — it comes
-   * back under 跳过的站点 with `site_disabled` — so listing it as a choice offered a
-   * decision that had no effect. A missing status counts as active, matching the
-   * server's own reading of legacy rows.
-   */
-  const selectableSites = useMemo(
+  /** Sites disabled in site management or opted out in this panel cannot join a sweep. */
+  const activeSites = useMemo(
     () => sites.filter((site) => (site.status || 'active') !== 'disabled'),
     [sites],
   );
-  const hiddenDisabledSiteCount = sites.length - selectableSites.length;
+  const selectableSites = useMemo(
+    () => activeSites.filter((site) => site.modelProbeEnabled !== false),
+    [activeSites],
+  );
+  const hiddenDisabledSiteCount = sites.length - activeSites.length;
+  const excludedSiteCount = activeSites.length - selectableSites.length;
 
   /**
    * A ticked site that has since been disabled is dropped from the selection, not
@@ -998,23 +997,39 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           )}
         </div>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          {selectableSites.length === 0 ? (
+          {activeSites.length === 0 ? (
             <span style={hintStyle}>
               {hiddenDisabledSiteCount > 0
                 ? '所有站点都已停用，没有可探测的站点。'
                 : '还没有可探测的站点。'}
             </span>
-          ) : selectableSites.map((site) => (
-            <label key={site.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                data-testid={`model-probe-scope-site-${site.id}`}
-                checked={scopeSiteIds.includes(site.id)}
-                onChange={(event) => toggleScopeSite(site.id, event.target.checked)}
-              />
-              {site.name}
-            </label>
-          ))}
+          ) : activeSites.map((site) => {
+            const excluded = site.modelProbeEnabled === false;
+            return (
+              <label
+                key={site.id}
+                data-testid={`model-probe-scope-option-${site.id}`}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  fontSize: 13,
+                  cursor: excluded ? 'not-allowed' : 'pointer',
+                  color: excluded ? 'var(--color-text-muted)' : undefined,
+                  opacity: excluded ? 0.6 : 1,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  data-testid={`model-probe-scope-site-${site.id}`}
+                  checked={!excluded && scopeSiteIds.includes(site.id)}
+                  disabled={excluded}
+                  onChange={(event) => toggleScopeSite(site.id, event.target.checked)}
+                />
+                {site.name}{excluded ? '（不参与检测）' : ''}
+              </label>
+            );
+          })}
         </div>
         {/*
           An empty selection used to mean "every site" server-side. That reads as the
@@ -1031,9 +1046,14 @@ export default function ModelProbeRunPanel({ sites, isMobile, onRunFinished }: M
           Named rather than silently absent: a site vanishing from this list with no
           explanation reads as data loss, and the reason is one an operator can act on.
         */}
+        {excludedSiteCount > 0 && (
+          <div style={{ ...hintStyle, marginTop: 6 }} data-testid="model-probe-scope-excluded-note">
+            {excludedSiteCount} 个站点已设置为不参与检测，选项已禁用；如需检测，请在站点探测设置中重新开启。
+          </div>
+        )}
         {hiddenDisabledSiteCount > 0 && (
           <div style={{ ...hintStyle, marginTop: 6 }} data-testid="model-probe-scope-disabled-note">
-            {hiddenDisabledSiteCount} 个已停用的站点未列出：探测会跳过它们，在站点管理里重新启用后才会出现。
+            {hiddenDisabledSiteCount} 个已停用站点未列出：请在站点管理重新启用后再检测。
           </div>
         )}
       </div>

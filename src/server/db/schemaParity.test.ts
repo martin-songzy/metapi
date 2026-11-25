@@ -141,13 +141,13 @@ describe('database schema parity', () => {
     expect(postgresBootstrap).toContain('"model_probe_results_site_model_unique"');
   });
 
-  // Task 5 shipped these two columns; this only guards that the generated
-  // artifacts still carry them, since the probe result table above is useless if
-  // the per-site request profile that produced it stops being portable.
-  it('keeps the per-site probe request profile in the generated contract artifacts', () => {
+  // Guards that per-site probe settings remain portable across all generated schema artifacts.
+  it('keeps the per-site probe profile and participation setting in generated schema artifacts', () => {
     const contract = JSON.parse(readFileSync(schemaContractPath, 'utf8')) as SchemaContract;
     const mysqlBootstrap = readFileSync(resolve(generatedDir, 'mysql.bootstrap.sql'), 'utf8');
     const postgresBootstrap = readFileSync(resolve(generatedDir, 'postgres.bootstrap.sql'), 'utf8');
+    const mysqlUpgrade = readFileSync(resolve(generatedDir, 'mysql.upgrade.sql'), 'utf8');
+    const postgresUpgrade = readFileSync(resolve(generatedDir, 'postgres.upgrade.sql'), 'utf8');
 
     expect(contract.tables.sites?.columns.probe_endpoint_type).toMatchObject({
       logicalType: 'text',
@@ -159,11 +159,22 @@ describe('database schema parity', () => {
       notNull: true,
       defaultValue: "''",
     });
+    expect(contract.tables.sites?.columns.model_probe_enabled).toMatchObject({
+      logicalType: 'boolean',
+      notNull: true,
+      defaultValue: '1',
+    });
     expect(mysqlBootstrap).toContain('`probe_endpoint_type`');
     // Widened past the default VARCHAR(191) so a long client user agent is not
     // truncated on MySQL alone.
     expect(mysqlBootstrap).toContain('`probe_user_agent` VARCHAR(512)');
     expect(postgresBootstrap).toContain('"probe_endpoint_type"');
     expect(postgresBootstrap).toContain('"probe_user_agent"');
+    expect(mysqlBootstrap).toContain('`model_probe_enabled` BOOLEAN NOT NULL DEFAULT 1');
+    expect(postgresBootstrap).toContain('"model_probe_enabled" BOOLEAN NOT NULL DEFAULT 1');
+    expect(mysqlUpgrade).toContain('CREATE TABLE IF NOT EXISTS `model_probe_key_results`');
+    expect(postgresUpgrade).toContain('CREATE TABLE IF NOT EXISTS "model_probe_key_results"');
+    expect(mysqlUpgrade).toContain('ADD COLUMN `model_probe_enabled` BOOLEAN NOT NULL DEFAULT 1');
+    expect(postgresUpgrade).toContain('ADD COLUMN "model_probe_enabled" BOOLEAN NOT NULL DEFAULT 1');
   });
 });

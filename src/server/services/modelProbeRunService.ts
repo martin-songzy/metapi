@@ -226,7 +226,7 @@ export const MODEL_PROBE_UPSTREAM_TEXT_FIELDS: readonly string[] = [
   'skippedSites.message',
 ];
 
-export type ModelProbeSkipCode = ModelProbeDiscoveryErrorCode | 'site_disabled' | 'discovery_failed';
+export type ModelProbeSkipCode = ModelProbeDiscoveryErrorCode | 'site_disabled' | 'site_probe_disabled' | 'discovery_failed';
 
 export type ModelProbeSkippedSite = {
   siteId: number;
@@ -591,6 +591,15 @@ async function resolveTargetSites(scope: ModelProbeScope): Promise<{
         siteName: row.name,
         code: 'site_disabled',
         message: '站点已停用，批量探测不会对其消耗配额',
+      });
+      continue;
+    }
+    if (row.modelProbeEnabled === false) {
+      skipped.push({
+        siteId: row.id,
+        siteName: row.name,
+        code: 'site_probe_disabled',
+        message: '该站点已设置为不参与模型可用性检测',
       });
       continue;
     }

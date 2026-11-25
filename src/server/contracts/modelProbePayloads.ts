@@ -94,6 +94,7 @@ export const probeUserAgentSchema = z.string().trim().max(MAX_PROBE_USER_AGENT_L
 const modelProbeSiteConfigPayloadSchema = z.object({
   probeEndpointType: probeEndpointTypeSchema.optional(),
   probeUserAgent: probeUserAgentSchema.optional(),
+  modelProbeEnabled: z.boolean().optional(),
 }).strict();
 
 const siteIdSchema = z.number().int().positive();

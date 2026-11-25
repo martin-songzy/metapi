@@ -511,6 +511,7 @@ export type ModelProbeSiteView = {
   status: string;
   probeEndpointType: ModelProbeEndpointType;
   probeUserAgent: string;
+  modelProbeEnabled: boolean;
 };
 
 /**
@@ -525,6 +526,7 @@ const siteViewColumns = {
   status: schema.sites.status,
   probeEndpointType: schema.sites.probeEndpointType,
   probeUserAgent: schema.sites.probeUserAgent,
+  modelProbeEnabled: schema.sites.modelProbeEnabled,
 };
 
 function toSiteView(row: {
@@ -535,6 +537,7 @@ function toSiteView(row: {
   status: string | null;
   probeEndpointType: string | null;
   probeUserAgent: string | null;
+  modelProbeEnabled: boolean | null;
 }): ModelProbeSiteView {
   return {
     id: row.id,
@@ -546,6 +549,7 @@ function toSiteView(row: {
     // so normalize on read the way every other probe reader does.
     probeEndpointType: normalizeModelProbeEndpointType(row.probeEndpointType),
     probeUserAgent: row.probeUserAgent ?? '',
+    modelProbeEnabled: row.modelProbeEnabled !== false,
   };
 }
 
@@ -574,7 +578,11 @@ export async function listModelProbeSites(): Promise<ModelProbeSiteView[]> {
  */
 export async function updateModelProbeSiteConfig(
   siteId: number,
-  patch: { probeEndpointType?: ModelProbeEndpointType; probeUserAgent?: string },
+  patch: {
+    probeEndpointType?: ModelProbeEndpointType;
+    probeUserAgent?: string;
+    modelProbeEnabled?: boolean;
+  },
 ): Promise<ModelProbeSiteView | null> {
   const existing = await db.select(siteViewColumns)
     .from(schema.sites)
@@ -585,6 +593,7 @@ export async function updateModelProbeSiteConfig(
   const updates: Record<string, unknown> = {};
   if (patch.probeEndpointType !== undefined) updates.probeEndpointType = patch.probeEndpointType;
   if (patch.probeUserAgent !== undefined) updates.probeUserAgent = patch.probeUserAgent;
+  if (patch.modelProbeEnabled !== undefined) updates.modelProbeEnabled = patch.modelProbeEnabled;
 
   if (Object.keys(updates).length > 0) {
     updates.updatedAt = new Date().toISOString();

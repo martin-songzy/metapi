@@ -130,6 +130,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'auto' as const,
     probeUserAgent: '',
+    modelProbeEnabled: true,
   },
   {
     id: 9,
@@ -139,6 +140,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'chat' as const,
     probeUserAgent: 'my-own-agent/1.0',
+    modelProbeEnabled: true,
   },
 ];
 
@@ -152,6 +154,11 @@ async function renderPage() {
         </ToastProvider>
       </MemoryRouter>,
     );
+  });
+  await flushMicrotasks();
+  const settingsTab = root.root.find((node) => node.type === 'button' && collectText(node).trim() === '设置');
+  await act(async () => {
+    settingsTab.props.onClick();
   });
   await flushMicrotasks();
   return root;
@@ -966,6 +973,11 @@ describe('ModelProbe per-site configuration panel', () => {
   it('saves a preset User-Agent as its literal value together with the endpoint', async () => {
     const root = await renderPage();
     try {
+      const participation = findByTestId(root.root, 'model-probe-site-participation-4');
+      await act(async () => {
+        participation.props.onChange({ target: { checked: false } });
+      });
+
       const endpointSelect = findByTestId(root.root, 'model-probe-site-endpoint-4');
       const messagesOption = endpointSelect.find((node) => (
         node.type === 'button'
@@ -996,6 +1008,7 @@ describe('ModelProbe per-site configuration panel', () => {
       expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(4, {
         probeEndpointType: 'messages',
         probeUserAgent: 'codex_cli_rs/0.20.0',
+        modelProbeEnabled: false,
       });
     } finally {
       root.unmount();
@@ -1032,6 +1045,7 @@ describe('ModelProbe per-site configuration panel', () => {
       expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(9, {
         probeEndpointType: 'chat',
         probeUserAgent: 'edited-agent/2.0',
+        modelProbeEnabled: true,
       });
     } finally {
       root.unmount();
@@ -1103,6 +1117,7 @@ describe('ModelProbe per-site configuration panel', () => {
       expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(9, {
         probeEndpointType: 'chat',
         probeUserAgent: '',
+        modelProbeEnabled: true,
       });
     } finally {
       root.unmount();
@@ -1255,6 +1270,7 @@ describe('ModelProbe per-site User-Agent with a non-blank global custom preset',
       expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(4, {
         probeEndpointType: 'auto',
         probeUserAgent: GLOBAL_CUSTOM_UA,
+        modelProbeEnabled: true,
       });
     } finally {
       root.unmount();
@@ -1293,6 +1309,7 @@ describe('ModelProbe per-site User-Agent with a non-blank global custom preset',
       expect(apiMock.saveModelProbeSiteConfig).toHaveBeenCalledWith(4, {
         probeEndpointType: 'messages',
         probeUserAgent: GLOBAL_CUSTOM_UA,
+        modelProbeEnabled: true,
       });
     } finally {
       root.unmount();

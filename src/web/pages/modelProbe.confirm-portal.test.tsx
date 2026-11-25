@@ -51,6 +51,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'auto',
     probeUserAgent: '',
+    modelProbeEnabled: true,
   },
 ];
 

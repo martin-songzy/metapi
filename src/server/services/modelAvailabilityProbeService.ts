@@ -150,6 +150,7 @@ async function loadActiveProbeAccountContext(accountId: number): Promise<ProbeAc
   if (!accountRow) return null;
   if ((accountRow.accounts.status || 'active') !== 'active') return null;
   if ((accountRow.sites.status || 'active') !== 'active') return null;
+  if (accountRow.sites.modelProbeEnabled === false) return null;
   return {
     account: accountRow.accounts,
     site: accountRow.sites,

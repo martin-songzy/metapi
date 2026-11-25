@@ -428,6 +428,7 @@ export function modelProbeUserAgentPresetIdFromChoice(choice: string): string | 
 
 export type ModelProbeSiteDraft = {
   probeEndpointType: ModelProbeEndpointType;
+  modelProbeEnabled: boolean;
   /** Preset id, or one of the two UI-only sentinels. */
   userAgentChoice: ModelProbeSiteUserAgentChoice;
   /** Kept even while a preset is selected so switching back to 自定义 does not lose the text. */
@@ -480,6 +481,7 @@ export function siteDraftFromSite(
   if (!stored) {
     return {
       probeEndpointType: normalizeModelProbeEndpointType(site.probeEndpointType),
+      modelProbeEnabled: site.modelProbeEnabled !== false,
       userAgentChoice: MODEL_PROBE_UA_INHERIT,
       customUserAgent: '',
     };
@@ -488,6 +490,7 @@ export function siteDraftFromSite(
   const preset = selectableUserAgentPresets(presets).find((entry) => entry.value.trim() === stored);
   return {
     probeEndpointType: normalizeModelProbeEndpointType(site.probeEndpointType),
+    modelProbeEnabled: site.modelProbeEnabled !== false,
     userAgentChoice: preset
       ? modelProbeUserAgentPresetChoice(preset.id)
       : MODEL_PROBE_UA_SITE_CUSTOM,
@@ -504,6 +507,7 @@ export function siteConfigPayloadFromDraft(
   return {
     probeEndpointType: draft.probeEndpointType,
     probeUserAgent: resolveDraftUserAgent(draft, presets),
+    modelProbeEnabled: draft.modelProbeEnabled,
   };
 }
 
@@ -532,6 +536,7 @@ function resolveDraftUserAgent(
 
 export function siteDraftEquals(left: ModelProbeSiteDraft, right: ModelProbeSiteDraft): boolean {
   return left.probeEndpointType === right.probeEndpointType
+    && left.modelProbeEnabled === right.modelProbeEnabled
     && left.userAgentChoice === right.userAgentChoice
     && left.customUserAgent.trim() === right.customUserAgent.trim();
 }

@@ -91,6 +91,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'auto' as const,
     probeUserAgent: '',
+    modelProbeEnabled: true,
   },
   {
     id: 9,
@@ -100,6 +101,7 @@ const SITES = [
     status: 'active',
     probeEndpointType: 'chat' as const,
     probeUserAgent: '',
+    modelProbeEnabled: true,
   },
 ];
 
@@ -754,6 +756,23 @@ describe('ModelProbe terminal state honesty', () => {
 });
 
 describe('ModelProbe run scope', () => {
+  it('shows opted-out sites as disabled scope options and excludes them from selection', async () => {
+    apiMock.getModelProbeSites.mockResolvedValue({
+      success: true,
+      sites: [SITES[0], { ...SITES[1], modelProbeEnabled: false }],
+    });
+    const root = await renderPage();
+    try {
+      expect(findByTestId(root.root, 'model-probe-scope-site-4').props.checked).toBe(true);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.checked).toBe(false);
+      expect(findByTestId(root.root, 'model-probe-scope-site-9').props.disabled).toBe(true);
+      expect(collectText(findByTestId(root.root, 'model-probe-scope-option-9'))).toContain('不参与检测');
+      expect(collectText(findByTestId(root.root, 'model-probe-scope-excluded-note'))).toContain('1 个站点');
+    } finally {
+      root.unmount();
+    }
+  });
+
   it('starts with every selectable site ticked', async () => {
     const root = await renderPage();
     try {

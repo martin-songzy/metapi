@@ -2307,6 +2307,12 @@
           "notNull": false,
           "defaultValue": null,
           "primaryKey": false
+        },
+        "model_probe_enabled": {
+          "logicalType": "boolean",
+          "notNull": true,
+          "defaultValue": "1",
+          "primaryKey": false
         }
       }
     },

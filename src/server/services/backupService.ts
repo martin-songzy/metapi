@@ -811,6 +811,7 @@ function buildAllApiHubV2AccountsSection(data: RawBackupData): {
       postRefreshProbeLatencyThresholdMs: 0,
       probeEndpointType: 'auto',
       probeUserAgent: '',
+      modelProbeEnabled: true,
       createdAt: input.createdAt,
       updatedAt: input.updatedAt,
     });
@@ -1061,6 +1062,7 @@ function buildAccountsSectionFromRefBackup(data: RawBackupData): AccountsBackupS
         postRefreshProbeLatencyThresholdMs: 0,
         probeEndpointType: 'auto',
         probeUserAgent: '',
+        modelProbeEnabled: true,
         createdAt: toIsoString(item.created_at),
         updatedAt: toIsoString(item.updated_at),
       });
@@ -1825,6 +1827,7 @@ async function importAccountsSection(section: AccountsBackupSection): Promise<vo
         // otherwise land in the column verbatim and mis-target that site's probes.
         probeEndpointType: normalizeModelProbeEndpointType(row.probeEndpointType),
         probeUserAgent: (row.probeUserAgent ?? '').slice(0, MAX_PROBE_USER_AGENT_LENGTH),
+        modelProbeEnabled: row.modelProbeEnabled === false ? false : true,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
       }).run();

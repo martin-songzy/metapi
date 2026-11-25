@@ -438,6 +438,40 @@ describe('modelAvailabilityProbeService', () => {
     expect(dispatchRuntimeRequestMock).not.toHaveBeenCalled();
   });
 
+  it('does not probe accounts belonging to a site opted out of model availability checks', async () => {
+    const site = await db.insert(schema.sites).values({
+      name: 'excluded-site',
+      url: 'https://excluded.example.com',
+      platform: 'new-api',
+      status: 'active',
+      modelProbeEnabled: false,
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'excluded-user',
+      accessToken: '',
+      apiToken: 'sk-excluded',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.modelAvailability).values({
+      accountId: account.id,
+      modelName: 'gpt-excluded',
+      available: true,
+      checkedAt: '2026-03-20T00:00:00.000Z',
+    }).run();
+
+    const result = await executeModelAvailabilityProbe({
+      accountId: account.id,
+      rebuildRoutes: false,
+    });
+
+    expect(result.summary.totalAccounts).toBe(0);
+    expect(result.results).toEqual([]);
+    expect(dispatchRuntimeRequestMock).not.toHaveBeenCalled();
+  });
+
   it('skips an account when another probe already holds the execution lease', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'leased-site',

@@ -156,6 +156,7 @@ describe('ModelProbe mobile rendering', () => {
           status: 'active',
           probeEndpointType: 'auto',
           probeUserAgent: '',
+          modelProbeEnabled: true,
         },
       ],
     });
