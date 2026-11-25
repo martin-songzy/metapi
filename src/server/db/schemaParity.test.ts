@@ -162,7 +162,7 @@ describe('database schema parity', () => {
     expect(contract.tables.sites?.columns.model_probe_enabled).toMatchObject({
       logicalType: 'boolean',
       notNull: true,
-      defaultValue: '1',
+      defaultValue: 'true',
     });
     expect(mysqlBootstrap).toContain('`probe_endpoint_type`');
     // Widened past the default VARCHAR(191) so a long client user agent is not
@@ -170,11 +170,11 @@ describe('database schema parity', () => {
     expect(mysqlBootstrap).toContain('`probe_user_agent` VARCHAR(512)');
     expect(postgresBootstrap).toContain('"probe_endpoint_type"');
     expect(postgresBootstrap).toContain('"probe_user_agent"');
-    expect(mysqlBootstrap).toContain('`model_probe_enabled` BOOLEAN NOT NULL DEFAULT 1');
-    expect(postgresBootstrap).toContain('"model_probe_enabled" BOOLEAN NOT NULL DEFAULT 1');
+    expect(mysqlBootstrap).toContain('`model_probe_enabled` BOOLEAN NOT NULL DEFAULT true');
+    expect(postgresBootstrap).toContain('"model_probe_enabled" BOOLEAN NOT NULL DEFAULT true');
     expect(mysqlUpgrade).toContain('CREATE TABLE IF NOT EXISTS `model_probe_key_results`');
     expect(postgresUpgrade).toContain('CREATE TABLE IF NOT EXISTS "model_probe_key_results"');
-    expect(mysqlUpgrade).toContain('ADD COLUMN `model_probe_enabled` BOOLEAN NOT NULL DEFAULT 1');
-    expect(postgresUpgrade).toContain('ADD COLUMN "model_probe_enabled" BOOLEAN NOT NULL DEFAULT 1');
+    expect(mysqlUpgrade).toContain('ADD COLUMN `model_probe_enabled` BOOLEAN NOT NULL DEFAULT true');
+    expect(postgresUpgrade).toContain('ADD COLUMN "model_probe_enabled" BOOLEAN NOT NULL DEFAULT true');
   });
 });
