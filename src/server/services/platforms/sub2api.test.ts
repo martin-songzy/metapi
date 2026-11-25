@@ -1,7 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { Sub2ApiAdapter } from './sub2api.js';
+
+vi.mock('../siteProxy.js', () => ({
+  withSiteProxyRequestInit: (_url: string, options: unknown) => options,
+}));
 
 describe('Sub2ApiAdapter', () => {
   let server: ReturnType<typeof createServer> | undefined;
@@ -879,5 +883,161 @@ describe('Sub2ApiAdapter', () => {
     });
 
     await expect(adapter.checkin(baseUrl, 'expired-jwt')).rejects.toThrow();
+  });
+
+  describe('user/checkin compatibility', () => {
+    function sendData(res: ServerResponse, data: unknown) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 0, message: 'success', data }));
+    }
+
+    async function startCompatibilityServer(
+      handler: (req: IncomingMessage, res: ServerResponse) => void,
+      standardStatus = 404,
+    ) {
+      const requests: Array<{ method?: string; url?: string; auth?: string; ui?: string }> = [];
+      await startServer((req, res) => {
+        requests.push({
+          method: req.method,
+          url: req.url,
+          auth: req.headers.authorization,
+          ui: req.headers['x-user-ui-request'] as string | undefined,
+        });
+        if (req.url === '/api/v1/check-in') {
+          res.writeHead(standardStatus, { 'Content-Type': 'text/plain' });
+          res.end('endpoint unavailable');
+          return;
+        }
+        if (req.url === '/api/v1/user/checkin') {
+          handler(req, res);
+          return;
+        }
+        res.writeHead(404).end();
+      });
+      return requests;
+    }
+
+    it.each([404, 405, 501])('falls back after HTTP %i and confirms the claimed reward', async (statusCode) => {
+      let claimed = false;
+      let body = '';
+      const requests = await startCompatibilityServer((req, res) => {
+        if (req.method === 'GET') {
+          sendData(res, { enabled: true, claimed_today: claimed, amount: 300 });
+          return;
+        }
+        req.setEncoding('utf8');
+        req.on('data', (chunk: string) => { body += chunk; });
+        req.on('end', () => {
+          claimed = true;
+          sendData(res, { amount: 300 });
+        });
+      }, statusCode);
+
+      const result = await adapter.checkin(`${baseUrl}/`, 'Bearer jwt-token');
+
+      expect(requests.map(({ method, url }) => `${method} ${url}`)).toEqual([
+        'POST /api/v1/check-in',
+        'GET /api/v1/user/checkin',
+        'POST /api/v1/user/checkin',
+        'GET /api/v1/user/checkin',
+      ]);
+      expect(requests.every(({ auth }) => auth === 'Bearer jwt-token')).toBe(true);
+      expect(requests.slice(1).every(({ ui }) => ui === '1')).toBe(true);
+      expect(body).toBe('{}');
+      expect(result.success).toBe(true);
+      expect(result.reward).toBe('300');
+      expect(result.message).toContain('reward 300');
+    });
+
+    it('skips an already claimed day without posting or counting its reward again', async () => {
+      const requests = await startCompatibilityServer((_req, res) => {
+        sendData(res, { enabled: true, claimed_today: true, amount: 300 });
+      });
+
+      const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET']);
+      expect(result.success).toBe(true);
+      expect(result.message).toBe('already checked in today');
+      expect(result.reward).toBeUndefined();
+    });
+
+    it('does not claim when the compatibility endpoint disables check-in', async () => {
+      const requests = await startCompatibilityServer((_req, res) => {
+        sendData(res, { enabled: false });
+      });
+
+      const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET']);
+      expect(result.success).toBe(false);
+      expect(result.message).toContain('not supported');
+    });
+
+    it('treats CHECKIN_ALREADY_CLAIMED as an idempotent success after a concurrent claim', async () => {
+      const requests = await startCompatibilityServer((req, res) => {
+        if (req.method === 'GET') {
+          sendData(res, { enabled: true, claimed_today: false, amount: 300 });
+          return;
+        }
+        res.writeHead(409, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          code: 409,
+          message: 'already checked in today',
+          reason: 'CHECKIN_ALREADY_CLAIMED',
+        }));
+      });
+
+      const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET', 'POST']);
+      expect(result.success).toBe(true);
+      expect(result.message).toBe('already checked in today');
+      expect(result.reward).toBeUndefined();
+    });
+
+    it.each([401, 403, 429, 500])('preserves HTTP %i from the standard endpoint without falling back', async (statusCode) => {
+      const requests = await startCompatibilityServer((_req, res) => {
+        sendData(res, { enabled: true, claimed_today: true });
+      }, statusCode);
+
+      await expect(adapter.checkin(baseUrl, 'jwt-token')).rejects.toThrow(`HTTP ${statusCode}:`);
+      expect(requests).toHaveLength(1);
+    });
+
+    it.each([
+      JSON.stringify({ code: 409, reason: 'OTHER_CONFLICT', message: 'conflict' }),
+      'not a JSON response',
+    ])('does not mask an unrelated HTTP 409: %s', async (body) => {
+      await startCompatibilityServer((req, res) => {
+        if (req.method === 'GET') {
+          sendData(res, { enabled: true, claimed_today: false });
+          return;
+        }
+        res.writeHead(409).end(body);
+      });
+
+      await expect(adapter.checkin(baseUrl, 'jwt-token')).rejects.toThrow('HTTP 409:');
+    });
+
+    it('rejects an incompatible status schema before claiming', async () => {
+      const requests = await startCompatibilityServer((_req, res) => {
+        sendData(res, { reason: 'available', day: '2026-11-25' });
+      });
+
+      await expect(adapter.checkin(baseUrl, 'jwt-token')).rejects.toThrow('Invalid check-in status');
+      expect(requests).toHaveLength(2);
+    });
+
+    it('rejects a successful POST when the status still says unclaimed', async () => {
+      const requests = await startCompatibilityServer((req, res) => {
+        sendData(res, req.method === 'GET'
+          ? { enabled: true, claimed_today: false, amount: 300 }
+          : { amount: 300 });
+      });
+
+      await expect(adapter.checkin(baseUrl, 'jwt-token')).rejects.toThrow('Check-in was not confirmed');
+      expect(requests).toHaveLength(4);
+    });
   });
 });

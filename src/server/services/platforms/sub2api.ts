@@ -704,19 +704,27 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     }
   }
 
-  // --- Check-in: POST /api/v1/check-in (session JWT only) ---
+  // --- Check-in: standard endpoint with a user/checkin compatibility fallback ---
   async checkin(baseUrl: string, accessToken: string): Promise<CheckinResult> {
     const endpoint = '/api/v1/check-in';
     // Sub2API stalls a POST that declares no body, so always send an explicit
     // Content-Type plus an empty JSON payload.
-    const res = await this.fetchJson<any>(`${normalizeBaseUrl(baseUrl)}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        ...this.buildAuthHeader(accessToken),
-        'Content-Type': 'application/json',
-      },
-      body: '{}',
-    });
+    let res: unknown;
+    try {
+      res = await this.fetchJson<any>(`${normalizeBaseUrl(baseUrl)}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          ...this.buildAuthHeader(accessToken),
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      });
+    } catch (error) {
+      if (error instanceof Error && /^HTTP (?:404|405|501):/.test(error.message)) {
+        return this.checkinThroughUserEndpoint(baseUrl, accessToken);
+      }
+      throw error;
+    }
     const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
 
     if (data?.enabled === false) {
@@ -738,6 +746,67 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     if (streak) messageParts.push(`streak ${streak}`);
 
     const result: CheckinResult = { success: true, message: messageParts.join(', ') };
+    if (rewardText) result.reward = rewardText;
+    return result;
+  }
+
+  private async checkinThroughUserEndpoint(baseUrl: string, accessToken: string): Promise<CheckinResult> {
+    const endpoint = '/api/v1/user/checkin';
+    const url = `${normalizeBaseUrl(baseUrl)}${endpoint}`;
+    const headers = {
+      ...this.buildAuthHeader(accessToken),
+      'X-User-UI-Request': '1',
+    };
+    const fetchStatus = async () => {
+      const res = await this.fetchJson<any>(url, { headers });
+      const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+      if (typeof data?.enabled !== 'boolean'
+        || (data.enabled && typeof data.claimed_today !== 'boolean')) {
+        throw new Error(`Invalid check-in status from ${endpoint}`);
+      }
+      return data;
+    };
+    const status = await fetchStatus();
+    if (!status.enabled) {
+      return { success: false, message: 'Check-in is not supported by Sub2API' };
+    }
+    if (status.claimed_today) {
+      return { success: true, message: 'already checked in today' };
+    }
+
+    let res: unknown;
+    try {
+      res = await this.fetchJson<any>(url, {
+        method: 'POST',
+        headers,
+        body: '{}',
+      });
+    } catch (error) {
+      // A concurrent/manual claim can happen between the status query and POST.
+      // Match the upstream's specific reason, not an arbitrary HTTP 409.
+      const match = error instanceof Error ? /^HTTP 409:\s*([\s\S]+)$/.exec(error.message) : null;
+      if (match) {
+        try {
+          const body = JSON.parse(match[1]);
+          if (body?.reason === 'CHECKIN_ALREADY_CLAIMED') {
+            return { success: true, message: 'already checked in today' };
+          }
+        } catch {}
+      }
+      throw error;
+    }
+    const receipt = this.parseSub2ApiEnvelope<any>(res, endpoint);
+    const verified = await fetchStatus();
+    if (!verified.claimed_today) {
+      throw new Error(`Check-in was not confirmed by ${endpoint}`);
+    }
+    const reward = this.parseNonNegativeNumber(receipt?.amount)
+      ?? this.parseNonNegativeNumber(verified.amount);
+    const rewardText = reward !== undefined && reward > 0 ? String(reward) : undefined;
+    const result: CheckinResult = {
+      success: true,
+      message: rewardText ? `check-in success, reward ${rewardText}` : 'check-in success',
+    };
     if (rewardText) result.reward = rewardText;
     return result;
   }
