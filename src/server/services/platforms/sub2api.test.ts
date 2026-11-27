@@ -885,6 +885,73 @@ describe('Sub2ApiAdapter', () => {
     await expect(adapter.checkin(baseUrl, 'expired-jwt')).rejects.toThrow();
   });
 
+  describe('redeem/checkin compatibility', () => {
+    function sendData(res: ServerResponse, data: unknown) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 0, message: 'success', data }));
+    }
+
+    it('checks status before posting to the redeem endpoint and confirms afterward', async () => {
+      let checkedIn = false;
+      const requests: string[] = [];
+      await startServer((req, res) => {
+        requests.push(`${req.method} ${req.url}`);
+        if (req.url === '/api/v1/check-in') {
+          res.writeHead(404).end('not found');
+          return;
+        }
+        if (req.url !== '/api/v1/redeem/checkin') {
+          res.writeHead(404).end('not found');
+          return;
+        }
+        if (req.method === 'GET') {
+          sendData(res, { checked_in: checkedIn, reward: 10 });
+          return;
+        }
+        checkedIn = true;
+        sendData(res, { checked_in: true, reward: 10 });
+      });
+
+      const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+      expect(requests).toEqual([
+        'POST /api/v1/check-in',
+        'GET /api/v1/redeem/checkin',
+        'POST /api/v1/redeem/checkin',
+        'GET /api/v1/redeem/checkin',
+      ]);
+      expect(result.success).toBe(true);
+      expect(result.reward).toBe('10');
+      expect(result.message).toContain('reward 10');
+    });
+
+    it('does not post or count a reward if redeem endpoint says already checked in', async () => {
+      const requests: string[] = [];
+      await startServer((req, res) => {
+        requests.push(`${req.method} ${req.url}`);
+        if (req.url === '/api/v1/check-in') {
+          res.writeHead(404).end('not found');
+          return;
+        }
+        if (req.method === 'GET' && req.url === '/api/v1/redeem/checkin') {
+          sendData(res, { checked_in: true, reward: 10 });
+          return;
+        }
+        res.writeHead(404).end('not found');
+      });
+
+      const result = await adapter.checkin(baseUrl, 'jwt-token');
+
+      expect(requests).toEqual([
+        'POST /api/v1/check-in',
+        'GET /api/v1/redeem/checkin',
+      ]);
+      expect(result.success).toBe(true);
+      expect(result.message).toBe('already checked in today');
+      expect(result.reward).toBeUndefined();
+    });
+  });
+
   describe('user/checkin compatibility', () => {
     function sendData(res: ServerResponse, data: unknown) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -937,12 +1004,13 @@ describe('Sub2ApiAdapter', () => {
 
       expect(requests.map(({ method, url }) => `${method} ${url}`)).toEqual([
         'POST /api/v1/check-in',
+        'GET /api/v1/redeem/checkin',
         'GET /api/v1/user/checkin',
         'POST /api/v1/user/checkin',
         'GET /api/v1/user/checkin',
       ]);
       expect(requests.every(({ auth }) => auth === 'Bearer jwt-token')).toBe(true);
-      expect(requests.slice(1).every(({ ui }) => ui === '1')).toBe(true);
+      expect(requests.slice(2).every(({ ui }) => ui === '1')).toBe(true);
       expect(body).toBe('{}');
       expect(result.success).toBe(true);
       expect(result.reward).toBe('300');
@@ -956,7 +1024,7 @@ describe('Sub2ApiAdapter', () => {
 
       const result = await adapter.checkin(baseUrl, 'jwt-token');
 
-      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET']);
+      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET', 'GET']);
       expect(result.success).toBe(true);
       expect(result.message).toBe('already checked in today');
       expect(result.reward).toBeUndefined();
@@ -969,7 +1037,7 @@ describe('Sub2ApiAdapter', () => {
 
       const result = await adapter.checkin(baseUrl, 'jwt-token');
 
-      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET']);
+      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET', 'GET']);
       expect(result.success).toBe(false);
       expect(result.message).toContain('not supported');
     });
@@ -990,7 +1058,7 @@ describe('Sub2ApiAdapter', () => {
 
       const result = await adapter.checkin(baseUrl, 'jwt-token');
 
-      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET', 'POST']);
+      expect(requests.map(({ method }) => method)).toEqual(['POST', 'GET', 'GET', 'POST']);
       expect(result.success).toBe(true);
       expect(result.message).toBe('already checked in today');
       expect(result.reward).toBeUndefined();
@@ -1026,7 +1094,7 @@ describe('Sub2ApiAdapter', () => {
       });
 
       await expect(adapter.checkin(baseUrl, 'jwt-token')).rejects.toThrow('Invalid check-in status');
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
     });
 
     it('rejects a successful POST when the status still says unclaimed', async () => {
@@ -1037,7 +1105,7 @@ describe('Sub2ApiAdapter', () => {
       });
 
       await expect(adapter.checkin(baseUrl, 'jwt-token')).rejects.toThrow('Check-in was not confirmed');
-      expect(requests).toHaveLength(4);
+      expect(requests).toHaveLength(5);
     });
   });
 });

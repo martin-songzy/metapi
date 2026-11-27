@@ -721,7 +721,14 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
       });
     } catch (error) {
       if (error instanceof Error && /^HTTP (?:404|405|501):/.test(error.message)) {
-        return this.checkinThroughUserEndpoint(baseUrl, accessToken);
+        try {
+          return await this.checkinThroughRedeemEndpoint(baseUrl, accessToken);
+        } catch (fallbackError) {
+          if (fallbackError instanceof Error && /^HTTP (?:404|405|501):/.test(fallbackError.message)) {
+            return this.checkinThroughUserEndpoint(baseUrl, accessToken);
+          }
+          throw fallbackError;
+        }
       }
       throw error;
     }
@@ -746,6 +753,55 @@ export class Sub2ApiAdapter extends BasePlatformAdapter {
     if (streak) messageParts.push(`streak ${streak}`);
 
     const result: CheckinResult = { success: true, message: messageParts.join(', ') };
+    if (rewardText) result.reward = rewardText;
+    return result;
+  }
+
+  private async checkinThroughRedeemEndpoint(baseUrl: string, accessToken: string): Promise<CheckinResult> {
+    const endpoint = '/api/v1/redeem/checkin';
+    const url = `${normalizeBaseUrl(baseUrl)}${endpoint}`;
+    const headers = this.buildAuthHeader(accessToken);
+    const fetchStatus = async () => {
+      const res = await this.fetchJson<any>(url, { headers });
+      const data = this.parseSub2ApiEnvelope<any>(res, endpoint);
+      if (typeof data?.checked_in !== 'boolean'
+        || this.parseNonNegativeNumber(data?.reward) === undefined) {
+        throw new Error(`Invalid check-in status from ${endpoint}`);
+      }
+      return data;
+    };
+
+    const status = await fetchStatus();
+    const availableReward = this.parseNonNegativeNumber(status.reward);
+    if (status.checked_in) {
+      return { success: true, message: 'already checked in today' };
+    }
+    if (availableReward === undefined || availableReward <= 0) {
+      return { success: false, message: 'Check-in is not supported by Sub2API' };
+    }
+
+    const res = await this.fetchJson<any>(url, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    const receipt = this.parseSub2ApiEnvelope<any>(res, endpoint);
+    const verified = await fetchStatus();
+    if (!verified.checked_in) {
+      throw new Error(`Check-in was not confirmed by ${endpoint}`);
+    }
+
+    const reward = this.parseNonNegativeNumber(receipt?.reward)
+      ?? this.parseNonNegativeNumber(receipt?.amount)
+      ?? this.parseNonNegativeNumber(verified.reward);
+    const rewardText = reward !== undefined && reward > 0 ? String(reward) : undefined;
+    const result: CheckinResult = {
+      success: true,
+      message: rewardText ? `check-in success, reward ${rewardText}` : 'check-in success',
+    };
     if (rewardText) result.reward = rewardText;
     return result;
   }
